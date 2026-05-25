@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# silicon-chat-frontend
 
-## Getting Started
+Next.js 15 (App Router) test client for the [silicon-chat backend](../silicon-chat-backend/). Real chat UI **plus** a `/dev` endpoint explorer. Light-mode-only, styled after [siliconfriendly.com](https://siliconfriendly.com/) — minimalist, monochrome with a teal accent.
 
-First, run the development server:
+## Quickstart
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+# 1. Backend must be running on http://127.0.0.1:8000
+#    cd ../silicon-chat-backend && uv run python manage.py runserver
+
+# 2. Install + boot the frontend
+pnpm install
+cp .env.example .env.local   # only if you want to override the defaults
 pnpm dev
-# or
-bun dev
+# → http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## What's where
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Route | Purpose |
+| --- | --- |
+| `/` | Bounces you to `/auth/login` or `/chat` based on whether you have a session. |
+| `/auth/register` | 3-step register: phone OTP → email OTP → username. Phone/email order doesn't matter. The **fetch dev code** button hits `/api/v1/dev/last-otp` so you can complete the flow without real SMS/email. |
+| `/auth/login` | 2-step login: identifier (phone/email/username) → OTP. |
+| `/chat` | Element-style chat surface. Room list on the left, timeline + composer on the right. Sends text / files / images / TTS voice notes. Live WS updates: new events, deltas, progress, read receipts, take-back. |
+| `/dev` | Raw endpoint explorer. One card per endpoint, with inputs + run button + JSON response. Plus a live WS event log tab. |
+| `/settings` | Profile, take-back policy editor, paste-a-silicon-key (so you can test the same UI as a silicon). |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## How OTPs work in dev
 
-## Learn More
+The backend's `[dev-sms]` and `[dev-email]` log lines print the code to the Django server logs — but you don't need to scrape them. The backend exposes `GET /api/v1/dev/last-otp?target=<phone-or-email>` (gated on `settings.DEBUG`) that brute-forces the most recent stored sha256 hash back to the 6-digit code. The **fetch dev code** button on auth pages calls this for you.
 
-To learn more about Next.js, take a look at the following resources:
+In production this endpoint 404s, so the brute-force trick stays a dev-only thing.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Auth model
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Carbons authenticate with a JWT pair (access + refresh). Both are stored in `localStorage` under `silicon-chat:access` / `silicon-chat:refresh`.
+- Silicons authenticate with an API key in `X-Silicon-Key`. The settings page lets you paste one to test the same UI as a silicon.
+- The API client (`src/lib/api.ts`) automatically attaches whichever credential is present. If both are set, the silicon key wins (matches backend behavior — `SiliconKeyAuthentication` runs first).
 
-## Deploy on Vercel
+## Styling
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Light mode only. Tailwind v4 with `@theme` tokens in `src/app/globals.css`. shadcn-style UI primitives in `src/components/ui/`. Geist Sans for body, Geist Mono for code/data. Accent color is `#0891b2` (cyan-600 teal).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+If you want dark mode later, add a `[data-theme="dark"]` block to `globals.css` and a theme toggle — the components already use the CSS variables.
+
+## Project layout
+
+```
+src/
+├── app/
+│   ├── layout.tsx, page.tsx, globals.css
+│   ├── auth/{layout, register, login}/page.tsx
+│   ├── chat/{layout, page}.tsx
+│   ├── dev/{layout, page}.tsx
+│   └── settings/{layout, page}.tsx
+├── components/
+│   ├── ui/                  # shadcn-style primitives (button, input, dialog, …)
+│   ├── chat/                # room-list, room-view, composer, message-bubble, …
+│   └── dev/                 # endpoint-card, ws-log
+└── lib/
+    ├── api.ts               # typed fetch wrapper for every backend endpoint
+    ├── auth.ts              # JWT + silicon-key store + useAuth hook
+    ├── ws.ts                # useChatSocket hook
+    ├── env.ts               # apiBase / wsBase
+    ├── types.ts             # shared TS types matching the backend serializers
+    └── utils.ts             # cn(), relativeTime(), shortId()
+```
+
+## Build / lint
+
+```bash
+pnpm dev                  # dev server
+pnpm build                # production build
+pnpm exec tsc --noEmit    # type check
+pnpm lint
+```

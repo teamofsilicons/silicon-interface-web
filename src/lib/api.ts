@@ -81,11 +81,11 @@ export const api = {
 
   // -------- registration --------
   registerPhoneStart: (phone: string, flow_id?: string) =>
-    call<{ flow_id: string }>("POST", "/api/v1/auth/register/phone/start", { phone, flow_id }, { auth: false }),
+    call<{ flow_id?: string; existing?: boolean }>("POST", "/api/v1/auth/register/phone/start", { phone, flow_id }, { auth: false }),
   registerPhoneVerify: (flow_id: string, phone: string, code: string) =>
     call<{ verified: boolean }>("POST", "/api/v1/auth/register/phone/verify", { flow_id, phone, code }, { auth: false }),
   registerEmailStart: (flow_id: string, email: string) =>
-    call<unknown>("POST", "/api/v1/auth/register/email/start", { flow_id, email }, { auth: false }),
+    call<{ existing?: boolean }>("POST", "/api/v1/auth/register/email/start", { flow_id, email }, { auth: false }),
   registerEmailVerify: (flow_id: string, email: string, code: string) =>
     call<{ verified: boolean }>("POST", "/api/v1/auth/register/email/verify", { flow_id, email, code }, { auth: false }),
   registerUsername: (flow_id: string, username?: string) =>
@@ -94,6 +94,13 @@ export const api = {
   // -------- login --------
   loginStart: (identifier: string) =>
     call<LoginStartResponse>("POST", "/api/v1/auth/login/start", { identifier }, { auth: false }),
+  loginSelectChannel: (challenge_id: string, channel: "sms" | "email") =>
+    call<LoginStartResponse>(
+      "POST",
+      "/api/v1/auth/login/select-channel",
+      { challenge_id, channel },
+      { auth: false },
+    ),
   loginVerify: (challenge_id: string, code: string) =>
     call<JwtPair>("POST", "/api/v1/auth/login/verify", { challenge_id, code }, { auth: false }),
   refresh: (refresh: string) =>
@@ -122,6 +129,17 @@ export const api = {
       "POST",
       `/api/v1/silicons/${silicon_id}/api-keys`,
       { label },
+    ),
+  siliconKeys: (silicon_id: string) =>
+    call<{ id: number; prefix: string; label: string; created_at: string; revoked_at: string | null }[]>(
+      "GET",
+      `/api/v1/silicons/${silicon_id}/api-keys`,
+    ),
+  revokeSiliconKey: (silicon_id: string, key_id: number) =>
+    call<{ id: number; prefix: string; revoked_at: string | null }>(
+      "POST",
+      `/api/v1/silicons/${silicon_id}/api-keys/${key_id}/revoke`,
+      {},
     ),
 
   // -------- chat --------

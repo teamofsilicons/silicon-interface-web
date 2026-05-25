@@ -58,7 +58,8 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
         <DialogHeader>
           <DialogTitle>new direct conversation</DialogTitle>
           <DialogDescription>
-            DM another carbon (by username/email/phone/carbon_id) or a silicon (by name/silicon_id).
+            Start a direct conversation — reach a person by their username, email, or
+            phone, or a silicon by its name.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">

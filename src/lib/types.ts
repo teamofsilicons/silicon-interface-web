@@ -2,6 +2,14 @@
 
 export type Kind = "carbon" | "silicon" | "system";
 
+export type TrustLevel =
+  | "very_low"
+  | "low"
+  | "ok"
+  | "high"
+  | "very_high"
+  | "ultimate";
+
 export type EventType =
   | "m.text"
   | "m.image"
@@ -28,6 +36,7 @@ export interface Carbon {
   phone: string;
   name: string;
   profile_photo_key: string;
+  trust_level: TrustLevel;
   email_verified_at: string | null;
   phone_verified_at: string | null;
   created_at: string;
@@ -38,6 +47,7 @@ export interface CarbonPublic {
   username: string;
   name: string;
   profile_photo_key: string;
+  trust_level: TrustLevel;
 }
 
 export interface Silicon {
@@ -74,6 +84,7 @@ export interface Event {
   room: number;
   sender_kind: Kind;
   sender_id: number | null;
+  sender_handle: string | null; // carbon username (== carbon_id) or silicon name
   type: EventType;
   content: Record<string, unknown>;
   reply_to_event_id: string;
@@ -110,9 +121,19 @@ export interface AuthSession {
   refresh: string;
 }
 
+export type LoginChannel = "sms" | "email";
+
+export interface LoginChannelOption {
+  channel: LoginChannel;
+  label: string; // masked target, e.g. "a***e@example.com" / "+1******7777"
+}
+
 export interface LoginStartResponse {
   challenge_id: string;
-  channels: string[];
+  status: "sent" | "choose_channel";
+  channel?: LoginChannel; // present when status === "sent"
+  sent_to?: string; // masked target when status === "sent"
+  options?: LoginChannelOption[]; // present when status === "choose_channel"
 }
 
 export interface DevOtpResponse {
@@ -137,6 +158,7 @@ export type WsFrame =
   | { type: "event"; room_id: string; event: Event }
   | { type: "event.delta"; room_id: string; event_id: string; delta: string; seq: number }
   | { type: "event.final"; room_id: string; event_id: string }
+  | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
   | {
       type: "read_receipt";
       room_id: string;

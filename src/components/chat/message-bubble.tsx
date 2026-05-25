@@ -57,18 +57,26 @@ export function MessageBubble({ event, isMine, isOwnSilicon, onTakeBack }: Props
   }
 
   const redacted = event.redacted_at !== null;
-  const senderLabel =
-    event.sender_kind === "silicon"
+  // Prefer the sender's handle (carbon username == carbon_id, or silicon name);
+  // fall back to the kind only if we don't have it (e.g. system events).
+  const senderLabel = event.sender_handle
+    ? `@${event.sender_handle}`
+    : event.sender_kind === "silicon"
       ? "silicon"
       : event.sender_kind === "carbon"
         ? "carbon"
         : "system";
+  const avatarText = event.sender_handle
+    ? event.sender_handle.slice(0, 2).toUpperCase()
+    : event.sender_kind === "silicon"
+      ? "Si"
+      : "Cb";
 
   return (
     <div className={cn("my-1.5 flex w-full gap-2", isMine ? "justify-end" : "justify-start")}>
       {!isMine && (
         <div className="mt-1 flex h-7 w-7 items-center justify-center rounded-full bg-secondary text-[10px] font-medium">
-          {senderLabel === "silicon" ? "Si" : "Cb"}
+          {avatarText}
         </div>
       )}
       <div className={cn("max-w-[70%] space-y-1", isMine && "items-end")}>

@@ -52,6 +52,12 @@ export function RoomView({ room, socket }: Props) {
     };
   }, [room.room_id]);
 
+  // Make sure the socket is subscribed to this room (covers rooms opened after
+  // the initial WS connect, which the consumer didn't auto-join).
+  React.useEffect(() => {
+    if (socket.ready) socket.send({ type: "subscribe", room_id: room.room_id });
+  }, [socket.ready, room.room_id, socket.send]);
+
   // Apply WS frames
   React.useEffect(() => {
     const f = socket.lastFrame;
@@ -79,6 +85,14 @@ export function RoomView({ room, socket }: Props) {
     } else if (f.type === "event.final") {
       setEvents((prev) =>
         prev.map((e) => (e.event_id === f.event_id ? { ...e, is_final: true } : e)),
+      );
+    } else if (f.type === "event.transcript") {
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.event_id === f.event_id
+            ? { ...e, content: { ...e.content, transcript: f.transcript } }
+            : e,
+        ),
       );
     } else if (f.type === "take_back") {
       setEvents((prev) =>

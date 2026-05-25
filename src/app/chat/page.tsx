@@ -37,6 +37,14 @@ export default function ChatPage() {
     refresh();
   }, [refresh]);
 
+  // Keep the socket subscribed to every room we know about. The consumer only
+  // auto-joins rooms that existed at connect time, so rooms created or opened
+  // later (e.g. a fresh DM) need an explicit subscribe to get live fan-out.
+  React.useEffect(() => {
+    if (!socket.ready) return;
+    for (const r of rooms) socket.send({ type: "subscribe", room_id: r.room_id });
+  }, [socket.ready, rooms, socket.send]);
+
   // When a new event arrives in a room we don't yet have locally, refresh.
   React.useEffect(() => {
     if (!socket.lastFrame) return;

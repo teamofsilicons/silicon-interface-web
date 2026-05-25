@@ -51,10 +51,10 @@ export default function SettingsPage() {
         <CardContent className="space-y-2 text-sm">
           {carbon ? (
             <>
-              <Row label="username" value={`@${carbon.username}`} />
+              <Row label="id / handle" value={`@${carbon.username}`} />
+              <Row label="trust level" value={carbon.trust_level?.replace("_", " ") ?? "ok"} />
               <Row label="email" value={carbon.email} />
               <Row label="phone" value={carbon.phone} />
-              <Row label="carbon_id" value={carbon.carbon_id} mono />
               <Row label="email verified" value={carbon.email_verified_at ?? "no"} />
               <Row label="phone verified" value={carbon.phone_verified_at ?? "no"} />
             </>

@@ -15,6 +15,9 @@ const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
 >(({ className, ...props }, ref) => (
+  // z-50 — the overlay paints the dim. DialogContent is intentionally
+  // bumped one above this so a production build's portal mount order
+  // can never put the overlay on top of the modal body.
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
@@ -35,7 +38,12 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg",
+        // z-[60] — one layer above the overlay (z-50). Same-z-index +
+        // DOM-order stacking worked in dev but in the production build
+        // (Turbopack + React 19) the portal sometimes mounted the
+        // overlay last, painting it on top of the modal and making the
+        // dialog appear dimmed-out the first time it opened.
+        "fixed left-1/2 top-1/2 z-[60] grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg",
         className,
       )}
       {...props}

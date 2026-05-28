@@ -19,7 +19,10 @@ const PopoverContent = React.forwardRef<
       align={align}
       sideOffset={sideOffset}
       className={cn(
-        "z-50 w-72 border bg-popover p-0 text-popover-foreground outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+        // z-[70] so popovers triggered inside a dialog (e.g. country-code or
+        // timezone pickers in the auth form) still float above the dialog
+        // content at z-[60].
+        "z-[70] w-72 border bg-popover p-0 text-popover-foreground outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
         className,
       )}
       {...props}

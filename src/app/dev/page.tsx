@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 
 import { api } from "@/lib/api";
 
@@ -16,12 +17,20 @@ import { WsLog } from "@/components/dev/ws-log";
 export default function DevPage() {
   return (
     <div className="space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-3xl font-bold tracking-tight">/dev</h1>
-        <p className="text-sm text-muted-foreground">
-          Raw endpoint explorer. Every request is signed with whatever token is in your auth
-          store. Switch between groups below.
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-3xl font-bold tracking-tight">/dev</h1>
+          <p className="text-sm text-muted-foreground">
+            Raw endpoint explorer. Every request is signed with whatever token is in your auth
+            store. Switch between groups below.
+          </p>
+        </div>
+        <Link
+          href="/dev/style-guide"
+          className="shrink-0 text-sm text-muted-foreground transition-colors hover:text-foreground"
+        >
+          style guide ↗
+        </Link>
       </header>
 
       <Tabs defaultValue="profile">
@@ -33,7 +42,7 @@ export default function DevPage() {
           <TabsTrigger value="search">search</TabsTrigger>
           <TabsTrigger value="voice">voice</TabsTrigger>
           <TabsTrigger value="media">media</TabsTrigger>
-          <TabsTrigger value="orgs">orgs</TabsTrigger>
+          <TabsTrigger value="orgs">teams</TabsTrigger>
           <TabsTrigger value="silicons">silicons</TabsTrigger>
           <TabsTrigger value="cost">cost</TabsTrigger>
           <TabsTrigger value="ws">ws log</TabsTrigger>
@@ -487,24 +496,24 @@ function OrgsTab() {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <EndpointCard
-        title="list orgs"
+        title="list teams"
         method="GET"
-        path="/api/v1/orgs/"
+        path="/api/v1/teams/"
         controls={null}
-        run={() => api.orgs()}
+        run={() => api.teams()}
       />
       <EndpointCard
-        title="create org"
+        title="create team"
         method="POST"
-        path="/api/v1/orgs/"
-        description="The creator becomes admin."
+        path="/api/v1/teams/"
+        description="The creator becomes head + admin."
         controls={
           <div className="space-y-1">
             <Label>name</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
           </div>
         }
-        run={() => api.createOrg({ name })}
+        run={() => api.createTeam({ name })}
       />
     </div>
   );
@@ -514,14 +523,14 @@ function SiliconsTab() {
   const [siliconId, setSiliconId] = React.useState("");
   const [label, setLabel] = React.useState("dev");
   const [name, setName] = React.useState("Ada");
-  const [orgSlug, setOrgSlug] = React.useState("");
+  const [teamSlug, setTeamSlug] = React.useState("");
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <EndpointCard
         title="create silicon"
         method="POST"
         path="/api/v1/silicons/"
-        description="You must be an org admin."
+        description="You must be a team admin."
         controls={
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
@@ -529,12 +538,12 @@ function SiliconsTab() {
               <Input value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div className="space-y-1">
-              <Label>org_slug</Label>
-              <Input value={orgSlug} onChange={(e) => setOrgSlug(e.target.value)} />
+              <Label>team_slug</Label>
+              <Input value={teamSlug} onChange={(e) => setTeamSlug(e.target.value)} />
             </div>
           </div>
         }
-        run={() => api.createSilicon({ name, org_slug: orgSlug })}
+        run={() => api.createSilicon({ name, team_slug: teamSlug })}
       />
       <EndpointCard
         title="mint silicon API key"

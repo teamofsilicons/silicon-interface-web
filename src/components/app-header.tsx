@@ -2,87 +2,37 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { LogOut, MessagesSquare, Settings, Wrench } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
-import { cn } from "@/lib/utils";
 
-import { Button } from "@/components/ui/button";
+import { Logo } from "@/components/logo";
+import { IdAvatar } from "@/components/profile/id-avatar";
 
 interface Props {
+  // Retained for layout call-site compatibility; the navbar no longer hosts the
+  // chat/dev/settings tabs, so this is intentionally unused.
   active?: "chat" | "dev" | "settings";
 }
 
-export function AppHeader({ active }: Props) {
-  const router = useRouter();
-  const { carbon, logout } = useAuth();
+export function AppHeader(_: Props) {
+  const { carbon } = useAuth();
   return (
     <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
-      <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-6 py-3">
-        <div className="flex items-center gap-6">
-          <Link href="/" className="text-lg font-bold tracking-tight">
-            silicon-chat
-          </Link>
-          <nav className="hidden items-center gap-1 sm:flex">
-            <NavLink href="/chat" active={active === "chat"} icon={<MessagesSquare />}>
-              chat
-            </NavLink>
-            <NavLink href="/dev" active={active === "dev"} icon={<Wrench />}>
-              dev
-            </NavLink>
-            <NavLink href="/settings" active={active === "settings"} icon={<Settings />}>
-              settings
-            </NavLink>
-          </nav>
-        </div>
-        <div className="flex items-center gap-3 text-sm">
-          {carbon && (
-            <span className="text-muted-foreground">
-              <span className="font-medium text-foreground">@{carbon.username}</span>
-            </span>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              logout();
-              router.push("/auth/login");
-            }}
-            title="log out"
+      <div className="flex w-full items-center justify-between px-6 py-3">
+        <Link href="/" className="flex items-center" aria-label="Silicon Interface — home">
+          <Logo size={26} withWordmark />
+        </Link>
+        {carbon && (
+          <Link
+            href="/settings"
+            aria-label={`@${carbon.username} — profile`}
+            title="profile"
+            className="transition-opacity hover:opacity-80"
           >
-            <LogOut />
-            <span className="hidden sm:inline">log out</span>
-          </Button>
-        </div>
+            <IdAvatar seed={carbon.carbon_id} src={carbon.profile_photo_url} size={32} />
+          </Link>
+        )}
       </div>
     </header>
-  );
-}
-
-function NavLink({
-  href,
-  active,
-  icon,
-  children,
-}: {
-  href: string;
-  active?: boolean;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className={cn(
-        "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors",
-        active
-          ? "bg-secondary text-foreground"
-          : "text-muted-foreground hover:bg-secondary hover:text-foreground",
-      )}
-    >
-      <span className="[&_svg]:size-4">{icon}</span>
-      {children}
-    </Link>
   );
 }

@@ -1,22 +1,19 @@
 import type { Metadata } from "next";
-import { Inter, Geist_Mono } from "next/font/google";
+import { JetBrains_Mono, TikTok_Sans } from "next/font/google";
 import { Toaster } from "sonner";
 
 import "./globals.css";
 
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// Two faces for a more dynamic feel: TikTok Sans is the workhorse (body,
+// labels, chat, UI chrome) and JetBrains Mono is reserved for emphasis —
+// the brand wordmark, KPI numbers, monospace IDs, code, and the .label-mono
+// treatment. Tracking is tightened app-wide in globals.css.
+const tiktokSans = TikTok_Sans({ variable: "--font-tiktok-sans", subsets: ["latin"] });
+const jetbrainsMono = JetBrains_Mono({ variable: "--font-jetbrains", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "silicon chat",
-  description: "Chat between humans and their team of silicons.",
+  title: "Silicon Interface",
+  description: "Where Carbons and Silicons talk, in one thread.",
 };
 
 export default function RootLayout({
@@ -27,7 +24,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${tiktokSans.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
         {children}

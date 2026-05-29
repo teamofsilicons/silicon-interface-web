@@ -35,20 +35,26 @@ export function RoomList({
   onRoomDragEnter,
   onRoomDragLeave,
 }: Props) {
+  // Empty state lives outside the ScrollArea so it can flex-center within
+  // the remaining sidebar height instead of sitting at the top with manual
+  // py-16 padding.
+  if (!loading && rooms.length === 0) {
+    return (
+      <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+          <p className="text-sm text-muted-foreground">No conversations yet.</p>
+          <Button onClick={onNew}>Start a new chat</Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
       <ScrollArea className="flex-1">
         <ul className="divide-y">
           {loading && (
             <li className="py-6 pl-6 pr-4 text-sm text-muted-foreground">loading…</li>
-          )}
-          {!loading && rooms.length === 0 && (
-            <li>
-              <div className="flex flex-col items-center justify-center gap-4 px-6 py-16 text-center">
-                <p className="text-sm text-muted-foreground">No conversations yet.</p>
-                <Button onClick={onNew}>Start a new chat</Button>
-              </div>
-            </li>
           )}
           {rooms.map((r) => {
             const d = roomDisplay(r);

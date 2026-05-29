@@ -155,6 +155,34 @@ summary,
   cursor: pointer;
 }
 
+/* Sonner toast close button — move from top-left to right-center and strip
+   the default chip styling so it reads as a plain × icon. Sonner sets
+   `position`, `top`, and `left` inline, so we have to !important-override
+   them. */
+[data-sonner-toast] [data-close-button] {
+  left: auto !important;
+  right: 12px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  width: 20px !important;
+  height: 20px !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--muted-foreground) !important;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+[data-sonner-toast] [data-close-button]:hover {
+  opacity: 1;
+  background: transparent !important;
+  color: var(--foreground) !important;
+}
+/* The toast itself needs right padding so its body text doesn't run under
+   the close button. */
+[data-sonner-toast] {
+  padding-right: 40px !important;
+}
+
 /* subtle dotted texture for full-page canvases (landing, auth) */
 .bg-dots {
   background-image: radial-gradient(var(--border) 1px, transparent 1px);

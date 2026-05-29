@@ -53,8 +53,10 @@ export default function RootLayout({
                 "!rounded-none !bg-[var(--primary)] !text-[var(--primary-foreground)] !text-xs",
               cancelButton:
                 "!rounded-none !bg-transparent !text-[var(--muted-foreground)] !text-xs",
-              closeButton:
-                "!rounded-none !border-[var(--border)] !bg-[var(--card)] !text-[var(--foreground)]",
+              // Visual treatment is in globals.css under
+              // `[data-sonner-toast] [data-close-button]` — we strip the
+              // chip-like default and pin it right-center as a plain ×.
+              closeButton: "",
               success: "!border-l-2 !border-l-[var(--success)]",
               error: "!border-l-2 !border-l-[var(--destructive)]",
               warning: "!border-l-2 !border-l-[var(--warning)]",

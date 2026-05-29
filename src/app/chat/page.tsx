@@ -11,7 +11,6 @@ import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { cn } from "@/lib/utils";
 
-import { Button } from "@/components/ui/button";
 import { RoomList } from "@/components/chat/room-list";
 import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
@@ -210,10 +209,12 @@ function ChatPageInner() {
           aria-label="resize sidebar"
           className="absolute right-0 top-0 z-10 hidden h-full w-1.5 cursor-col-resize transition-colors hover:bg-border md:block"
         />
-        {/* Search input replaces the "Chats" header. Filters the room list
-            by display name, handle, or last-message body. */}
-        <div className="flex items-center gap-2 border-b py-1.5 pl-6 pr-2">
-          <div className="flex h-9 flex-1 items-center gap-1.5 border border-input bg-transparent px-2 transition-colors focus-within:border-ring">
+        {/* Sidebar header — single border-b row. Search field fills the
+            left flex-1 and reaches the row's full height; a 1px vertical
+            divider separates it from the new-chat (+) button on the right,
+            matching the composer's attach | input | send pattern. */}
+        <div className="flex h-[52px] items-stretch border-b">
+          <div className="flex flex-1 items-center gap-2 pl-6 pr-3 transition-colors focus-within:bg-accent/30">
             <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
             <input
               value={sidebarQuery}
@@ -222,16 +223,15 @@ function ChatPageInner() {
               className="h-full w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
           </div>
-          <Button
-            size="icon"
-            variant="ghost"
+          <button
+            type="button"
             onClick={() => setDialogOpen(true)}
             aria-label="new chat"
             title="new chat"
-            className="h-7 w-7 shrink-0"
+            className="flex w-12 shrink-0 items-center justify-center border-l border-border text-foreground transition-colors hover:bg-accent"
           >
             <Plus />
-          </Button>
+          </button>
         </div>
         <TeamFilterBar
           teams={teams}

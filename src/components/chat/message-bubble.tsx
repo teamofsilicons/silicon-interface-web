@@ -196,7 +196,10 @@ export function MessageBubble({
             redacted
               ? "border bg-muted text-muted-foreground italic"
               : isMine
-                ? "bg-primary text-primary-foreground"
+                // Selection colors are inverted on sent bubbles — the global
+                // ::selection rule paints ink-on-ink, which is invisible on
+                // top of bg-primary (ink). Flip to cream-on-ink here.
+                ? "bg-primary text-primary-foreground selection:bg-primary-foreground selection:text-primary"
                 : "border bg-bubble-received",
           )}
           // Double-click anywhere on a non-redacted bubble triggers a reply

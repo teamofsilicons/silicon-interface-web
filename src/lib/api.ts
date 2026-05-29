@@ -320,6 +320,13 @@ export const api = {
       `/api/v1/events/${event_id}/take_back`,
       { reason, force },
     ),
+  /** Carbon self-delete: works within 5 minutes of authoring the event. */
+  deleteEvent: (event_id: string) =>
+    call<{ ok: boolean } | { detail: string }>(
+      "POST",
+      `/api/v1/events/${event_id}/delete`,
+      {},
+    ),
 
   // -------- sessions --------
   sessionNew: (room_id: string, summary = "") =>

@@ -2,14 +2,19 @@
 
 import * as React from "react";
 import {
+  ArrowBendUpLeft,
   Check,
   Checks,
+  Copy,
   DotsThree,
   MusicNote,
+  Share,
+  Smiley,
   Sparkle,
   Trash,
   WarningCircle,
 } from "@phosphor-icons/react/dist/ssr";
+import { toast } from "sonner";
 
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
@@ -23,8 +28,18 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+
+const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
+
+const FIVE_MIN_MS = 5 * 60 * 1000;
 
 export type MessageStatus =
   | "pending" // optimistic local insert — POST not acked yet
@@ -55,6 +70,16 @@ interface Props {
   showSender?: boolean;
   /** When true the @handle line is dropped — there's only one peer. */
   isDirect?: boolean;
+  /** Per-event reactions, keyed by emoji → list of handles who reacted. */
+  reactions?: Record<string, string[]>;
+  /** Set this event as the active reply target on the composer. */
+  onReply?: (event: Event) => void;
+  /** Toggle one of REACTION_EMOJI on this event. */
+  onReact?: (event: Event, emoji: string) => void;
+  /** Open a forward picker (a no-op stub today). */
+  onForward?: (event: Event) => void;
+  /** Self-delete (5-min carbon window). */
+  onDelete?: (event: Event) => void;
 }
 
 export function MessageBubble({
@@ -68,6 +93,11 @@ export function MessageBubble({
   showTime = true,
   showSender = true,
   isDirect = false,
+  reactions,
+  onReply,
+  onReact,
+  onForward,
+  onDelete,
 }: Props) {
   if (event.type === "m.system") {
     return (
@@ -169,34 +199,50 @@ export function MessageBubble({
                 ? "bg-primary text-primary-foreground"
                 : "border bg-bubble-received",
           )}
+          // Double-click anywhere on a non-redacted bubble triggers a reply
+          // — same as Telegram/iMessage.
+          onDoubleClick={() => !redacted && onReply?.(event)}
         >
           {redacted ? (
             <span>[message redacted: {event.redaction_reason}]</span>
           ) : (
             <Body event={event} />
           )}
-          {isMine && isOwnSilicon && !redacted && onTakeBack && (
-            <div className="absolute right-1 top-1 opacity-0 transition-opacity group-hover:opacity-100">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button size="icon" variant="ghost" className="h-6 w-6 text-primary-foreground/80">
-                    <DotsThree className="h-3 w-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => onTakeBack(event.event_id)}>
-                    <Trash className="mr-2 h-3.5 w-3.5" />
-                    take back (if unread)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => onTakeBack(event.event_id, true)}>
-                    <Trash className="mr-2 h-3.5 w-3.5" />
-                    take back (force)
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+
+          {/* Hover actions: reply / react / more. Floats above the bubble on
+              hover; on mobile, tap-to-reveal is not supported here — a small-
+              screen affordance is a follow-up. */}
+          {!redacted && (onReply || onReact || onForward || onDelete) && (
+            <BubbleActions
+              event={event}
+              isMine={isMine}
+              isOwnSilicon={!!isOwnSilicon}
+              onReply={onReply}
+              onReact={onReact}
+              onForward={onForward}
+              onDelete={onDelete}
+              onTakeBack={onTakeBack}
+            />
           )}
         </div>
+
+        {/* Reaction chips — surfaced under the bubble, grouped by emoji. */}
+        {reactions && Object.keys(reactions).length > 0 && (
+          <div className={cn("flex flex-wrap gap-1", isMine && "justify-end")}>
+            {Object.entries(reactions).map(([emoji, who]) => (
+              <button
+                key={emoji}
+                type="button"
+                onClick={() => onReact?.(event, emoji)}
+                title={who.join(", ")}
+                className="inline-flex items-center gap-1 border bg-card px-1.5 py-0.5 text-[11px] transition-colors hover:bg-accent"
+              >
+                <span>{emoji}</span>
+                <span className="font-mono opacity-70">{who.length}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {/* Time + receipt — rendered only on the last bubble of a (sender,
             minute) run, so a quick back-to-back exchange shows one common
             timestamp instead of one per line. Streaming indicator escapes
@@ -217,6 +263,160 @@ export function MessageBubble({
     </div>
   );
 }
+
+/**
+ * Floating action bar revealed on hover. Three controls:
+ *   • Reply       — sets the message as the composer's reply target.
+ *   • React       — popover with six reactions, fires onReact(event, emoji).
+ *   • More (⋮)    — dropdown with copy text, forward, delete (self, 5 min),
+ *                   take-back (Silicon-only path, only when isOwnSilicon).
+ *
+ * Positioned outside the bubble's rounded corner so it doesn't sit on top
+ * of the message content; flips edge based on who sent the message.
+ */
+function BubbleActions({
+  event,
+  isMine,
+  isOwnSilicon,
+  onReply,
+  onReact,
+  onForward,
+  onDelete,
+  onTakeBack,
+}: {
+  event: Event;
+  isMine: boolean;
+  isOwnSilicon: boolean;
+  onReply?: (event: Event) => void;
+  onReact?: (event: Event, emoji: string) => void;
+  onForward?: (event: Event) => void;
+  onDelete?: (event: Event) => void;
+  onTakeBack?: (eventId: string, force?: boolean) => void;
+}) {
+  // 5-minute self-delete window only applies to my carbon-side messages.
+  const within5Min =
+    Date.now() - new Date(event.created_at).getTime() < FIVE_MIN_MS;
+  const canDelete = isMine && within5Min;
+  const canTakeBack = isMine && isOwnSilicon;
+  const textBody = event.type === "m.text" ? String(event.content.body ?? "") : "";
+  const handleCopy = () => {
+    navigator.clipboard.writeText(textBody).then(
+      () => toast.success("text copied"),
+      () => toast.error("couldn't copy"),
+    );
+  };
+  return (
+    <div
+      className={cn(
+        "absolute -top-3 z-10 hidden gap-0.5 border bg-card p-0.5 transition-opacity group-hover:flex",
+        isMine ? "right-2" : "left-2",
+      )}
+      // Stop propagation so an action click doesn't double-fire onDoubleClick
+      // on the bubble.
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      {onReply && (
+        <ActionIconButton title="reply" onClick={() => onReply(event)}>
+          <ArrowBendUpLeft />
+        </ActionIconButton>
+      )}
+      {onReact && (
+        <Popover>
+          <PopoverTrigger asChild>
+            <ActionIconButton title="react">
+              <Smiley />
+            </ActionIconButton>
+          </PopoverTrigger>
+          <PopoverContent
+            align={isMine ? "end" : "start"}
+            sideOffset={6}
+            className="w-auto !p-0.5"
+          >
+            <div className="flex items-center gap-0.5">
+              {REACTION_EMOJI.map((e) => (
+                <button
+                  key={e}
+                  type="button"
+                  onClick={() => onReact(event, e)}
+                  className="inline-flex h-7 w-7 items-center justify-center text-base transition-colors hover:bg-accent"
+                  title={`react ${e}`}
+                >
+                  {e}
+                </button>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
+      )}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <ActionIconButton title="more options">
+            <DotsThree />
+          </ActionIconButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align={isMine ? "end" : "start"}>
+          {textBody && (
+            <DropdownMenuItem onClick={handleCopy}>
+              <Copy className="mr-2 h-3.5 w-3.5" />
+              copy text
+            </DropdownMenuItem>
+          )}
+          {onReply && (
+            <DropdownMenuItem onClick={() => onReply(event)}>
+              <ArrowBendUpLeft className="mr-2 h-3.5 w-3.5" />
+              reply
+            </DropdownMenuItem>
+          )}
+          {onForward && (
+            <DropdownMenuItem onClick={() => onForward(event)}>
+              <Share className="mr-2 h-3.5 w-3.5" />
+              forward
+            </DropdownMenuItem>
+          )}
+          {(canDelete || canTakeBack) && <DropdownMenuSeparator />}
+          {canDelete && onDelete && (
+            <DropdownMenuItem onClick={() => onDelete(event)}>
+              <Trash className="mr-2 h-3.5 w-3.5" />
+              delete
+            </DropdownMenuItem>
+          )}
+          {canTakeBack && onTakeBack && (
+            <>
+              <DropdownMenuItem onClick={() => onTakeBack(event.event_id)}>
+                <Trash className="mr-2 h-3.5 w-3.5" />
+                take back (if unread)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onTakeBack(event.event_id, true)}>
+                <Trash className="mr-2 h-3.5 w-3.5" />
+                take back (force)
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+const ActionIconButton = React.forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement> & { title: string }
+>(({ children, title, className, ...rest }, ref) => (
+  <button
+    ref={ref}
+    type="button"
+    title={title}
+    aria-label={title}
+    className={cn(
+      "inline-flex h-6 w-6 items-center justify-center text-foreground/70 transition-colors hover:bg-accent hover:text-foreground [&_svg]:h-3.5 [&_svg]:w-3.5",
+      className,
+    )}
+    {...rest}
+  >
+    {children}
+  </button>
+));
+ActionIconButton.displayName = "ActionIconButton";
 
 /**
  * WhatsApp/Telegram-style send-state pip rendered next to the timestamp on

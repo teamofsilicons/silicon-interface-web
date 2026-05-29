@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  ArrowBendUpLeft,
   CircleNotch,
   File as FileIcon,
   FilePdf,
@@ -39,6 +40,9 @@ interface Props {
   /** A file dropped onto the chat surface gets handed in here. */
   droppedFile?: File | null;
   onDroppedFileConsumed?: () => void;
+  /** When set, the next send will carry reply_to_event_id. */
+  replyTo?: Event | null;
+  onClearReply?: () => void;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -96,6 +100,20 @@ function StagedAttachment({ file, onRemove }: { file: File; onRemove: () => void
   );
 }
 
+/** Quick one-line label of an event for the reply preview chip. */
+function previewOf(ev: Event): string {
+  const c = ev.content as Record<string, unknown>;
+  if (ev.type === "m.text") {
+    const body = String(c.body ?? "");
+    return body.length > 80 ? `${body.slice(0, 80)}…` : body;
+  }
+  if (ev.type === "m.image") return "📷 photo";
+  if (ev.type === "m.file") return `📎 ${String(c.caption ?? "attachment")}`;
+  if (ev.type === "m.voice") return "🎙 voice note";
+  if (ev.type === "m.tts") return "🔊 audio";
+  return ev.type;
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -114,6 +132,8 @@ export function Composer({
   onFail,
   droppedFile,
   onDroppedFileConsumed,
+  replyTo,
+  onClearReply,
 }: Props) {
   const [text, setText] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
@@ -160,12 +180,15 @@ export function Composer({
     const payload: OptimisticPayload = {
       type: "m.text",
       content: { body },
+      reply_to_event_id: replyTo?.event_id,
     };
     onOptimisticAdd(clientId, payload);
     api
       .sendEvent(roomId, payload)
       .then((real) => onAck(clientId, real))
       .catch((err) => onFail(clientId, err));
+    // Clear the reply target on send.
+    onClearReply?.();
   };
 
   const send = async () => {
@@ -273,6 +296,27 @@ export function Composer({
 
   return (
     <div className="space-y-2 border-t bg-background p-3">
+      {replyTo && (
+        <div className="flex items-start gap-2 border-l-2 border-foreground/60 bg-card px-2 py-1 text-xs">
+          <ArrowBendUpLeft className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" />
+          <div className="min-w-0 flex-1">
+            <div className="label-mono text-[10px] opacity-60">
+              replying to {replyTo.sender_handle ? `@${replyTo.sender_handle}` : "message"}
+            </div>
+            <div className="truncate text-foreground/80">
+              {previewOf(replyTo)}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClearReply}
+            aria-label="cancel reply"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {file && <StagedAttachment file={file} onRemove={() => setFile(null)} />}
       {/* One container, hairline border, focus-within bumps to ring colour.
           Internal 1px dividers visually separate attach | input | voice/send

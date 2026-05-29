@@ -246,7 +246,7 @@ export function RoomView({ room, socket }: Props) {
     api.read(room.room_id, lastTheirsEventId).catch(() => undefined);
   }, [lastTheirsEventId, room.room_id]);
 
-  // ----- Take-back -----
+  // ----- Take-back / self-delete / react / reply / forward -----
   const onTakeBack = async (eventId: string, force = false) => {
     try {
       const r = await api.takeBack(eventId, "manual", force);
@@ -256,6 +256,72 @@ export function RoomView({ room, socket }: Props) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     }
   };
+
+  const onSelfDelete = async (ev: Event) => {
+    // Optimistically mark redacted so the bubble updates instantly.
+    setEvents((prev) =>
+      prev.map((e) =>
+        e.event_id === ev.event_id
+          ? {
+              ...e,
+              redacted_at: new Date().toISOString(),
+              redaction_reason: "self_delete",
+              content: { redacted: true, reason: "self_delete" },
+            }
+          : e,
+      ),
+    );
+    try {
+      const r = await api.deleteEvent(ev.event_id);
+      if (r && "detail" in r) toast.error(r.detail);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    }
+  };
+
+  const onReact = async (ev: Event, emoji: string) => {
+    // Reactions are normal events of type m.reaction; the WS echo will fold
+    // them into the reaction map below.
+    try {
+      await api.sendEvent(room.room_id, {
+        type: "m.reaction",
+        content: { emoji },
+        reply_to_event_id: ev.event_id,
+      });
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    }
+  };
+
+  const [replyTo, setReplyTo] = React.useState<Event | null>(null);
+  const onReply = (ev: Event) => setReplyTo(ev);
+  const onForward = () => toast.info("forwarding coming next pass");
+
+  // Aggregate reactions: target_event_id → { emoji → [sender_handle] }
+  const reactionsByTarget = React.useMemo(() => {
+    const map = new Map<string, Record<string, string[]>>();
+    for (const e of events) {
+      if (e.type !== "m.reaction") continue;
+      if (e.redacted_at) continue;
+      const target = e.reply_to_event_id;
+      const emoji = String((e.content as { emoji?: unknown }).emoji ?? "");
+      if (!target || !emoji) continue;
+      const bucket = map.get(target) ?? {};
+      const who = bucket[emoji] ?? [];
+      if (e.sender_handle && !who.includes(e.sender_handle)) {
+        who.push(e.sender_handle);
+      }
+      bucket[emoji] = who;
+      map.set(target, bucket);
+    }
+    return map;
+  }, [events]);
+
+  // Visible events drop reactions — they render as chips under the target.
+  const visibleEvents = React.useMemo(
+    () => events.filter((e) => e.type !== "m.reaction"),
+    [events],
+  );
 
   // ----- Optimistic send plumbing -----
   const onOptimisticAdd = React.useCallback(
@@ -350,9 +416,9 @@ export function RoomView({ room, socket }: Props) {
 
   // ----- Search filter -----
   const filteredEvents = React.useMemo(() => {
-    if (!search) return events;
+    if (!search) return visibleEvents;
     const s = search.toLowerCase();
-    return events.filter((e) => {
+    return visibleEvents.filter((e) => {
       const body = String(e.content.body ?? "");
       const caption = String(e.content.caption ?? "");
       return (
@@ -361,7 +427,7 @@ export function RoomView({ room, socket }: Props) {
         (e.sender_handle ?? "").toLowerCase().includes(s)
       );
     });
-  }, [events, search]);
+  }, [visibleEvents, search]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -472,6 +538,11 @@ export function RoomView({ room, socket }: Props) {
                   onTakeBack={onTakeBack}
                   showSender={showSender}
                   showTime={showTime}
+                  reactions={reactionsByTarget.get(e.event_id) ?? undefined}
+                  onReply={onReply}
+                  onReact={onReact}
+                  onForward={onForward}
+                  onDelete={onSelfDelete}
                 />
               );
             })
@@ -488,6 +559,8 @@ export function RoomView({ room, socket }: Props) {
         onFail={onFail}
         droppedFile={droppedFile}
         onDroppedFileConsumed={() => setDroppedFile(null)}
+        replyTo={replyTo}
+        onClearReply={() => setReplyTo(null)}
       />
 
       {/* Visual hint while a file is hovering over the chat surface. */}

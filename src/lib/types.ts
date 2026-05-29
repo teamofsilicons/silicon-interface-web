@@ -11,7 +11,8 @@ export type EventType =
   | "m.progress"
   | "m.session_marker"
   | "m.take_back"
-  | "m.system";
+  | "m.system"
+  | "m.reaction";
 
 export type ProgressState =
   | "reading_file"

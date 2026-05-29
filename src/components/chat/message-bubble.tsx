@@ -402,6 +402,18 @@ function BubbleActions({
   );
 }
 
+/** Telegram-style chip rendered above a forwarded bubble's body. */
+function ForwardedFromChip({ handle }: { handle: string }) {
+  return (
+    <div className="flex items-center gap-1 border-l-2 border-foreground/40 bg-foreground/5 pl-2 py-0.5 text-[10px] text-foreground/80">
+      <Share className="h-3 w-3 opacity-60" />
+      <span>
+        Forwarded from <span className="font-medium">@{handle}</span>
+      </span>
+    </div>
+  );
+}
+
 const ActionIconButton = React.forwardRef<
   HTMLButtonElement,
   React.ButtonHTMLAttributes<HTMLButtonElement> & { title: string }
@@ -458,12 +470,19 @@ function Receipt({ status }: { status: MessageStatus }) {
 
 function Body({ event }: { event: Event }) {
   const c = event.content;
+  // #17 — forwarded chip rendered at the top of the bubble body. Telegram
+  // style: "Forwarded from @alice".
+  const forwarded = (c as { forward_from?: { sender_handle?: string } }).forward_from;
+  const forwardedFrom = forwarded?.sender_handle ?? null;
   switch (event.type) {
     case "m.text":
       return (
-        <div className="whitespace-pre-wrap break-words">
-          {renderMarkdown(String(c.body ?? ""))}
-          {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
+        <div className="space-y-1">
+          {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} />}
+          <div className="whitespace-pre-wrap break-words">
+            {renderMarkdown(String(c.body ?? ""))}
+            {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
+          </div>
         </div>
       );
     case "m.image":

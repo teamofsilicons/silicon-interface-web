@@ -15,12 +15,15 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { Composer, type OptimisticPayload } from "@/components/chat/composer";
+import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProgressCard, type ProgressEntry } from "@/components/chat/progress-card";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 
 interface Props {
   room: Room;
+  /** Full room list passed down so forward picker has its choices. */
+  allRooms: Room[];
   socket: {
     ready: boolean;
     lastFrame: WsFrame | null;
@@ -38,7 +41,7 @@ const TEMP_ID = (clientId: string) => `temp-${clientId}`;
 // and any out-of-band events fresh even if the WS connection blips.
 const POLL_INTERVAL_MS = 10_000;
 
-export function RoomView({ room, socket }: Props) {
+export function RoomView({ room, allRooms, socket }: Props) {
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
@@ -360,7 +363,11 @@ export function RoomView({ room, socket }: Props) {
 
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const onReply = (ev: Event) => setReplyTo(ev);
-  const onForward = () => toast.info("forwarding coming next pass");
+
+  // #17 — Forward picker. Setting `forwardingEvent` opens the dialog; the
+  // dialog handles room selection and re-posting with forward_from metadata.
+  const [forwardingEvent, setForwardingEvent] = React.useState<Event | null>(null);
+  const onForward = (ev: Event) => setForwardingEvent(ev);
 
   // Aggregate reactions: target_event_id → { emoji → [sender_handle] }
   const reactionsByTarget = React.useMemo(() => {
@@ -632,6 +639,14 @@ export function RoomView({ room, socket }: Props) {
 
       {/* Visual hint while a file is hovering over the chat surface. */}
       <DropOverlay visible={isDropTarget} />
+
+      <ForwardDialog
+        open={!!forwardingEvent}
+        onOpenChange={(v) => !v && setForwardingEvent(null)}
+        event={forwardingEvent}
+        rooms={allRooms}
+        sourceRoomId={room.room_id}
+      />
     </section>
   );
 }

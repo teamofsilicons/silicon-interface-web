@@ -252,7 +252,7 @@ function ChatPageInner() {
       </aside>
 
       {selectedRoom ? (
-        <RoomView room={selectedRoom} socket={socket} />
+        <RoomView room={selectedRoom} allRooms={rooms} socket={socket} />
       ) : (
         <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
           <div className="max-w-md space-y-3 text-center">

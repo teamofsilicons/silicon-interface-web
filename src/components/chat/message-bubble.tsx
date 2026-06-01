@@ -5,6 +5,7 @@ import {
   ArrowBendUpLeft,
   Check,
   Checks,
+  Clock,
   Copy,
   DotsThree,
   DownloadSimple,
@@ -42,6 +43,12 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
 
@@ -59,6 +66,8 @@ interface Props {
   isMine: boolean;
   /** My own handle — used to highlight reactions I've already given. */
   myHandle?: string | null;
+  /** The message this one is replying to, if any — rendered as a quote. */
+  replyToEvent?: Event;
   isOwnSilicon?: boolean;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   /** Send-receipt for messages this Carbon authored. Ignored for received messages. */
@@ -94,6 +103,7 @@ export function MessageBubble({
   event,
   isMine,
   myHandle,
+  replyToEvent,
   isOwnSilicon,
   onTakeBack,
   status,
@@ -232,6 +242,15 @@ export function MessageBubble({
           // — same as Telegram/iMessage.
           onDoubleClick={() => !redacted && onReply?.(event)}
         >
+          {/* Quoted parent so a reply visibly references its target. */}
+          {replyToEvent && !redacted && (
+            <div className="mb-1 border-l-2 border-current/40 pl-2 text-[11px] opacity-70">
+              <div className="font-medium">
+                {replyToEvent.sender_handle ? `@${replyToEvent.sender_handle}` : "message"}
+              </div>
+              <div className="truncate">{replyPreview(replyToEvent)}</div>
+            </div>
+          )}
           {redacted ? (
             <span className="italic">message deleted</span>
           ) : (
@@ -540,15 +559,74 @@ function Receipt({ status }: { status: MessageStatus }) {
             : "failed";
   if (status === "failed")
     return <WarningCircle className="h-3 w-3 text-destructive" aria-label={title} />;
+  // Pending: show a clock until the server actually accepts the message — a
+  // tick would imply it's already sent.
+  if (status === "pending")
+    return <Clock className="h-3 w-3 opacity-60" aria-label={title} />;
   if (status === "delivered")
     return <Checks className="h-3 w-3" aria-label={title} />;
   if (status === "read")
     return <Checks className="h-3 w-3 text-foreground" aria-label={title} />;
+  return <Check className="h-3 w-3" aria-label={title} />;
+}
+
+/** One-line preview of a quoted (replied-to) message. */
+function replyPreview(ev: Event): string {
+  if (ev.redacted_at) return "deleted message";
+  const c = ev.content as Record<string, unknown>;
+  switch (ev.type) {
+    case "m.text":
+      return String(c.body ?? "");
+    case "m.image":
+      return c.caption ? `📷 ${String(c.caption)}` : "📷 photo";
+    case "m.file":
+      return c.caption ? `📎 ${String(c.caption)}` : "📎 attachment";
+    case "m.voice":
+      return c.transcript ? `🎙 ${String(c.transcript)}` : "🎙 voice note";
+    case "m.tts":
+      return c.text ? `🔊 ${String(c.text)}` : "🔊 audio";
+    default:
+      return "message";
+  }
+}
+
+/** A few words of the voice transcript, with a "View transcript" link that
+ *  opens the full text in a small modal. */
+function VoiceTranscript({ text }: { text: string }) {
+  const [open, setOpen] = React.useState(false);
+  const words = text.trim().split(/\s+/);
+  const truncated = words.length > 6;
+  const preview = words.slice(0, 6).join(" ");
   return (
-    <Check
-      className={cn("h-3 w-3", status === "pending" && "opacity-40")}
-      aria-label={title}
-    />
+    <div className="flex items-center gap-1.5 text-xs opacity-70">
+      <span className="min-w-0 truncate italic">
+        “{preview}{truncated ? "…" : ""}”
+      </span>
+      {truncated && (
+        <>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(true);
+            }}
+            className="shrink-0 whitespace-nowrap underline underline-offset-2 hover:opacity-80"
+          >
+            View transcript
+          </button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle>Transcript</DialogTitle>
+              </DialogHeader>
+              <div className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
+                {text}
+              </div>
+            </DialogContent>
+          </Dialog>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -570,6 +648,25 @@ function Body({ event }: { event: Event }) {
         </div>
       );
     case "m.image":
+      return c.media_id ? (
+        <div className="space-y-1.5">
+          <MediaAttachment
+            mediaId={String(c.media_id)}
+            mime={c.mime ? String(c.mime) : undefined}
+            caption={c.caption ? String(c.caption) : undefined}
+            showCaption={false}
+          />
+          {/* The text rides with the image as a normal message line, not a
+              tiny grey caption. */}
+          {c.caption ? (
+            <div className="whitespace-pre-wrap break-words text-sm">
+              {renderMarkdown(String(c.caption))}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <span className="text-xs text-muted-foreground">{String(c.caption ?? "attachment")}</span>
+      );
     case "m.file":
       return c.media_id ? (
         <MediaAttachment
@@ -590,9 +687,7 @@ function Body({ event }: { event: Event }) {
               <MusicNote className="h-4 w-4" /> voice note
             </div>
           )}
-          {c.transcript ? (
-            <div className="text-xs text-muted-foreground">“{String(c.transcript)}”</div>
-          ) : null}
+          {c.transcript ? <VoiceTranscript text={String(c.transcript)} /> : null}
         </div>
       );
     case "m.tts":

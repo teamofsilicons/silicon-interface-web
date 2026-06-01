@@ -26,10 +26,14 @@ export function MediaAttachment({
   mediaId,
   mime,
   caption,
+  showCaption = true,
 }: {
   mediaId: string;
   mime?: string;
   caption?: string;
+  /** When false, the caption isn't rendered here — the bubble shows it as a
+   *  normal message line instead (so image+text reads like a message). */
+  showCaption?: boolean;
 }) {
   const [url, setUrl] = React.useState<string | null>(null);
   const [media, setMedia] = React.useState<MediaObject | null>(null);
@@ -156,7 +160,9 @@ export function MediaAttachment({
             />
             <DownloadOverlay onClick={() => downloadAsset(url, filename)} />
           </div>
-          {caption && <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>}
+          {showCaption && caption && (
+            <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>
+          )}
         </figure>
         <MediaPreviewer
           open={previewOpen}

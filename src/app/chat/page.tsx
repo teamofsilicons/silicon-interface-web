@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { playReceived } from "@/lib/sounds";
 import type { Event, Room } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
@@ -230,12 +231,14 @@ function ChatPageInner() {
       const ev = f.event;
       if (processedRef.current.has(ev.event_id)) return;
       processedRef.current.add(ev.event_id);
+      const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
+      // Received-message sound — global (any room), once per event.
+      if (!mine && isCountableEvent(ev)) playReceived();
       const rid = f.room_id;
       if (!roomsRef.current.some((r) => r.room_id === rid)) {
         void refresh();
         return;
       }
-      const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       const isOpen = selectedRef.current === rid;
       const preview = eventPreview(ev);
       setRooms((prev) =>

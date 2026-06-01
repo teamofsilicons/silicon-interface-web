@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
-import { playReceived, playSent } from "@/lib/sounds";
+import { playSent } from "@/lib/sounds";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -192,12 +192,8 @@ export function RoomView({ room, allRooms, socket }: Props) {
     if (f.type === "event") {
       const incoming = f.event;
       const mine = incoming.sender_handle && incoming.sender_handle === myUsername;
-      // Audible "received" tone for messages from someone else. Skipped when
-      // the event echoes back to me (already played the sent tone) or when
-      // the message is a system/progress event (not interactive).
-      if (!mine && (incoming.type === "m.text" || incoming.type === "m.image" || incoming.type === "m.file" || incoming.type === "m.voice")) {
-        playReceived();
-      }
+      // The received tone is played once, globally, by the chat page (so it
+      // fires for any room, not just the open one).
       setEvents((prev) => {
         const existsIdx = prev.findIndex((e) => e.event_id === incoming.event_id);
         if (existsIdx >= 0) {
@@ -319,9 +315,29 @@ export function RoomView({ room, allRooms, socket }: Props) {
   }, [socket.lastFrame, room.room_id, myUsername]);
 
   // ----- Scroll-to-bottom + auto-read -----
+  const didInitialScrollRef = React.useRef(false);
   React.useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [events.length, progress]);
+    didInitialScrollRef.current = false;
+  }, [room.room_id]);
+  React.useEffect(() => {
+    if (loading) return;
+    const initial = !didInitialScrollRef.current;
+    const jump = () =>
+      endRef.current?.scrollIntoView({
+        behavior: initial ? "auto" : "smooth",
+        block: "end",
+      });
+    // Double rAF runs after layout settles; on first open a delayed pass also
+    // catches late media reflow (images/audio that load taller after paint),
+    // so we land on the true last message instead of just short of it.
+    const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
+    const t = initial ? window.setTimeout(jump, 350) : undefined;
+    didInitialScrollRef.current = true;
+    return () => {
+      cancelAnimationFrame(raf);
+      if (t) window.clearTimeout(t);
+    };
+  }, [events.length, progress, loading, room.room_id]);
 
   // Auto-read: derive the latest event from someone other than me, and only
   // POST when *that event_id* changes. The previous version depended on the
@@ -458,6 +474,13 @@ export function RoomView({ room, allRooms, socket }: Props) {
     () => events.filter((e) => e.type !== "m.reaction" && !e.redacted_at),
     [events],
   );
+
+  // Lookup so a reply can render the message it's quoting.
+  const eventById = React.useMemo(() => {
+    const m = new Map<string, LocalEvent>();
+    for (const e of events) m.set(e.event_id, e);
+    return m;
+  }, [events]);
 
   // ----- Optimistic send plumbing -----
   const onOptimisticAdd = React.useCallback(
@@ -671,6 +694,9 @@ export function RoomView({ room, allRooms, socket }: Props) {
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
                   myHandle={myUsername}
+                  replyToEvent={
+                    e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined
+                  }
                   isDirect={room.kind === "direct"}
                   status={e._status}
                   senderPhotoUrl={photoFor(e.sender_handle)}

@@ -143,6 +143,11 @@ export function RoomList({
                           <span className="inline-flex items-center gap-1 align-middle">
                             <Microphone className="h-3 w-3 shrink-0" /> voice note
                           </span>
+                        ) : r.last_event?.type === "m.file" ? (
+                          // Long filenames: ellipsis in the MIDDLE so the
+                          // extension stays visible (the <p> still end-truncates
+                          // as a width fallback).
+                          fileNamePreview(r.last_event.preview)
                         ) : (
                           r.last_event?.preview || d.subtitle
                         )}
@@ -179,4 +184,22 @@ export function RoomList({
       </ScrollArea>
     </div>
   );
+}
+
+/** Collapse a long string in the middle, keeping a file extension visible. */
+function middleEllipsis(s: string, max = 30): string {
+  if (s.length <= max) return s;
+  const dot = s.lastIndexOf(".");
+  const ext = dot > 0 && s.length - dot <= 6 ? s.slice(dot) : "";
+  const base = ext ? s.slice(0, s.length - ext.length) : s;
+  const keep = Math.max(6, max - ext.length - 1);
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return `${base.slice(0, head)}…${base.slice(base.length - tail)}${ext}`;
+}
+
+/** A file last-event preview ("📎 name") with the filename middle-truncated. */
+function fileNamePreview(preview: string): string {
+  const m = preview.match(/^(📎\s*)(.*)$/);
+  return m ? `${m[1]}${middleEllipsis(m[2])}` : middleEllipsis(preview);
 }

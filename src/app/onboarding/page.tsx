@@ -33,7 +33,7 @@ const SCREENS: Screen[] = [
   },
   {
     text: () =>
-      "Before we begin, some context:\nCarbon is… You; all the human elements in the play. And Silicon… well you will know once you talk to one. Let's get you started…",
+      "Before we begin, some context:\nCarbon is… You; all the human elements in the play. And Silicon… well you will know once you talk to one. Let's get you started.",
   },
   {
     text: () =>
@@ -261,7 +261,7 @@ function OnboardingInner() {
         <div className="w-full max-w-lg space-y-7">
           <div
             onClick={skipTyping}
-            className="min-h-[140px] cursor-text whitespace-pre-wrap text-lg leading-relaxed"
+            className="min-h-[140px] cursor-text whitespace-pre-wrap text-lg font-medium leading-relaxed"
             title="click to skip"
           >
             {revealed}

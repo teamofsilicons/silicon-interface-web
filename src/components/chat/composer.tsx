@@ -96,6 +96,11 @@ interface Props {
 const MIN_ROWS = 1;
 const MAX_ROWS = 12;
 
+// Emoji quick-picker is a fixed grid so keyboard nav is true 2-D: ←/→ move one
+// cell, ↑/↓ move a whole row (EMOJI_COLS cells).
+const EMOJI_COLS = 8;
+const EMOJI_LIMIT = EMOJI_COLS * 4; // 4 rows
+
 /**
  * Renders the file the user has queued to send. Images get a real thumbnail
  * via `URL.createObjectURL`; everything else gets a type-appropriate icon.
@@ -153,7 +158,9 @@ function StagedAttachment({
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">{file.name}</div>
         <div className="label-mono text-[10px] text-muted-foreground">
-          {uploading ? `uploading… ${uploadPct}%` : formatBytes(file.size)}
+          {uploading
+            ? `${formatBytes((file.size * (uploadPct ?? 0)) / 100)} / ${formatBytes(file.size)} (${uploadPct}%)`
+            : formatBytes(file.size)}
         </div>
       </div>
       <Button
@@ -181,10 +188,13 @@ function EmojiQuickPicker({
   selectedIndex: number;
   onPick: (emoji: string) => void;
 }) {
-  const results = React.useMemo(() => searchEmoji(query, 24), [query]);
+  const results = React.useMemo(() => searchEmoji(query, EMOJI_LIMIT), [query]);
   if (results.length === 0) return null;
   return (
-    <div className="absolute bottom-full left-0 z-50 mb-2 flex max-w-md flex-wrap gap-1 border bg-card p-2 shadow-md">
+    <div
+      className="absolute bottom-full left-0 z-50 mb-2 grid w-max gap-1 border bg-card p-2 shadow-md"
+      style={{ gridTemplateColumns: `repeat(${EMOJI_COLS}, minmax(0, 1fr))` }}
+    >
       {results.map((r, i) => (
         <button
           key={r.name}
@@ -482,6 +492,10 @@ export function Composer({
 
   const onVoiceSubmit = async (blob: Blob, durationMs: number) => {
     setRecording(false);
+    // Show the voice note instantly (with a pending clock) — don't make the
+    // user stare at nothing while it uploads.
+    const clientId = newClientId();
+    onOptimisticAdd(clientId, { type: "m.voice", content: { duration_ms: durationMs } });
     api.activity(roomId, "recording", false).catch(() => undefined);
     api.activity(roomId, "uploading", true).catch(() => undefined);
     setBusy(true);
@@ -509,7 +523,7 @@ export function Composer({
           ...(peaks ? { peaks: peaks.peaks } : {}),
         });
       }
-      await api.sendEvent(roomId, {
+      const real = await api.sendEvent(roomId, {
         type: "m.voice",
         content: {
           media_id: mediaId,
@@ -517,9 +531,9 @@ export function Composer({
           duration_ms: durationMs,
         },
       });
+      onAck(clientId, real);
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : String(e);
-      toast.error(msg);
+      onFail(clientId, e);
     } finally {
       setBusy(false);
       api.activity(roomId, "uploading", false).catch(() => undefined);
@@ -587,7 +601,7 @@ export function Composer({
           while still reading as a single field. */}
       {/* `items-end` docks the fixed-size attach/send buttons to the bottom so
           they keep a constant height while the textarea grows upward. */}
-      <div className="flex items-end border border-input transition-colors focus-within:border-ring">
+      <div className="flex items-end border border-transparent transition-colors focus-within:border-ring">
         <input
           type="file"
           ref={fileInputRef}
@@ -629,17 +643,29 @@ export function Composer({
             rows={MIN_ROWS}
             className="resize-none self-stretch bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
             onKeyDown={(e) => {
-              // Emoji picker keyboard navigation
+              // Emoji picker keyboard navigation — true 2-D grid: ←/→ move one
+              // cell, ↑/↓ move a whole row.
               if (emojiQuery !== null) {
-                const results = searchEmoji(emojiQuery);
-                if (e.key === "ArrowDown") {
+                const results = searchEmoji(emojiQuery, EMOJI_LIMIT);
+                const n = results.length;
+                if (n > 0 && e.key === "ArrowRight") {
                   e.preventDefault();
-                  setEmojiIdx((i) => Math.min(i + 1, results.length - 1));
+                  setEmojiIdx((i) => Math.min(i + 1, n - 1));
                   return;
                 }
-                if (e.key === "ArrowUp") {
+                if (n > 0 && e.key === "ArrowLeft") {
                   e.preventDefault();
                   setEmojiIdx((i) => Math.max(0, i - 1));
+                  return;
+                }
+                if (n > 0 && e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setEmojiIdx((i) => Math.min(i + EMOJI_COLS, n - 1));
+                  return;
+                }
+                if (n > 0 && e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setEmojiIdx((i) => Math.max(0, i - EMOJI_COLS));
                   return;
                 }
                 if (e.key === "Tab" || (e.key === "Enter" && results.length > 0)) {

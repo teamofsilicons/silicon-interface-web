@@ -385,7 +385,7 @@ function OnboardingInner() {
                 ) : (
                   <>
                     {screen.cta ?? "Continue"}
-                    <span className="ml-2 label-mono text-[10px] opacity-70">
+                    <span className="ml-2 label-mono text-[10px] text-white/80">
                       (↵)
                     </span>
                   </>

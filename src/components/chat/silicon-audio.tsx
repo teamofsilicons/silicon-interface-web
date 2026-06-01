@@ -34,13 +34,33 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
   const [internalDurMs, setInternalDurMs] = React.useState<number | null>(null);
 
   const bars = React.useMemo(() => {
-    if (peaks && peaks.length > 0) return peaks;
-    // Synth a gentle wave so a missing peaks projection (older messages,
-    // metadata fetch failed, etc.) still looks intentional rather than
-    // empty. Static deterministic pattern.
-    return Array.from({ length: 48 }, (_, i) =>
-      0.25 + 0.5 * Math.abs(Math.sin(i * 0.6 + Math.cos(i * 0.13))),
-    );
+    const TARGET = 40; // a count that fits the compact player at any width
+    const raw =
+      peaks && peaks.length > 0
+        ? peaks
+        : // Synth a gentle wave so a missing peaks projection (older messages,
+          // metadata fetch failed, etc.) still looks intentional rather than
+          // empty. Static deterministic pattern.
+          Array.from({ length: TARGET }, (_, i) =>
+            0.25 + 0.5 * Math.abs(Math.sin(i * 0.6 + Math.cos(i * 0.13))),
+          );
+    if (raw.length <= TARGET) return raw;
+    // Downsample to TARGET buckets (averaging) so the *entire* waveform is
+    // always visible — flexible bars then fill the width exactly, no clipping.
+    const out: number[] = [];
+    const size = raw.length / TARGET;
+    for (let i = 0; i < TARGET; i++) {
+      const start = Math.floor(i * size);
+      const end = Math.max(start + 1, Math.floor((i + 1) * size));
+      let sum = 0;
+      let n = 0;
+      for (let j = start; j < end && j < raw.length; j++) {
+        sum += raw[j];
+        n += 1;
+      }
+      out.push(n ? sum / n : 0);
+    }
+    return out;
   }, [peaks]);
 
   const dur = durationMs ?? internalDurMs ?? 0;
@@ -65,6 +85,20 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
       a.removeEventListener("ended", onEnd);
     };
   }, [durationMs]);
+
+  // Smooth progress: while playing, drive currentMs from rAF so the waveform
+  // fill glides continuously instead of stepping on each ~250ms 'timeupdate'.
+  React.useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    const tick = () => {
+      const a = audioRef.current;
+      if (a) setCurrentMs(Math.round(a.currentTime * 1000));
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
 
   const toggle = async () => {
     const a = audioRef.current;
@@ -93,7 +127,10 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
   return (
     <div
       className={cn(
-        "flex w-full items-center gap-3 border bg-card px-3 py-2 text-foreground",
+        // Borderless + transparent: the player inherits the bubble's theme via
+        // currentColor (cream controls on a sent ink bubble, ink on a received
+        // cream bubble), so a voice note reads like a normal message.
+        "flex w-full items-center gap-3",
         className,
       )}
     >
@@ -101,12 +138,12 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
         type="button"
         onClick={toggle}
         aria-label={playing ? "pause" : "play"}
-        className="inline-flex h-9 w-9 shrink-0 items-center justify-center border bg-foreground text-background transition-opacity hover:opacity-90"
+        className="inline-flex h-9 w-9 shrink-0 items-center justify-center transition-opacity hover:opacity-70 [&_svg]:h-5 [&_svg]:w-5"
       >
-        {playing ? <Pause /> : <Play />}
+        {playing ? <Pause weight="fill" /> : <Play weight="fill" />}
       </button>
       <Waveform bars={bars} progress={progress} onSeek={seekTo} />
-      <span className="shrink-0 label-mono text-[10px] text-muted-foreground">
+      <span className="shrink-0 label-mono text-[10px] opacity-60">
         {formatTime(currentMs)}/{formatTime(dur)}
       </span>
       {url && (
@@ -136,6 +173,26 @@ function Waveform({
     const x = e.clientX - rect.left;
     onSeek(Math.max(0, Math.min(1, x / rect.width)));
   };
+  // Two identical bar rows stacked: a dim base, and a bright "played" copy
+  // clipped to the exact progress fraction. Because both rows lay out the same
+  // flexible bars, they align perfectly and the clip reveals the fill smoothly
+  // (sub-bar precision) instead of flipping whole bars.
+  const renderBars = (bright: boolean) => (
+    <div className="flex h-full w-full items-center gap-[2px]">
+      {bars.map((v, i) => (
+        <span
+          key={i}
+          className={cn(
+            // flex-1 + a 2px floor: every bar is visible and the whole set
+            // fits the width without clipping or overflowing.
+            "min-w-[2px] flex-1",
+            bright ? "bg-current" : "bg-current opacity-30",
+          )}
+          style={{ height: `${Math.max(8, Math.round(v * 100))}%` }}
+        />
+      ))}
+    </div>
+  );
   return (
     <div
       ref={ref}
@@ -145,21 +202,15 @@ function Waveform({
       aria-valuemin={0}
       aria-valuemax={1}
       aria-valuenow={progress}
-      className="flex h-9 flex-1 cursor-pointer items-center gap-[2px]"
+      className="relative flex h-9 min-w-0 flex-1 cursor-pointer items-center"
     >
-      {bars.map((v, i) => {
-        const reached = i / bars.length < progress;
-        return (
-          <span
-            key={i}
-            className={cn(
-              "inline-block w-[3px] transition-colors",
-              reached ? "bg-foreground" : "bg-foreground/35",
-            )}
-            style={{ height: `${Math.max(8, Math.round(v * 100))}%` }}
-          />
-        );
-      })}
+      {renderBars(false)}
+      <div
+        className="absolute inset-0 flex items-center"
+        style={{ clipPath: `inset(0 ${100 - progress * 100}% 0 0)` }}
+      >
+        {renderBars(true)}
+      </div>
     </div>
   );
 }

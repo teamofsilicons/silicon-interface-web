@@ -6,10 +6,50 @@ import { MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
-import type { Room } from "@/lib/types";
+import { useAuth } from "@/lib/auth";
+import type { Event, Room } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { cn } from "@/lib/utils";
+
+// Message types that count toward the unread badge + drive the sidebar
+// preview. Mirrors the backend projection (reactions / system / markers /
+// progress never count).
+const COUNTABLE_TYPES = new Set(["m.text", "m.image", "m.file", "m.voice", "m.tts"]);
+
+function isCountableEvent(ev: Event): boolean {
+  return COUNTABLE_TYPES.has(ev.type) && !ev.redacted_at;
+}
+
+/** Client-side one-line preview for a live event frame — mirrors Glass's
+ *  `_event_preview` so an instantly-patched row reads the same as a refetch.
+ *  Returns null for events that shouldn't replace the existing preview. */
+function eventPreview(ev: Event): string | null {
+  if (ev.redacted_at) return null;
+  const c = ev.content as Record<string, unknown>;
+  switch (ev.type) {
+    case "m.text": {
+      const body = String(c.body ?? "").trim();
+      return body.length > 120 ? `${body.slice(0, 120)}…` : body;
+    }
+    case "m.image": {
+      const cap = String(c.caption ?? "").trim();
+      return cap ? `📷 ${cap}` : "📷 photo";
+    }
+    case "m.file": {
+      const cap = String(c.caption ?? "").trim();
+      return cap ? `📎 ${cap}` : "📎 attachment";
+    }
+    case "m.voice":
+      return "🎙 voice note";
+    case "m.tts": {
+      const t = String(c.text ?? "").trim();
+      return t ? `🔊 ${t.slice(0, 80)}` : "🔊 audio";
+    }
+    default:
+      return null;
+  }
+}
 
 import { RoomList } from "@/components/chat/room-list";
 import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
@@ -57,6 +97,22 @@ function ChatPageInner() {
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const socket = useChatSocket();
   const { teams } = useTeams();
+  const { carbon } = useAuth();
+  const myUsername = carbon?.username ?? null;
+
+  // Refs so the WS frame handler can read the latest rooms/selection without
+  // re-subscribing the effect (which would risk re-processing the same frame).
+  const roomsRef = React.useRef<Room[]>(rooms);
+  React.useEffect(() => {
+    roomsRef.current = rooms;
+  }, [rooms]);
+  const selectedRef = React.useRef<string | null>(selected);
+  React.useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+  // Event ids already folded into the sidebar — guards against double-counting
+  // if the effect re-runs for the same frame.
+  const processedRef = React.useRef<Set<string>>(new Set());
 
   const clearHover = React.useCallback(() => {
     if (hoverTimerRef.current) {
@@ -140,29 +196,134 @@ function ChatPageInner() {
     void refresh();
   }, [refresh]);
 
+  // Tick every 15s so the sidebar's relative timestamps keep advancing
+  // ("just now" → "1m" → "2m") without a network fetch — purely a re-render.
+  const [, forceTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = window.setInterval(() => forceTick((n) => n + 1), 15_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Keep the socket subscribed to every room we know about.
   React.useEffect(() => {
     if (!socket.ready) return;
     for (const r of rooms) socket.send({ type: "subscribe", room_id: r.room_id });
   }, [socket.ready, rooms, socket.send]);
 
-  // When an event arrives in a room we don't have locally yet — OR when
-  // Glass tells us a fresh RoomMember was created for us (#2) — refresh the
-  // sidebar so the new conversation surfaces without a page reload.
+  // On (re)connect, resync the sidebar — frames sent while the socket was down
+  // (e.g. a backend restart or a backgrounded tab) are never replayed, so a
+  // plain refetch catches anything we missed.
+  const prevReadyRef = React.useRef(false);
   React.useEffect(() => {
-    if (!socket.lastFrame) return;
+    if (socket.ready && !prevReadyRef.current) void refresh();
+    prevReadyRef.current = socket.ready;
+  }, [socket.ready, refresh]);
+
+  // Live sidebar streaming. On every event frame, patch the matching room's
+  // last-message preview and unread count in place so a new message shows
+  // instantly — even when that chat isn't open. Unknown rooms (and #2's
+  // room.added) trigger a refetch so brand-new conversations surface too.
+  React.useEffect(() => {
     const f = socket.lastFrame;
+    if (!f) return;
     if (f.type === "event") {
+      const ev = f.event;
+      if (processedRef.current.has(ev.event_id)) return;
+      processedRef.current.add(ev.event_id);
       const rid = f.room_id;
-      if (!rooms.some((r) => r.room_id === rid)) void refresh();
+      if (!roomsRef.current.some((r) => r.room_id === rid)) {
+        void refresh();
+        return;
+      }
+      const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
+      const isOpen = selectedRef.current === rid;
+      const preview = eventPreview(ev);
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.room_id !== rid) return r;
+          // Counts toward unread only if it's a real message from someone
+          // else and I'm not already looking at this room.
+          const countable = isCountableEvent(ev) && !mine && !isOpen;
+          return {
+            ...r,
+            last_event:
+              preview !== null
+                ? {
+                    event_id: ev.event_id,
+                    preview,
+                    at: ev.created_at,
+                    sender_handle: ev.sender_handle,
+                    type: ev.type,
+                    read: false,
+                  }
+                : r.last_event,
+            unread: countable ? true : r.unread,
+            unread_count: countable
+              ? (r.unread_count ?? 0) + 1
+              : r.unread_count,
+          };
+        }),
+      );
+    } else if (f.type === "read_receipt") {
+      // Someone read up to f.event_id. If that reaches my own latest message,
+      // flip its sidebar tick to "read". (My own auto-read only ever advances
+      // to the last *received* message, never my own send — so a receipt at/
+      // past my latest message must be from someone else.)
+      setRooms((prev) => {
+        let changed = false;
+        const next = prev.map((r) => {
+          if (r.room_id !== f.room_id) return r;
+          const le = r.last_event;
+          if (!le || le.read || le.sender_handle !== myUsername || !le.event_id) {
+            return r;
+          }
+          if (f.event_id >= le.event_id) {
+            changed = true;
+            return { ...r, last_event: { ...le, read: true } };
+          }
+          return r;
+        });
+        return changed ? next : prev;
+      });
     } else if (f.type === "room.added") {
-      if (!rooms.some((r) => r.room_id === f.room_id)) void refresh();
+      if (!roomsRef.current.some((r) => r.room_id === f.room_id)) void refresh();
     }
-  }, [socket.lastFrame, rooms, refresh]);
+  }, [socket.lastFrame, refresh, myUsername]);
+
+  // Esc closes the open conversation (back to the list / welcome pane). We
+  // bail when the event was already handled — an open dialog, popover, emoji
+  // picker, or in-chat search dismisses itself first (those call
+  // preventDefault / stopPropagation), so Esc only closes the chat as a
+  // last resort.
+  React.useEffect(() => {
+    if (!selected) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) router.push("/chat");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, router]);
+
+  // Opening a room clears its unread badge locally — RoomView marks it read
+  // server-side, but we zero the count immediately so the sidebar matches.
+  React.useEffect(() => {
+    if (!selected) return;
+    setRooms((prev) => {
+      // Bail out (return the same array) when there's nothing to clear so we
+      // don't trigger a needless re-render on every room switch.
+      const needsClear = prev.some(
+        (r) => r.room_id === selected && (r.unread || (r.unread_count ?? 0) > 0),
+      );
+      if (!needsClear) return prev;
+      return prev.map((r) =>
+        r.room_id === selected ? { ...r, unread: false, unread_count: 0 } : r,
+      );
+    });
+  }, [selected]);
 
   const filtered = React.useMemo(() => {
     const q = sidebarQuery.trim().toLowerCase();
-    return rooms.filter((r) => {
+    const list = rooms.filter((r) => {
       // #8 — Unread filter hides any room that has nothing new for me.
       if (filters.unread && !r.unread) return false;
       if (filters.teams.length && !(r.team_slug && filters.teams.includes(r.team_slug))) return false;
@@ -184,6 +345,14 @@ function ChatPageInner() {
       }
       return true;
     });
+    // Most-recent activity first, so a room that just received a message
+    // bumps to the top of the list. ISO timestamps sort lexicographically.
+    list.sort((a, b) => {
+      const ta = a.last_event?.at ?? a.updated_at ?? "";
+      const tb = b.last_event?.at ?? b.updated_at ?? "";
+      return tb.localeCompare(ta);
+    });
+    return list;
   }, [rooms, filters, sidebarQuery]);
 
   const selectedRoom = rooms.find((r) => r.room_id === selected);
@@ -241,6 +410,7 @@ function ChatPageInner() {
         />
         <RoomList
           rooms={filtered}
+          myHandle={myUsername}
           selectedId={selected}
           onSelect={(id) => router.push(`/chat?room=${id}`)}
           onNew={() => setDialogOpen(true)}

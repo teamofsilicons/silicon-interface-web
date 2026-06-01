@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -12,6 +12,13 @@ import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { Composer, type OptimisticPayload } from "@/components/chat/composer";
@@ -45,6 +52,10 @@ export function RoomView({ room, allRooms, socket }: Props) {
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
+  // Observer mode: I'm in the backend allowlist and this is a silicon↔silicon
+  // room I may only watch. No composer, no reactions/replies/take-backs, and
+  // no read-receipts (I'm not a member, so the read POST would 403 anyway).
+  const readOnly = !!room.observed;
 
   const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -161,6 +172,19 @@ export function RoomView({ room, allRooms, socket }: Props) {
     if (socket.ready) socket.send({ type: "subscribe", room_id: room.room_id });
   }, [socket.ready, room.room_id, socket.send]);
 
+  // On reconnect, re-pull events for the open room — any frames delivered while
+  // the socket was down (backend restart, tab asleep) are gone otherwise.
+  const prevReadyRef = React.useRef(socket.ready);
+  React.useEffect(() => {
+    if (socket.ready && !prevReadyRef.current) {
+      api
+        .events(room.room_id, undefined, 100)
+        .then((evs) => setEvents((prev) => mergeServerEvents(prev, evs, myUsername)))
+        .catch(() => undefined);
+    }
+    prevReadyRef.current = socket.ready;
+  }, [socket.ready, room.room_id, myUsername]);
+
   React.useEffect(() => {
     const f = socket.lastFrame;
     if (!f) return;
@@ -271,22 +295,24 @@ export function RoomView({ room, allRooms, socket }: Props) {
       // alongside any other active state.
       const kind = f.kind;
       if (kind === "typing" || kind === "uploading" || kind === "recording") {
-        const memberKind = f.member_kind;
-        const memberId = f.member_id;
-        if (
-          memberId !== undefined &&
-          (memberKind === "carbon" || memberKind === "silicon")
-        ) {
-          const handle = handleFor(memberKind, memberId);
-          if (handle && handle !== myUsername) {
-            const active = f.is_typing !== false;
-            setActivities((prev) => {
-              const next = { ...prev };
-              if (active) next[handle] = { state: kind, until: Date.now() + 8000 };
-              else delete next[handle];
-              return next;
-            });
-          }
+        // Prefer the handle the server stamps on the beacon — it identifies the
+        // actual sender, so I can attribute it correctly *and* ignore my own
+        // (the old handleFor() always returned the peer in a 1-on-1 room, which
+        // made my own recording show up as "@peer is recording").
+        const handle =
+          f.member_handle ??
+          (f.member_id !== undefined &&
+          (f.member_kind === "carbon" || f.member_kind === "silicon")
+            ? handleFor(f.member_kind, f.member_id)
+            : null);
+        if (handle && handle !== myUsername) {
+          const active = f.is_typing !== false;
+          setActivities((prev) => {
+            const next = { ...prev };
+            if (active) next[handle] = { state: kind, until: Date.now() + 8000 };
+            else delete next[handle];
+            return next;
+          });
         }
       }
     }
@@ -310,9 +336,10 @@ export function RoomView({ room, allRooms, socket }: Props) {
   }, [events, myUsername]);
 
   React.useEffect(() => {
+    if (readOnly) return; // observers don't mark read — they aren't members
     if (!lastTheirsEventId) return;
     api.read(room.room_id, lastTheirsEventId).catch(() => undefined);
-  }, [lastTheirsEventId, room.room_id]);
+  }, [lastTheirsEventId, room.room_id, readOnly]);
 
   // ----- Take-back / self-delete / react / reply / forward -----
   const onTakeBack = async (eventId: string, force = false) => {
@@ -325,7 +352,15 @@ export function RoomView({ room, allRooms, socket }: Props) {
     }
   };
 
-  const onSelfDelete = async (ev: Event) => {
+  // Delete is two-step: clicking it stages the target; the confirm dialog
+  // actually performs the redaction.
+  const [pendingDelete, setPendingDelete] = React.useState<Event | null>(null);
+  const onSelfDelete = (ev: Event) => setPendingDelete(ev);
+
+  const confirmDelete = async () => {
+    const ev = pendingDelete;
+    if (!ev) return;
+    setPendingDelete(null);
     // Optimistically mark redacted so the bubble updates instantly.
     setEvents((prev) =>
       prev.map((e) =>
@@ -342,14 +377,42 @@ export function RoomView({ room, allRooms, socket }: Props) {
     try {
       const r = await api.deleteEvent(ev.event_id);
       if (r && "detail" in r) toast.error(r.detail);
+      else toast.success("deleted successfully");
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     }
   };
 
   const onReact = async (ev: Event, emoji: string) => {
-    // Reactions are normal events of type m.reaction; the WS echo will fold
-    // them into the reaction map below.
+    // Toggle: if I already reacted to this message with this emoji, remove that
+    // reaction; otherwise add one. Reactions are m.reaction events keyed to the
+    // target via reply_to_event_id; the WS echo / take_back folds the change
+    // into the reaction map below.
+    const existing = events.find(
+      (e) =>
+        e.type === "m.reaction" &&
+        !e.redacted_at &&
+        e.reply_to_event_id === ev.event_id &&
+        e.sender_handle === myUsername &&
+        String((e.content as { emoji?: unknown }).emoji ?? "") === emoji,
+    );
+    if (existing) {
+      // Optimistically drop my reaction, then redact it server-side.
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.event_id === existing.event_id
+            ? { ...e, redacted_at: new Date().toISOString(), redaction_reason: "unreact" }
+            : e,
+        ),
+      );
+      try {
+        const r = await api.deleteEvent(existing.event_id);
+        if (r && "detail" in r) toast.error(r.detail);
+      } catch (e) {
+        toast.error(e instanceof ApiError ? e.message : String(e));
+      }
+      return;
+    }
     try {
       await api.sendEvent(room.room_id, {
         type: "m.reaction",
@@ -389,9 +452,10 @@ export function RoomView({ room, allRooms, socket }: Props) {
     return map;
   }, [events]);
 
-  // Visible events drop reactions — they render as chips under the target.
+  // Visible events drop reactions (they render as chips under the target) and
+  // deleted/redacted messages (hidden entirely — no "message deleted" row).
   const visibleEvents = React.useMemo(
-    () => events.filter((e) => e.type !== "m.reaction"),
+    () => events.filter((e) => e.type !== "m.reaction" && !e.redacted_at),
     [events],
   );
 
@@ -540,10 +604,11 @@ export function RoomView({ room, allRooms, socket }: Props) {
             <h2 className="truncate text-sm font-semibold tracking-tight">
               {display.name}
             </h2>
-            <p className="truncate text-xs text-muted-foreground">
-              {socket.ready
-                ? (formatActivities(activities) ?? display.subtitle)
-                : "offline"}
+            <p className="flex items-center gap-1 truncate text-xs text-muted-foreground">
+              {readOnly && <Eye className="h-3 w-3 shrink-0" />}
+              {readOnly
+                ? "observing · read-only"
+                : (formatActivities(activities) ?? display.subtitle)}
             </p>
           </div>
         </button>
@@ -605,18 +670,19 @@ export function RoomView({ room, allRooms, socket }: Props) {
                   key={e._clientId ?? e.event_id}
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
+                  myHandle={myUsername}
                   isDirect={room.kind === "direct"}
                   status={e._status}
                   senderPhotoUrl={photoFor(e.sender_handle)}
                   onSenderClick={openSenderProfile}
-                  onTakeBack={onTakeBack}
+                  onTakeBack={readOnly ? undefined : onTakeBack}
                   showSender={showSender}
                   showTime={showTime}
                   reactions={reactionsByTarget.get(e.event_id) ?? undefined}
-                  onReply={onReply}
-                  onReact={onReact}
-                  onForward={onForward}
-                  onDelete={onSelfDelete}
+                  onReply={readOnly ? undefined : onReply}
+                  onReact={readOnly ? undefined : onReact}
+                  onForward={readOnly ? undefined : onForward}
+                  onDelete={readOnly ? undefined : onSelfDelete}
                 />
               );
             })
@@ -626,16 +692,24 @@ export function RoomView({ room, allRooms, socket }: Props) {
         </div>
       </ScrollArea>
 
-      <Composer
-        roomId={room.room_id}
-        onOptimisticAdd={onOptimisticAdd}
-        onAck={onAck}
-        onFail={onFail}
-        droppedFile={droppedFile}
-        onDroppedFileConsumed={() => setDroppedFile(null)}
-        replyTo={replyTo}
-        onClearReply={() => setReplyTo(null)}
-      />
+      {readOnly ? (
+        <div className="flex items-center justify-center gap-2 border-t bg-muted/40 px-6 py-4 text-xs text-muted-foreground">
+          <Eye className="h-3.5 w-3.5" />
+          You&rsquo;re observing this silicon-to-silicon conversation. It&rsquo;s
+          read-only — you can&rsquo;t send messages here.
+        </div>
+      ) : (
+        <Composer
+          roomId={room.room_id}
+          onOptimisticAdd={onOptimisticAdd}
+          onAck={onAck}
+          onFail={onFail}
+          droppedFile={droppedFile}
+          onDroppedFileConsumed={() => setDroppedFile(null)}
+          replyTo={replyTo}
+          onClearReply={() => setReplyTo(null)}
+        />
+      )}
 
       {/* Visual hint while a file is hovering over the chat surface. */}
       <DropOverlay visible={isDropTarget} />
@@ -647,6 +721,28 @@ export function RoomView({ room, allRooms, socket }: Props) {
         rooms={allRooms}
         sourceRoomId={room.room_id}
       />
+
+      <Dialog
+        open={!!pendingDelete}
+        onOpenChange={(v) => !v && setPendingDelete(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete message?</DialogTitle>
+            <DialogDescription>
+              This removes the message for everyone. This can&rsquo;t be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setPendingDelete(null)}>
+              cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDelete}>
+              delete
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -668,7 +764,11 @@ function SearchBar({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
+          // Stop here so Esc closes the search field, not the whole chat.
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            onClose();
+          }
         }}
         placeholder="search messages"
         className="h-9 w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"

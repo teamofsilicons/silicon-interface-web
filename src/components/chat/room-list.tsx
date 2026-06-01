@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { Check, Checks, Eye, Microphone } from "@phosphor-icons/react/dist/ssr";
 
 import type { Room } from "@/lib/types";
 import { roomDisplay } from "@/lib/peers";
@@ -12,6 +13,8 @@ import { IdAvatar } from "@/components/profile/id-avatar";
 
 interface Props {
   rooms: Room[];
+  /** My handle, to tell whether the latest message is mine (→ show a tick). */
+  myHandle?: string | null;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
@@ -26,6 +29,7 @@ interface Props {
 
 export function RoomList({
   rooms,
+  myHandle,
   selectedId,
   onSelect,
   onNew,
@@ -59,6 +63,12 @@ export function RoomList({
           {rooms.map((r) => {
             const d = roomDisplay(r);
             const isHover = hoverRoomId === r.room_id;
+            const unread = r.unread_count ?? (r.unread ? 1 : 0);
+            // The latest message is mine when its sender handle matches me — in
+            // that case the right slot shows a send-status tick instead of a
+            // badge (✓✓ once the other side has read it, ✓ until then).
+            const mineLast =
+              !!myHandle && r.last_event?.sender_handle === myHandle;
             return (
               <li key={r.room_id}>
                 <button
@@ -92,16 +102,74 @@ export function RoomList({
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{d.name}</span>
-                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        {r.observed && (
+                          <Eye
+                            className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                            aria-label="observing (read-only)"
+                          />
+                        )}
+                        <span
+                          className={cn(
+                            "truncate text-sm",
+                            unread > 0 ? "font-semibold" : "font-medium",
+                          )}
+                        >
+                          {d.name}
+                        </span>
+                      </span>
+                      <span
+                        className={cn(
+                          "shrink-0 text-[10px]",
+                          unread > 0
+                            ? "font-medium text-foreground"
+                            : "text-muted-foreground",
+                        )}
+                      >
                         {relativeTime(r.last_event?.at ?? r.updated_at)}
                       </span>
                     </div>
-                    {/* Last-message preview (one line, type-aware). Falls back
-                        to the static subtitle when the room has no events. */}
-                    <p className="truncate text-xs text-muted-foreground">
-                      {r.last_event?.preview || d.subtitle}
-                    </p>
+                    {/* Last-message preview (one line, type-aware) + unread
+                        badge. Preview falls back to the static subtitle when
+                        the room has no events. */}
+                    <div className="flex items-center justify-between gap-2">
+                      <p
+                        className={cn(
+                          "truncate text-xs",
+                          unread > 0 ? "text-foreground" : "text-muted-foreground",
+                        )}
+                      >
+                        {r.last_event?.type === "m.voice" ? (
+                          <span className="inline-flex items-center gap-1 align-middle">
+                            <Microphone className="h-3 w-3 shrink-0" /> voice note
+                          </span>
+                        ) : (
+                          r.last_event?.preview || d.subtitle
+                        )}
+                      </p>
+                      {unread > 0 ? (
+                        <span
+                          className="inline-flex h-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-none text-primary-foreground"
+                          aria-label={`${unread} unread message${unread === 1 ? "" : "s"}`}
+                        >
+                          {unread > 99 ? "99+" : unread}
+                        </span>
+                      ) : mineLast ? (
+                        r.last_event?.read ? (
+                          <Checks
+                            weight="bold"
+                            className="h-4 w-4 shrink-0 text-foreground"
+                            aria-label="read"
+                          />
+                        ) : (
+                          <Check
+                            weight="bold"
+                            className="h-4 w-4 shrink-0 text-muted-foreground"
+                            aria-label="sent"
+                          />
+                        )
+                      ) : null}
+                    </div>
                   </div>
                 </button>
               </li>

@@ -7,6 +7,7 @@ import {
   Checks,
   Copy,
   DotsThree,
+  DownloadSimple,
   MusicNote,
   Share,
   Smiley,
@@ -16,9 +17,12 @@ import {
 } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
+import { api } from "@/lib/api";
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { cn, relativeTime } from "@/lib/utils";
+
+import { downloadAsset } from "./media-previewer";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +38,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   Popover,
+  PopoverClose,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
@@ -52,6 +57,8 @@ export type MessageStatus =
 interface Props {
   event: Event;
   isMine: boolean;
+  /** My own handle — used to highlight reactions I've already given. */
+  myHandle?: string | null;
   isOwnSilicon?: boolean;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   /** Send-receipt for messages this Carbon authored. Ignored for received messages. */
@@ -86,6 +93,7 @@ interface Props {
 export function MessageBubble({
   event,
   isMine,
+  myHandle,
   isOwnSilicon,
   onTakeBack,
   status,
@@ -151,6 +159,16 @@ export function MessageBubble({
     onSenderClick?.({ kind: senderKind, handle: senderHandle });
   };
 
+  // Which of the quick-reaction emojis I've already given on this message —
+  // drives the filled/active state in the picker and the chips. Plain compute
+  // (not a hook) since this component early-returns above for system events.
+  const myReactionEmojis = new Set<string>();
+  if (myHandle && reactions) {
+    for (const [emoji, who] of Object.entries(reactions)) {
+      if (who.includes(myHandle)) myReactionEmojis.add(emoji);
+    }
+  }
+
   // We tighten the vertical gap between consecutive bubbles in the same
   // (sender, minute) group so they read as a single block.
   const inGroupGap = !showSender && !showTime;
@@ -158,7 +176,10 @@ export function MessageBubble({
   return (
     <div
       className={cn(
-        "flex w-full gap-2",
+        // `group` on the full-width row so hovering anywhere in the row —
+        // bubble, avatar gutter, or the empty space beside it — reveals the
+        // actions, not just the bubble itself.
+        "group flex w-full gap-2",
         inGroupGap ? "my-0.5" : "my-1.5",
         isMine ? "justify-end" : "justify-start",
       )}
@@ -192,15 +213,19 @@ export function MessageBubble({
           className={cn(
             // Symmetric p-3 padding so an inline image/file inside the bubble
             // has equal whitespace on top and left (previously px-3 py-2 left
-            // visible asymmetry around media attachments).
-            "group relative p-3 text-sm",
+            // visible asymmetry around media attachments). `group` lives on the
+            // message column wrapper so hovering anywhere on the block (bubble,
+            // padding, label, time) reveals the actions — not just the text.
+            "relative p-3 text-sm",
             redacted
               ? "border bg-muted text-muted-foreground italic"
               : isMine
-                // Selection colors are inverted on sent bubbles — the global
-                // ::selection rule paints ink-on-ink, which is invisible on
-                // top of bg-primary (ink). Flip to cream-on-ink here.
-                ? "bg-primary text-primary-foreground selection:bg-primary-foreground selection:text-primary"
+                // `bubble-sent` carries a dedicated ::selection rule in
+                // globals.css — the global highlight is ink, which vanishes
+                // into this ink bubble, so we reverse it to cream-on-ink there.
+                // (A Tailwind `selection:` utility can't win against the
+                // unlayered global ::selection rule, hence the explicit class.)
+                ? "bubble-sent bg-primary text-primary-foreground"
                 : "border bg-bubble-received",
           )}
           // Double-click anywhere on a non-redacted bubble triggers a reply
@@ -208,7 +233,7 @@ export function MessageBubble({
           onDoubleClick={() => !redacted && onReply?.(event)}
         >
           {redacted ? (
-            <span>[message redacted: {event.redaction_reason}]</span>
+            <span className="italic">message deleted</span>
           ) : (
             <Body event={event} />
           )}
@@ -221,6 +246,7 @@ export function MessageBubble({
               event={event}
               isMine={isMine}
               isOwnSilicon={!!isOwnSilicon}
+              myReactions={myReactionEmojis}
               onReply={onReply}
               onReact={onReact}
               onForward={onForward}
@@ -233,18 +259,26 @@ export function MessageBubble({
         {/* Reaction chips — surfaced under the bubble, grouped by emoji. */}
         {reactions && Object.keys(reactions).length > 0 && (
           <div className={cn("flex flex-wrap gap-1", isMine && "justify-end")}>
-            {Object.entries(reactions).map(([emoji, who]) => (
-              <button
-                key={emoji}
-                type="button"
-                onClick={() => onReact?.(event, emoji)}
-                title={who.join(", ")}
-                className="inline-flex items-center gap-1 border bg-card px-1.5 py-0.5 text-[11px] transition-colors hover:bg-accent"
-              >
-                <span>{emoji}</span>
-                <span className="font-mono opacity-70">{who.length}</span>
-              </button>
-            ))}
+            {Object.entries(reactions).map(([emoji, who]) => {
+              const reactedByMe = !!myHandle && who.includes(myHandle);
+              return (
+                <button
+                  key={emoji}
+                  type="button"
+                  onClick={() => onReact?.(event, emoji)}
+                  title={`${who.join(", ")}${reactedByMe ? " · click to remove" : ""}`}
+                  className={cn(
+                    "inline-flex items-center gap-1 border px-1.5 py-0.5 text-[11px] transition-colors",
+                    reactedByMe
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-card hover:bg-accent",
+                  )}
+                >
+                  <span>{emoji}</span>
+                  <span className="font-mono opacity-70">{who.length}</span>
+                </button>
+              );
+            })}
           </div>
         )}
         {/* Time + receipt — rendered only on the last bubble of a (sender,
@@ -282,6 +316,7 @@ function BubbleActions({
   event,
   isMine,
   isOwnSilicon,
+  myReactions,
   onReply,
   onReact,
   onForward,
@@ -291,6 +326,7 @@ function BubbleActions({
   event: Event;
   isMine: boolean;
   isOwnSilicon: boolean;
+  myReactions: Set<string>;
   onReply?: (event: Event) => void;
   onReact?: (event: Event, emoji: string) => void;
   onForward?: (event: Event) => void;
@@ -309,11 +345,44 @@ function BubbleActions({
       () => toast.error("couldn't copy"),
     );
   };
+  // Media messages (voice/file/image/…) expose download here in the options
+  // menu rather than inline next to the player.
+  const hasMedia = Boolean((event.content as { media_id?: unknown }).media_id);
+  const handleDownload = async () => {
+    try {
+      const mediaId = String((event.content as { media_id?: unknown }).media_id);
+      const r = await api.mediaDetail(mediaId);
+      if (!r.download_url) return;
+      const name =
+        String((event.content as { caption?: unknown }).caption || "") ||
+        event.type.replace("m.", "") ||
+        "download";
+      downloadAsset(r.download_url, name);
+    } catch {
+      toast.error("couldn't download");
+    }
+  };
+  // Keep the bar shown while ANY menu/popover spawned from it is open.
+  // Otherwise moving the cursor toward the menu leaves the bubble's :hover, the
+  // bar flips to display:none, and Radix loses the trigger's layout box — so the
+  // menu re-anchors to the top-left (0,0). A counter (not a boolean) survives
+  // the overlap when opening one menu auto-closes the other: the close fires
+  // -1 while the open fired +1, so the bar never blinks hidden in between.
+  const [openMenus, setOpenMenus] = React.useState(0);
+  const onMenuOpenChange = React.useCallback(
+    (open: boolean) => setOpenMenus((n) => Math.max(0, n + (open ? 1 : -1))),
+    [],
+  );
+  const menuOpen = openMenus > 0;
   return (
     <div
       className={cn(
-        "absolute -top-3 z-10 hidden gap-0.5 border bg-card p-0.5 transition-opacity group-hover:flex",
-        isMine ? "right-2" : "left-2",
+        // Float beside the bubble (vertically centered) instead of on top:
+        // received → just right of the bubble, sent → just left of it (mirrored
+        // so it never runs off the right edge).
+        "absolute top-1/2 z-10 -translate-y-1/2 gap-0.5 border bg-card p-0.5 transition-opacity",
+        menuOpen ? "flex" : "hidden group-hover:flex",
+        isMine ? "right-full mr-2" : "left-full ml-2",
       )}
       // Stop propagation so an action click doesn't double-fire onDoubleClick
       // on the bubble.
@@ -325,7 +394,7 @@ function BubbleActions({
         </ActionIconButton>
       )}
       {onReact && (
-        <Popover>
+        <Popover onOpenChange={onMenuOpenChange}>
           <PopoverTrigger asChild>
             <ActionIconButton title="react">
               <Smiley />
@@ -337,22 +406,31 @@ function BubbleActions({
             className="w-auto !p-0.5"
           >
             <div className="flex items-center gap-0.5">
-              {REACTION_EMOJI.map((e) => (
-                <button
-                  key={e}
-                  type="button"
-                  onClick={() => onReact(event, e)}
-                  className="inline-flex h-7 w-7 items-center justify-center text-base transition-colors hover:bg-accent"
-                  title={`react ${e}`}
-                >
-                  {e}
-                </button>
-              ))}
+              {REACTION_EMOJI.map((e) => {
+                const active = myReactions.has(e);
+                return (
+                  // PopoverClose closes the picker the moment a reaction is
+                  // chosen — re-open it with another click if needed.
+                  <PopoverClose asChild key={e}>
+                    <button
+                      type="button"
+                      onClick={() => onReact(event, e)}
+                      className={cn(
+                        "inline-flex h-7 w-7 items-center justify-center text-base transition-colors",
+                        active ? "bg-primary" : "hover:bg-accent",
+                      )}
+                      title={active ? `remove ${e}` : `react ${e}`}
+                    >
+                      {e}
+                    </button>
+                  </PopoverClose>
+                );
+              })}
             </div>
           </PopoverContent>
         </Popover>
       )}
-      <DropdownMenu>
+      <DropdownMenu onOpenChange={onMenuOpenChange}>
         <DropdownMenuTrigger asChild>
           <ActionIconButton title="more options">
             <DotsThree />
@@ -375,6 +453,12 @@ function BubbleActions({
             <DropdownMenuItem onClick={() => onForward(event)}>
               <Share className="mr-2 h-3.5 w-3.5" />
               forward
+            </DropdownMenuItem>
+          )}
+          {hasMedia && (
+            <DropdownMenuItem onClick={handleDownload}>
+              <DownloadSimple className="mr-2 h-3.5 w-3.5" />
+              download
             </DropdownMenuItem>
           )}
           {(canDelete || canTakeBack) && <DropdownMenuSeparator />}
@@ -459,7 +543,7 @@ function Receipt({ status }: { status: MessageStatus }) {
   if (status === "delivered")
     return <Checks className="h-3 w-3" aria-label={title} />;
   if (status === "read")
-    return <Checks className="h-3 w-3 text-[var(--success)]" aria-label={title} />;
+    return <Checks className="h-3 w-3 text-foreground" aria-label={title} />;
   return (
     <Check
       className={cn("h-3 w-3", status === "pending" && "opacity-40")}

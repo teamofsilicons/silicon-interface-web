@@ -20,7 +20,50 @@ import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
+
+/** Upload to a presigned URL via XHR (fetch can't report upload progress).
+ *  Reports 0–100% and supports abort; rejects with an AbortError when the
+ *  user cancels so the caller can distinguish it from a real failure. */
+function xhrUpload(
+  url: string,
+  form: FormData,
+  onProgress: (pct: number) => void,
+  xhrRef: React.MutableRefObject<XMLHttpRequest | null>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhrRef.current = xhr;
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    const clear = () => {
+      xhrRef.current = null;
+    };
+    xhr.onload = () => {
+      clear();
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`upload failed (${xhr.status})`));
+    };
+    xhr.onerror = () => {
+      clear();
+      reject(new Error("upload failed"));
+    };
+    xhr.onabort = () => {
+      clear();
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    xhr.send(form);
+  });
+}
 
 /** Slice of an `Event` we can fabricate locally before the server responds. */
 export interface OptimisticPayload {
@@ -59,11 +102,21 @@ const MAX_ROWS = 12;
  * The object URL is revoked when the file changes (or this unmounts) so we
  * don't leak blob memory across attachments.
  */
-function StagedAttachment({ file, onRemove }: { file: File; onRemove: () => void }) {
+function StagedAttachment({
+  file,
+  uploadPct,
+  onRemove,
+}: {
+  file: File;
+  /** 0–100 while uploading; null/undefined when idle. */
+  uploadPct?: number | null;
+  onRemove: () => void;
+}) {
   const isImage = file.type.startsWith("image/");
   const isVideo = file.type.startsWith("video/");
   const isAudio = file.type.startsWith("audio/");
   const isPdf = file.type.includes("pdf");
+  const uploading = uploadPct !== null && uploadPct !== undefined;
 
   const thumbUrl = React.useMemo(
     () => (isImage || isVideo ? URL.createObjectURL(file) : null),
@@ -76,7 +129,14 @@ function StagedAttachment({ file, onRemove }: { file: File; onRemove: () => void
   }, [thumbUrl]);
 
   return (
-    <div className="flex items-center gap-3 border bg-card px-3 py-2">
+    <div className="relative flex items-center gap-3 border bg-card px-3 py-2">
+      {/* Upload progress bar across the top of the preview. */}
+      {uploading && (
+        <div
+          className="absolute left-0 top-0 h-0.5 bg-primary transition-all"
+          style={{ width: `${uploadPct}%` }}
+        />
+      )}
       <div className="h-12 w-12 shrink-0 overflow-hidden border bg-muted">
         {isImage && thumbUrl ? (
           // eslint-disable-next-line @next/next/no-img-element -- local blob URL
@@ -93,10 +153,15 @@ function StagedAttachment({ file, onRemove }: { file: File; onRemove: () => void
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">{file.name}</div>
         <div className="label-mono text-[10px] text-muted-foreground">
-          {formatBytes(file.size)}
+          {uploading ? `uploading… ${uploadPct}%` : formatBytes(file.size)}
         </div>
       </div>
-      <Button size="icon" variant="ghost" onClick={onRemove} aria-label="remove attachment">
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={onRemove}
+        aria-label={uploading ? "cancel upload" : "remove attachment"}
+      >
         <X className="h-3.5 w-3.5" />
       </Button>
     </div>
@@ -179,8 +244,26 @@ export function Composer({
   const [file, setFile] = React.useState<File | null>(null);
   const [recording, setRecording] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  // Upload progress (0–100) while a staged file is sending; null when idle.
+  const [uploadPct, setUploadPct] = React.useState<number | null>(null);
+  const [confirmCancel, setConfirmCancel] = React.useState(false);
+  const xhrRef = React.useRef<XMLHttpRequest | null>(null);
+  // The attached file uploads in the background as soon as it's staged; `send`
+  // then just posts the message referencing the ready media.
+  const [uploadStatus, setUploadStatus] = React.useState<
+    "idle" | "uploading" | "ready" | "error"
+  >("idle");
+  const uploadedRef = React.useRef<{ mediaId: string; mime: string } | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
+
+  // Abort the in-flight upload and discard the staged file.
+  const cancelUpload = () => {
+    xhrRef.current?.abort();
+    setConfirmCancel(false);
+    setUploadPct(null);
+    setFile(null);
+  };
   // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
   // the active token (':grin', ':lol', …) and surface matches in a small
   // popover anchored to the textarea.
@@ -196,6 +279,107 @@ export function Composer({
       onDroppedFileConsumed?.();
     }
   }, [droppedFile, onDroppedFileConsumed]);
+
+  // Clicking "reply" on a message sets a reply target — focus the input right
+  // away so the user can start typing without a second click.
+  React.useEffect(() => {
+    if (replyTo) taRef.current?.focus();
+  }, [replyTo]);
+
+  // Start uploading the instant a file is attached — don't wait for "send".
+  // The upload (and metadata decode) run in the background; pressing send then
+  // just posts the message referencing the already-uploaded media.
+  React.useEffect(() => {
+    if (!file) {
+      uploadedRef.current = null;
+      setUploadStatus("idle");
+      setUploadPct(null);
+      return;
+    }
+    let cancelled = false;
+    uploadedRef.current = null;
+    setUploadStatus("uploading");
+    api.activity(roomId, "uploading", true).catch(() => undefined);
+    (async () => {
+      try {
+        const r = await api.presignUpload({
+          mime: file.type || "application/octet-stream",
+          size: file.size,
+          kind: file.type.startsWith("image/") ? "image" : "file",
+          filename: file.name,
+          room_id: roomId,
+        });
+        const mediaId = r.media.media_id;
+        if (!r.upload.dev_mode) {
+          setUploadPct(0);
+          const form = new FormData();
+          for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+          form.append("file", file);
+          await xhrUpload(r.upload.url, form, setUploadPct, xhrRef);
+          // Decode metadata (#22 image dims; #6 audio/video duration) so the
+          // bubble reserves the right aspect / shows duration immediately.
+          let meta: Parameters<typeof api.mediaComplete>[1] = {};
+          if (file.type.startsWith("image/")) {
+            const d = await measureImage(file);
+            if (d) meta = { width: d.width, height: d.height };
+          } else if (file.type.startsWith("video/")) {
+            const d = await measureVideo(file);
+            if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
+          } else if (file.type.startsWith("audio/")) {
+            const d = await computePeaks(file);
+            if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
+          }
+          await api.mediaComplete(mediaId, meta);
+        }
+        if (cancelled) return;
+        uploadedRef.current = { mediaId, mime: file.type || "application/octet-stream" };
+        setUploadStatus("ready");
+        setUploadPct(null);
+      } catch (e) {
+        if (cancelled) return;
+        setUploadPct(null);
+        if (e instanceof DOMException && e.name === "AbortError") {
+          setUploadStatus("idle");
+        } else {
+          setUploadStatus("error");
+          toast.error(e instanceof ApiError ? e.message : String(e));
+        }
+      } finally {
+        api.activity(roomId, "uploading", false).catch(() => undefined);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [file, roomId]);
+
+  // ----- Draft persistence (per room, in localStorage) -----
+  // Each room keeps its own in-progress draft so switching away and back — or
+  // reloading — restores exactly what was being typed. The draft is removed
+  // the moment the message is sent or the field is fully cleared.
+  const draftKey = `silicon-interface:draft:${roomId}`;
+  const persistDraft = React.useCallback(
+    (v: string) => {
+      try {
+        if (v.trim()) window.localStorage.setItem(`silicon-interface:draft:${roomId}`, v);
+        else window.localStorage.removeItem(`silicon-interface:draft:${roomId}`);
+      } catch {
+        /* storage may be unavailable (private mode / quota) — ignore */
+      }
+    },
+    [roomId],
+  );
+  // Load the room's saved draft when the active room changes.
+  React.useEffect(() => {
+    let saved = "";
+    try {
+      saved = window.localStorage.getItem(draftKey) ?? "";
+    } catch {
+      /* ignore */
+    }
+    setText(saved);
+    setEmojiQuery(null);
+  }, [draftKey]);
 
   // #5 — Typing beacon. POSTs `activity('typing', true)` on the first
   // character and `false` after 3s of idle. Survives across rapid keystrokes
@@ -215,7 +399,13 @@ export function Composer({
   }, [roomId]);
   React.useEffect(() => () => {
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
-    if (isTypingRef.current) api.activity(roomId, "typing", false).catch(() => undefined);
+    if (isTypingRef.current) {
+      // Reset the ref too — otherwise it stays `true` across a room switch and
+      // the next room never re-sends a "typing" beacon (so the other side
+      // never sees the indicator).
+      isTypingRef.current = false;
+      api.activity(roomId, "typing", false).catch(() => undefined);
+    }
   }, [roomId]);
 
   // Auto-grow the textarea between MIN_ROWS and MAX_ROWS lines. Done
@@ -238,6 +428,7 @@ export function Composer({
 
   const reset = () => {
     setText("");
+    persistDraft("");
     setFile(null);
   };
 
@@ -259,66 +450,32 @@ export function Composer({
 
   const send = async () => {
     const body = text.trim();
-    if (!body && !file) return;
 
-    // Fast path — text only. Optimistic, doesn't block the input.
-    if (!file && body) {
-      sendTextOptimistic(body);
-      setText("");
+    // File path — the upload already started on attach. Post once it's ready
+    // (the send button stays disabled until then).
+    if (file) {
+      const up = uploadedRef.current;
+      if (uploadStatus !== "ready" || !up) return;
+      setBusy(true);
+      try {
+        await api.sendEvent(roomId, {
+          type: up.mime.startsWith("image/") ? "m.image" : "m.file",
+          content: { media_id: up.mediaId, mime: up.mime, caption: body || file.name },
+        });
+        reset();
+      } catch (e) {
+        toast.error(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
       return;
     }
 
-    setBusy(true);
-    if (file) api.activity(roomId, "uploading", true).catch(() => undefined);
-    try {
-      if (file) {
-        const r = await api.presignUpload({
-          mime: file.type || "application/octet-stream",
-          size: file.size,
-          kind: file.type.startsWith("image/") ? "image" : "file",
-          filename: file.name,
-          room_id: roomId,
-        });
-        const mediaId = r.media.media_id;
-        if (!r.upload.dev_mode) {
-          const form = new FormData();
-          for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-          form.append("file", file);
-          const up = await fetch(r.upload.url, { method: "POST", body: form });
-          if (!up.ok) throw new Error(`upload failed (${up.status})`);
-          // Decode metadata (#22 image dims; #6 audio/video duration) before
-          // confirming so the bubble reserves the right aspect and shows
-          // duration immediately.
-          let meta: Parameters<typeof api.mediaComplete>[1] = {};
-          if (file.type.startsWith("image/")) {
-            const d = await measureImage(file);
-            if (d) meta = { width: d.width, height: d.height };
-          } else if (file.type.startsWith("video/")) {
-            const d = await measureVideo(file);
-            if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
-          } else if (file.type.startsWith("audio/")) {
-            const d = await computePeaks(file);
-            if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
-          }
-          await api.mediaComplete(mediaId, meta);
-        }
-        await api.sendEvent(roomId, {
-          type: file.type.startsWith("image/") ? "m.image" : "m.file",
-          content: {
-            media_id: mediaId,
-            mime: file.type,
-            caption: body || file.name,
-          },
-        });
-      }
-      reset();
-    } catch (e) {
-      const msg = e instanceof ApiError ? e.message : String(e);
-      toast.error(msg);
-    } finally {
-      setBusy(false);
-      api.activity(roomId, "uploading", false).catch(() => undefined);
-    }
+    // Text only — optimistic, doesn't block the input.
+    if (!body) return;
+    sendTextOptimistic(body);
+    setText("");
+    persistDraft("");
   };
 
   // ----- Voice recording -----
@@ -386,7 +543,7 @@ export function Composer({
   }
 
   return (
-    <div className="space-y-2 border-t bg-background p-3">
+    <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
         <div className="flex items-start gap-2 border-l-2 border-foreground/60 bg-card px-2 py-1 text-xs">
           <ArrowBendUpLeft className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" />
@@ -395,7 +552,13 @@ export function Composer({
               replying to {replyTo.sender_handle ? `@${replyTo.sender_handle}` : "message"}
             </div>
             <div className="truncate text-foreground/80">
-              {previewOf(replyTo)}
+              {replyTo.type === "m.voice" ? (
+                <span className="inline-flex items-center gap-1 align-middle">
+                  <Microphone className="h-3 w-3 shrink-0" /> voice note
+                </span>
+              ) : (
+                previewOf(replyTo)
+              )}
             </div>
           </div>
           <button
@@ -408,11 +571,23 @@ export function Composer({
           </button>
         </div>
       )}
-      {file && <StagedAttachment file={file} onRemove={() => setFile(null)} />}
+      {file && (
+        <StagedAttachment
+          file={file}
+          uploadPct={uploadPct}
+          onRemove={() => {
+            // Mid-upload, the cross asks for confirmation before aborting.
+            if (uploadPct !== null) setConfirmCancel(true);
+            else setFile(null);
+          }}
+        />
+      )}
       {/* One container, hairline border, focus-within bumps to ring colour.
           Internal 1px dividers visually separate attach | input | voice/send
           while still reading as a single field. */}
-      <div className="flex items-stretch border border-input transition-colors focus-within:border-ring">
+      {/* `items-end` docks the fixed-size attach/send buttons to the bottom so
+          they keep a constant height while the textarea grows upward. */}
+      <div className="flex items-end border border-input transition-colors focus-within:border-ring">
         <input
           type="file"
           ref={fileInputRef}
@@ -425,7 +600,7 @@ export function Composer({
           title="attach file"
           aria-label="attach file"
           disabled={busy}
-          className="flex w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+          className="flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
         </button>
@@ -437,6 +612,7 @@ export function Composer({
             onChange={(e) => {
               const v = e.target.value;
               setText(v);
+              persistDraft(v);
               if (v) beaconTyping();
               // Detect a `:foo` token at the caret. If found, open picker.
               const caret = e.target.selectionStart ?? v.length;
@@ -476,6 +652,7 @@ export function Composer({
                     const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, picked.emoji);
                     const nextText = replaced + after;
                     setText(nextText);
+                    persistDraft(nextText);
                     setEmojiQuery(null);
                     queueMicrotask(() => {
                       const el = taRef.current;
@@ -491,6 +668,14 @@ export function Composer({
                   setEmojiQuery(null);
                   return;
                 }
+              }
+              // Esc cancels an in-progress reply first; preventDefault stops the
+              // page-level handler from also closing the chat. With no reply
+              // active it falls through and the chat-close handler takes over.
+              if (e.key === "Escape" && replyTo) {
+                e.preventDefault();
+                onClearReply?.();
+                return;
               }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -508,6 +693,7 @@ export function Composer({
                 const after = text.slice(caret);
                 const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, em);
                 setText(replaced + after);
+                persistDraft(replaced + after);
                 setEmojiQuery(null);
                 queueMicrotask(() => taRef.current?.focus());
               }}
@@ -524,7 +710,7 @@ export function Composer({
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"
-            className="flex w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >
             <Microphone />
           </button>
@@ -532,14 +718,37 @@ export function Composer({
           <button
             type="button"
             onClick={send}
-            disabled={busy}
+            disabled={busy || (!!file && uploadStatus !== "ready")}
             aria-label="send"
-            className="flex w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            {busy ? <CircleNotch className="animate-spin" /> : <PaperPlaneRight />}
+            {busy || (!!file && uploadStatus === "uploading") ? (
+              <CircleNotch className="animate-spin" />
+            ) : (
+              <PaperPlaneRight />
+            )}
           </button>
         )}
       </div>
+
+      <Dialog open={confirmCancel} onOpenChange={setConfirmCancel}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancel upload?</DialogTitle>
+            <DialogDescription>
+              The file is still uploading. Cancel and discard it?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setConfirmCancel(false)}>
+              keep uploading
+            </Button>
+            <Button variant="destructive" onClick={cancelUpload}>
+              cancel upload
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

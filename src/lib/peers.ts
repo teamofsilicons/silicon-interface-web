@@ -25,6 +25,20 @@ export interface RoomDisplay {
  */
 export function roomDisplay(room: Room): RoomDisplay {
   if (room.kind === "direct") {
+    // Observer view: a silicon↔silicon room excludes no one (I'm not a member),
+    // so both participants land in `peers`. Label it with both names so the
+    // spectated conversation reads as "Ada ↔ Babbage".
+    if (room.observed && room.peers.length >= 2) {
+      const [a, b] = room.peers;
+      const label = (p: RoomPeer) => p.name?.trim() || p.handle;
+      return {
+        name: `${label(a)} ↔ ${label(b)}`,
+        handle: a.handle,
+        photoUrl: a.profile_photo_url,
+        peer: a,
+        subtitle: "Silicon ↔ Silicon",
+      };
+    }
     if (room.peers.length > 0) {
       const peer = room.peers[0];
       return {

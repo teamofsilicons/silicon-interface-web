@@ -75,6 +75,8 @@ export interface RoomPeer {
 }
 
 export interface RoomLastEvent {
+  /** ULID of the event — lets the sidebar compare against read receipts. */
+  event_id?: string;
   /** One-line preview suitable for the sidebar — already type-aware. */
   preview: string;
   /** ISO of when this event was authored. */
@@ -83,6 +85,9 @@ export interface RoomLastEvent {
   sender_handle: string | null;
   /** The Event.type, so the sidebar can prefix or icon-decorate appropriately. */
   type: string;
+  /** True when someone other than the sender has read up to this event —
+   *  drives the sent (✓) vs read (✓✓) tick on my own latest message. */
+  read?: boolean;
 }
 
 export interface Room {
@@ -93,6 +98,13 @@ export interface Room {
   peer_kinds: Kind[]; // member kinds excluding self — for Carbons/Silicons filters
   peers: RoomPeer[]; // resolved counterpart projections (one entry for direct rooms)
   unread: boolean;
+  /** Number of unread messages to me — drives the numbered sidebar badge.
+   *  Patched live on the client as event frames arrive. */
+  unread_count?: number;
+  /** True when I see this room only as a read-only observer (my carbon_id is
+   *  in the backend SILICON_OBSERVER_CARBON_IDS allowlist and this is a
+   *  silicon↔silicon room). Drives the read-only sidebar/room treatment. */
+  observed?: boolean;
   /** Lightweight last-event projection so the sidebar can show a preview
    *  without an N+1 fetch per room. Null when the room has no events. */
   last_event: RoomLastEvent | null;
@@ -328,6 +340,9 @@ export type WsFrame =
       kind?: string;
       member_kind?: Kind;
       member_id?: number;
+      /** Sender's public handle — lets the client attribute the beacon (and
+       *  ignore its own) without knowing numeric member ids. */
+      member_handle?: string;
       is_typing?: boolean;
     }
   | {

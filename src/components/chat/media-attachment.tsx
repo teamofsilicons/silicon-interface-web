@@ -36,8 +36,10 @@ export function MediaAttachment({
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
 
+  const retriedRef = React.useRef(false);
   React.useEffect(() => {
     let alive = true;
+    retriedRef.current = false;
     (async () => {
       try {
         const r = await api.mediaDetail(mediaId);
@@ -51,6 +53,17 @@ export function MediaAttachment({
     return () => {
       alive = false;
     };
+  }, [mediaId]);
+
+  // Self-heal a stale/expired presigned URL: re-fetch a fresh one once if the
+  // asset fails to load (S3 "Request has expired" after a very long session).
+  const refreshUrl = React.useCallback(() => {
+    if (retriedRef.current) return;
+    retriedRef.current = true;
+    api
+      .mediaDetail(mediaId)
+      .then((r) => setUrl(r.download_url))
+      .catch(() => undefined);
   }, [mediaId]);
 
   const m = (mime || media?.mime || "").toLowerCase();
@@ -77,7 +90,7 @@ export function MediaAttachment({
           : "4 / 3";
       return (
         <div
-          className="flex w-72 max-w-full items-center justify-center border bg-card"
+          className="flex w-72 max-w-full items-center justify-center bg-card"
           style={{ aspectRatio: aspect }}
           aria-busy="true"
         >
@@ -93,7 +106,7 @@ export function MediaAttachment({
           url={null}
           peaks={media?.peaks ?? null}
           durationMs={media?.duration_ms ?? null}
-          className="min-w-0 flex-1"
+          className="w-full max-w-[20rem]"
         />
       );
     }
@@ -120,22 +133,27 @@ export function MediaAttachment({
       <>
         <figure className="space-y-1">
           <div
-            className="group relative w-72 max-w-full border bg-card"
+            role="button"
+            tabIndex={0}
+            onClick={() => setPreviewOpen(true)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") setPreviewOpen(true);
+            }}
+            aria-label="preview image"
+            className="group relative w-72 max-w-full cursor-pointer overflow-hidden bg-card"
             style={{ aspectRatio: imgAspect }}
           >
-            <button
-              type="button"
-              onClick={() => setPreviewOpen(true)}
-              aria-label="preview image"
-              className="block h-full w-full"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element -- presigned/public S3 */}
-              <img
-                src={url}
-                alt={caption || ""}
-                className="h-full w-full object-contain transition-opacity hover:opacity-90"
-              />
-            </button>
+            {/* `absolute inset-0` sizes the image from the aspect box rather
+                than a percentage height — Safari fails to resolve `h-full`
+                inside an aspect-ratio box, which let tall images render at
+                natural size and spill out below the bubble. */}
+            {/* eslint-disable-next-line @next/next/no-img-element -- presigned/public S3 */}
+            <img
+              src={url}
+              alt={caption || ""}
+              onError={refreshUrl}
+              className="absolute inset-0 h-full w-full object-contain transition-opacity hover:opacity-90"
+            />
             <DownloadOverlay onClick={() => downloadAsset(url, filename)} />
           </div>
           {caption && <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>}
@@ -162,13 +180,13 @@ export function MediaAttachment({
     return (
       <>
         <div
-          className="group relative w-72 max-w-full border bg-card"
+          className="group relative w-72 max-w-full overflow-hidden bg-card"
           style={{ aspectRatio: vidAspect }}
         >
           <video
             src={url}
             controls
-            className="h-full w-full bg-black object-contain"
+            className="absolute inset-0 h-full w-full bg-black object-contain"
           />
           <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             <IconChip onClick={() => setPreviewOpen(true)} label="expand">
@@ -193,41 +211,42 @@ export function MediaAttachment({
   // Audio — Silicon-style waveform player. Uses server-computed peaks +
   // duration so the bars + timer render before the audio bytes download.
   if (isAudio && !isDev) {
+    // No inline download — it's available from the message's options menu. Cap
+    // the width so the player stays compact and never overflows narrow
+    // containers like the profile drawer.
     return (
-      <div className="flex w-full items-center gap-2">
-        <SiliconAudio
-          url={url}
-          peaks={media?.peaks ?? null}
-          durationMs={media?.duration_ms ?? null}
-          className="min-w-0 flex-1"
-        />
-        <IconChip onClick={() => downloadAsset(url, filename)} label="download">
-          <DownloadSimple />
-        </IconChip>
-      </div>
+      <SiliconAudio
+        url={url}
+        peaks={media?.peaks ?? null}
+        durationMs={media?.duration_ms ?? null}
+        className="w-full max-w-[20rem]"
+      />
     );
   }
 
-  // PDF — chip with preview + download. We don't try to render the iframe
-  // inline since most PDFs need real estate. `text-foreground` is explicit
-  // because the parent (my own bubble) sets `text-primary-foreground` and
-  // would otherwise leave the chip's text invisible-on-card.
+  // PDF — a clean, clearly-clickable document card. Clicking opens the
+  // fullscreen previewer; download lives in the message's options menu.
   if (isPdf && !isDev) {
     return (
       <>
-        <div className="flex items-center gap-2 border bg-card px-3 py-2 text-xs text-foreground">
-          <FilePdf className="h-5 w-5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{filename}</span>
-          <button
-            type="button"
-            onClick={() => setPreviewOpen(true)}
-            className="border bg-foreground px-2 py-1 text-background transition-opacity hover:opacity-80"
-          >
-            preview
-          </button>
-          <IconChip onClick={() => downloadAsset(url, filename)} label="download">
-            <DownloadSimple />
-          </IconChip>
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => setPreviewOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") setPreviewOpen(true);
+          }}
+          aria-label={`preview ${filename}`}
+          className="group flex w-60 max-w-full cursor-pointer items-center gap-3 bg-card px-3 py-3 text-foreground transition-colors hover:bg-accent"
+        >
+          <FilePdf className="h-9 w-9 shrink-0" weight="light" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium">{filename}</div>
+            <div className="truncate text-[11px] text-muted-foreground">
+              {media?.size ? `${formatBytes(media.size)} · ` : ""}click to preview
+            </div>
+          </div>
+          <ArrowsOutSimple className="h-4 w-4 shrink-0 opacity-50 transition-opacity group-hover:opacity-100" />
         </div>
         <MediaPreviewer
           open={previewOpen}
@@ -245,7 +264,7 @@ export function MediaAttachment({
   // the PDF chip — pin the ink color so the chip stays readable inside a
   // primary-colored "mine" bubble.
   return (
-    <div className="inline-flex items-center gap-2 border bg-card px-3 py-2 text-xs text-foreground">
+    <div className="inline-flex items-center gap-2 bg-card px-3 py-2 text-xs text-foreground">
       <File className="h-4 w-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate">{filename}</span>
       {!isDev && (
@@ -255,6 +274,12 @@ export function MediaAttachment({
       )}
     </div>
   );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** Hover-revealed download tag in the corner of an image. */

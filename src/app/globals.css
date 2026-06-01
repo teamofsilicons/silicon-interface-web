@@ -125,9 +125,29 @@ body {
   color: var(--primary-foreground);
 }
 
+/* Sent (ink) bubbles: the default highlight above is also ink, so a selection
+   disappears into the bubble. Reverse it — cream highlight, ink text — so the
+   selection is clearly visible. Unlayered + a class, so it beats the global
+   ::selection rule above on specificity (and applies to nested markdown too). */
+.bubble-sent::selection,
+.bubble-sent *::selection {
+  background: var(--primary-foreground);
+  color: var(--primary);
+}
+
 :focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+
+/* Menu/option items signal the active row with a background, not the focus
+   outline. Radix focuses the highlighted item, which would otherwise pick up
+   the ink :focus-visible outline above (a hard black border on hover). */
+[role="menuitem"]:focus-visible,
+[role="menuitemcheckbox"]:focus-visible,
+[role="menuitemradio"]:focus-visible,
+[role="option"]:focus-visible {
+  outline: none;
 }
 
 /* Form controls indicate focus with their own 1px border (focus-visible:border-ring),

@@ -12,7 +12,8 @@ export type EventType =
   | "m.session_marker"
   | "m.take_back"
   | "m.system"
-  | "m.reaction";
+  | "m.reaction"
+  | "m.remote_browser";
 
 export type ProgressState =
   | "reading_file"
@@ -69,9 +70,27 @@ export interface SiliconPublic {
 
 export interface RoomPeer {
   kind: "carbon" | "silicon";
+  /** Public id (carbon_id / silicon_id) — used to match a saved contact and to
+   *  render "@id" for unsaved chats. */
+  id: string;
   handle: string;
   name: string;
   profile_photo_url: string | null;
+}
+
+/** A saved contact (private address book entry). */
+export interface Contact {
+  id: number;
+  target_kind: "carbon" | "silicon";
+  target_id: string; // public id of the carbon/silicon
+  name: string; // custom label (defaults to target's name)
+  note: string; // private to the owner
+  custom_photo: boolean; // true when the owner set their own picture
+  photo_url: string | null; // custom photo, else the target's
+  target_name: string;
+  target_photo_url: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface RoomLastEvent {

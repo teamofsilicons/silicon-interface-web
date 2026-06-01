@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
+import { RemoteBrowserCard } from "@/components/chat/remote-browser-card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -702,6 +703,14 @@ function Body({ event }: { event: Event }) {
           )}
           {c.text ? <div className="text-xs italic">“{String(c.text)}”</div> : null}
         </div>
+      );
+    case "m.remote_browser":
+      return (
+        <RemoteBrowserCard
+          url={String(c.url ?? "")}
+          expiresAt={c.expires_at ? String(c.expires_at) : undefined}
+          ttlMinutes={Number(c.ttl_minutes) || 60}
+        />
       );
     case "m.progress": {
       const state = (c.state as ProgressState) || "thinking";

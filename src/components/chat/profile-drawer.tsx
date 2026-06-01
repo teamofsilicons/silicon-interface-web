@@ -4,9 +4,12 @@ import * as React from "react";
 import { Copy, FileText, ImageSquare, LinkSimple, MicrophoneStage, SquaresFour } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
+import { NotePencil } from "@phosphor-icons/react/dist/ssr";
+
 import { api } from "@/lib/api";
-import type { CarbonPublic, Event, Room, SiliconPublic } from "@/lib/types";
+import type { Contact, CarbonPublic, Event, Room, SiliconPublic } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 import {
   Dialog,
@@ -25,6 +28,10 @@ interface Props {
   room: Room;
   events: Event[];
   currentUsername?: string;
+  /** Saved-contact record for the room's counterpart, if any. */
+  contact?: Contact;
+  /** Opens the Save/Edit contact dialog (only for 1-on-1 peers). */
+  onEditContact?: () => void;
   open: boolean;
   onOpenChange: (v: boolean) => void;
   /** Optional override — when set, the drawer shows this specific sender's
@@ -46,6 +53,8 @@ export function ProfileDrawer({
   room,
   events,
   currentUsername,
+  contact,
+  onEditContact,
   open,
   onOpenChange,
   focusSender,
@@ -133,8 +142,9 @@ export function ProfileDrawer({
       ? profile.carbon_id
       : profile.silicon_id
     : counterpart?.handle ?? room.peers[0]?.handle ?? "";
-  const displayName = profile?.name?.trim() || handle;
-  const photoUrl = profile?.profile_photo_url ?? null;
+  // A saved contact's custom name/photo win over the target's defaults.
+  const displayName = contact?.name?.trim() || profile?.name?.trim() || handle;
+  const photoUrl = contact?.photo_url ?? profile?.profile_photo_url ?? null;
   const bio = profile?.tagline ?? "";
   const username = profile && "username" in profile ? profile.username : "";
 
@@ -185,6 +195,39 @@ export function ProfileDrawer({
 
         {bio && (
           <p className="mt-4 px-1 text-center text-sm text-muted-foreground">{bio}</p>
+        )}
+
+        {/* Saved-contact note (private to you) + edit. */}
+        {contact && (
+          <div className="mt-4 space-y-1.5 border-t pt-3">
+            <div className="flex items-center justify-between">
+              <h3 className="label-mono text-[10px] opacity-60">your note</h3>
+              {onEditContact && (
+                <button
+                  type="button"
+                  onClick={onEditContact}
+                  className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <NotePencil className="h-3 w-3" /> edit
+                </button>
+              )}
+            </div>
+            <p className="whitespace-pre-wrap text-sm text-foreground/90">
+              {contact.note || <span className="text-muted-foreground">—</span>}
+            </p>
+            {contact.custom_photo && (
+              <p className="label-mono text-[10px] text-muted-foreground">
+                Picture set by you
+              </p>
+            )}
+          </div>
+        )}
+        {!contact && onEditContact && (
+          <div className="mt-4 flex justify-center border-t pt-3">
+            <Button size="sm" onClick={onEditContact} className="gap-1.5">
+              <NotePencil className="h-3.5 w-3.5" /> Save contact
+            </Button>
+          </div>
         )}
 
         {/* Attachment tabs */}

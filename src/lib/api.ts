@@ -9,6 +9,7 @@ import type {
   BillingData,
   Carbon,
   CarbonPublic,
+  Contact,
   DevOtpResponse,
   Event,
   Invite,
@@ -406,6 +407,21 @@ export const api = {
     call<{ job: string; media_id: string; status: string }>("POST", "/api/v1/tts", data),
   stt: (data: { media_id: string; language?: string }) =>
     call<{ job: string; media_id: string }>("POST", "/api/v1/stt", data),
+
+  // -------- contacts --------
+  contacts: () => call<Contact[]>("GET", "/api/v1/contacts/"),
+  saveContact: (data: {
+    target_kind: "carbon" | "silicon";
+    target_id: string;
+    name?: string;
+    note?: string;
+    photo_key?: string;
+  }) => call<Contact>("POST", "/api/v1/contacts/", data),
+  updateContact: (
+    id: number,
+    data: { name?: string; note?: string; photo_key?: string },
+  ) => call<Contact>("PATCH", `/api/v1/contacts/${id}`, data),
+  deleteContact: (id: number) => call<void>("DELETE", `/api/v1/contacts/${id}`),
 
   // -------- cost (staff) --------
   costSummary: () =>

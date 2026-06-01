@@ -26,6 +26,10 @@ import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProgressCard, type ProgressEntry } from "@/components/chat/progress-card";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
+import { SaveContactDialog } from "@/components/chat/save-contact-dialog";
+import type { Contact } from "@/lib/types";
+import { contactKey } from "@/lib/use-contacts";
+import { UserPlus } from "@phosphor-icons/react/dist/ssr";
 
 interface Props {
   room: Room;
@@ -36,6 +40,10 @@ interface Props {
     lastFrame: WsFrame | null;
     send: (frame: object) => void;
   };
+  /** Saved contacts keyed by `${kind}:${id}`. */
+  contacts?: Map<string, Contact>;
+  /** Called after a contact is saved/edited so the parent can refetch. */
+  onContactsChanged?: () => void;
 }
 
 type LocalEvent = Event & {
@@ -48,10 +56,20 @@ const TEMP_ID = (clientId: string) => `temp-${clientId}`;
 // and any out-of-band events fresh even if the WS connection blips.
 const POLL_INTERVAL_MS = 10_000;
 
-export function RoomView({ room, allRooms, socket }: Props) {
+export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
+  // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
+  // header title (saved name vs @id), avatar, and the Save Contact button.
+  const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
+  const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
+  const [saveOpen, setSaveOpen] = React.useState(false);
+  const headerTitle = peer
+    ? contact?.name || null // null → render the styled @id below
+    : display.name;
+  const headerPhoto = contact?.photo_url ?? display.photoUrl;
+  const headerSeed = peer?.id ?? display.handle;
   // Observer mode: I'm in the backend allowlist and this is a silicon↔silicon
   // room I may only watch. No composer, no reactions/replies/take-backs, and
   // no read-receipts (I'm not a member, so the read POST would 403 anyway).
@@ -622,10 +640,15 @@ export function RoomView({ room, allRooms, socket }: Props) {
           className="flex min-w-0 flex-1 items-center gap-3 text-left transition-opacity hover:opacity-80"
           title="view profile & attachments"
         >
-          <IdAvatar seed={display.handle} src={display.photoUrl} size={36} />
+          <IdAvatar seed={headerSeed} src={headerPhoto} size={36} />
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold tracking-tight">
-              {display.name}
+              {headerTitle ?? (
+                <>
+                  <span className="opacity-60">@</span>
+                  {peer?.id}
+                </>
+              )}
             </h2>
             <p className="flex items-center gap-1 truncate text-xs text-muted-foreground">
               {readOnly && <Eye className="h-3 w-3 shrink-0" />}
@@ -635,6 +658,18 @@ export function RoomView({ room, allRooms, socket }: Props) {
             </p>
           </div>
         </button>
+        {/* Save Contact — only for unsaved 1-on-1 peers, left of search. */}
+        {peer && !contact && (
+          <Button
+            size="sm"
+            onClick={() => setSaveOpen(true)}
+            className="shrink-0 gap-1.5 bg-primary text-primary-foreground hover:bg-primary/90"
+            title="save contact"
+          >
+            <UserPlus className="h-3.5 w-3.5" />
+            Save Contact
+          </Button>
+        )}
         {search === null ? (
           <Button
             size="icon"
@@ -650,10 +685,22 @@ export function RoomView({ room, allRooms, socket }: Props) {
         )}
       </header>
 
+      {peer && (
+        <SaveContactDialog
+          open={saveOpen}
+          onOpenChange={setSaveOpen}
+          peer={peer}
+          existing={contact}
+          onSaved={() => onContactsChanged?.()}
+        />
+      )}
+
       <ProfileDrawer
         room={room}
         events={events}
         currentUsername={carbon?.username}
+        contact={contact}
+        onEditContact={peer ? () => setSaveOpen(true) : undefined}
         open={profileOpen}
         onOpenChange={(v) => {
           setProfileOpen(v);

@@ -3,8 +3,9 @@
 import * as React from "react";
 import { Check, Checks, Eye, Microphone } from "@phosphor-icons/react/dist/ssr";
 
-import type { Room } from "@/lib/types";
+import type { Contact, Room } from "@/lib/types";
 import { roomDisplay } from "@/lib/peers";
+import { contactKey } from "@/lib/use-contacts";
 import { cn, relativeTime } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,8 @@ interface Props {
   rooms: Room[];
   /** My handle, to tell whether the latest message is mine (→ show a tick). */
   myHandle?: string | null;
+  /** Saved contacts keyed by `${kind}:${id}` (drives @id vs name display). */
+  contacts?: Map<string, Contact>;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
@@ -30,6 +33,7 @@ interface Props {
 export function RoomList({
   rooms,
   myHandle,
+  contacts,
   selectedId,
   onSelect,
   onNew,
@@ -69,6 +73,18 @@ export function RoomList({
             // badge (✓✓ once the other side has read it, ✓ until then).
             const mineLast =
               !!myHandle && r.last_event?.sender_handle === myHandle;
+            // Direct 1-on-1 peer (for @id / saved-contact display).
+            const peer =
+              r.kind === "direct" && r.peers.length === 1 ? r.peers[0] : null;
+            const contact = peer
+              ? contacts?.get(contactKey(peer.kind, peer.id))
+              : undefined;
+            const avatarSrc = contact?.photo_url ?? d.photoUrl;
+            const avatarSeed = peer?.id ?? d.handle;
+            const nameClass = cn(
+              "truncate text-sm",
+              unread > 0 ? "font-semibold" : "font-medium",
+            );
             return (
               <li key={r.room_id}>
                 <button
@@ -95,8 +111,8 @@ export function RoomList({
                   )}
                 >
                   <IdAvatar
-                    seed={d.handle}
-                    src={d.photoUrl}
+                    seed={avatarSeed}
+                    src={avatarSrc}
                     size={36}
                     className="mt-0.5"
                   />
@@ -109,14 +125,19 @@ export function RoomList({
                             aria-label="observing (read-only)"
                           />
                         )}
-                        <span
-                          className={cn(
-                            "truncate text-sm",
-                            unread > 0 ? "font-semibold" : "font-medium",
-                          )}
-                        >
-                          {d.name}
-                        </span>
+                        {peer ? (
+                          contact ? (
+                            <span className={nameClass}>{contact.name}</span>
+                          ) : (
+                            // Unsaved chat → show the public id with a faint @.
+                            <span className={nameClass}>
+                              <span className="opacity-60">@</span>
+                              {peer.id}
+                            </span>
+                          )
+                        ) : (
+                          <span className={nameClass}>{d.name}</span>
+                        )}
                       </span>
                       <span
                         className={cn(

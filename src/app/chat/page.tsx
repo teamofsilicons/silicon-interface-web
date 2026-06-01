@@ -11,12 +11,20 @@ import { playReceived } from "@/lib/sounds";
 import type { Event, Room } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
+import { useContacts } from "@/lib/use-contacts";
 import { cn } from "@/lib/utils";
 
 // Message types that count toward the unread badge + drive the sidebar
 // preview. Mirrors the backend projection (reactions / system / markers /
 // progress never count).
-const COUNTABLE_TYPES = new Set(["m.text", "m.image", "m.file", "m.voice", "m.tts"]);
+const COUNTABLE_TYPES = new Set([
+  "m.text",
+  "m.image",
+  "m.file",
+  "m.voice",
+  "m.tts",
+  "m.remote_browser",
+]);
 
 function isCountableEvent(ev: Event): boolean {
   return COUNTABLE_TYPES.has(ev.type) && !ev.redacted_at;
@@ -43,6 +51,8 @@ function eventPreview(ev: Event): string | null {
     }
     case "m.voice":
       return "🎙 voice note";
+    case "m.remote_browser":
+      return "🌐 Remote Browser link";
     case "m.tts": {
       const t = String(c.text ?? "").trim();
       return t ? `🔊 ${t.slice(0, 80)}` : "🔊 audio";
@@ -98,6 +108,7 @@ function ChatPageInner() {
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const socket = useChatSocket();
   const { teams } = useTeams();
+  const contacts = useContacts();
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
 
@@ -414,6 +425,7 @@ function ChatPageInner() {
         <RoomList
           rooms={filtered}
           myHandle={myUsername}
+          contacts={contacts.byPeer}
           selectedId={selected}
           onSelect={(id) => router.push(`/chat?room=${id}`)}
           onNew={() => setDialogOpen(true)}
@@ -425,7 +437,13 @@ function ChatPageInner() {
       </aside>
 
       {selectedRoom ? (
-        <RoomView room={selectedRoom} allRooms={rooms} socket={socket} />
+        <RoomView
+          room={selectedRoom}
+          allRooms={rooms}
+          socket={socket}
+          contacts={contacts.byPeer}
+          onContactsChanged={contacts.refresh}
+        />
       ) : (
         <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
           <div className="max-w-md space-y-3 text-center">

@@ -198,11 +198,12 @@ function BillingSection({ slug }: { slug: string }) {
     toast.success("cycle rolled");
   });
 
-  const checkout = run(async () => {
-    const r = await api.teamCheckout(slug);
-    if (r.checkout_url) window.open(r.checkout_url, "_blank", "noopener");
-    else toast.error(r.error || "Checkout unavailable.");
-  });
+  const payCycle = (cycleId: number) =>
+    run(async () => {
+      const r = await api.teamCheckout(slug, { cycle_id: cycleId, return_url: window.location.href });
+      if (r.checkout_url) window.location.href = r.checkout_url;
+      else toast.error(r.error || "Checkout unavailable.");
+    })();
 
   if (!data) {
     return (
@@ -237,9 +238,6 @@ function BillingSection({ slug }: { slug: string }) {
           <span className="ml-auto flex gap-2">
             <Button variant="outline" onClick={rollNow} disabled={busy}>
               roll cycle
-            </Button>
-            <Button onClick={checkout} disabled={busy}>
-              pay
             </Button>
           </span>
         </div>
@@ -298,7 +296,9 @@ function BillingSection({ slug }: { slug: string }) {
           {data.cycles.length === 0 ? (
             <p className="text-sm text-muted-foreground">No billing cycles yet.</p>
           ) : (
-            data.cycles.map((c) => <CycleCard key={c.id} cycle={c} />)
+            data.cycles.map((c) => (
+              <CycleCard key={c.id} cycle={c} busy={busy} onPay={() => payCycle(c.id)} />
+            ))
           )}
         </div>
       </div>
@@ -306,13 +306,19 @@ function BillingSection({ slug }: { slug: string }) {
   );
 }
 
-function CycleCard({ cycle }: { cycle: BillingCycle }) {
+function CycleCard({ cycle, busy, onPay }: { cycle: BillingCycle; busy: boolean; onPay: () => void }) {
   const variant =
     cycle.status === "paid" ? "success" : cycle.status === "failed" ? "destructive" : "secondary";
+  const payable = cycle.status !== "paid";
   return (
     <div className="border bg-card">
       <div className="flex items-center justify-between border-b px-3 py-2">
-        <span className="text-sm font-medium">{monthLabel(cycle.period_start)}</span>
+        <span className="text-sm font-medium">
+          {monthLabel(cycle.period_start)}
+          {cycle.due_date && payable && (
+            <span className="ml-2 text-xs font-normal text-muted-foreground">due {cycle.due_date}</span>
+          )}
+        </span>
         <span className="flex items-center gap-2">
           <Badge variant={variant}>{cycle.status}</Badge>
           <span className="tabular-nums text-sm font-semibold">
@@ -333,6 +339,13 @@ function CycleCard({ cycle }: { cycle: BillingCycle }) {
           </li>
         ))}
       </ul>
+      {payable && (
+        <div className="border-t px-3 py-2">
+          <Button className="w-full" onClick={onPay} disabled={busy}>
+            Pay {fmtCents(cycle.total_cents, cycle.currency)} now
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

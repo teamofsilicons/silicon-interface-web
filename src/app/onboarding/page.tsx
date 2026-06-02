@@ -33,7 +33,7 @@ const SCREENS: Screen[] = [
   },
   {
     text: () =>
-      "Before we begin, some context:\nCarbon is… You; all the human elements in the play. And Silicon… well you will know once you talk to one. Let's get you started.",
+      "Before we begin, some context:\nCarbon is You; all the human elements in the play. And Silicon… well you will know once you talk to one. Let's get you started.",
   },
   {
     text: () =>

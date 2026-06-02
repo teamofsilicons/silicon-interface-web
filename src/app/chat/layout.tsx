@@ -2,6 +2,7 @@
 
 import { AppHeader } from "@/components/app-header";
 import { AuthGuard } from "@/components/auth-guard";
+import { PaymentBanner } from "@/components/teams/payment-banner";
 
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
   // h-screen (not min-h-screen) clamps the chat surface to exactly the
@@ -13,6 +14,8 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
     <AuthGuard>
       <div className="flex h-screen flex-col overflow-hidden">
         <AppHeader active="chat" />
+        {/* Head-only: warns in the 7 days before a payment deadline, then "Expired". */}
+        <PaymentBanner />
         <div className="flex min-h-0 flex-1 overflow-hidden">{children}</div>
       </div>
     </AuthGuard>

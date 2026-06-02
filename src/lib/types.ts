@@ -210,6 +210,7 @@ export interface BillingCycle {
   id: number;
   period_start: string;
   period_end: string;
+  due_date: string | null;
   status: "open" | "charged" | "paid" | "failed";
   total_cents: number;
   currency: string;
@@ -217,10 +218,24 @@ export interface BillingCycle {
   created_at: string;
 }
 
+/** Payment-deadline signal for the head-only banner. */
+export interface PaymentStatus {
+  state: "ok" | "warning" | "grace" | "paused";
+  due_date: string | null;
+  days_left: number | null;
+  pause_date?: string | null;
+  days_to_pause?: number | null;
+  grace_days?: number;
+  amount_cents: number;
+  currency: string;
+  cycle_id?: number;
+}
+
 export interface BillingData {
   plan: { monthly_cost_cents: number; currency: string };
   addons: BillingAddon[];
   cycles: BillingCycle[];
+  payment: PaymentStatus;
 }
 
 export interface InviteInfo {

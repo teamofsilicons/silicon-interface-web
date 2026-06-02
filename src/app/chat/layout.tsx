@@ -3,6 +3,7 @@
 import { AppHeader } from "@/components/app-header";
 import { AuthGuard } from "@/components/auth-guard";
 import { PaymentBanner } from "@/components/teams/payment-banner";
+import { TimezoneSync } from "@/components/timezone-sync";
 
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
   // h-screen (not min-h-screen) clamps the chat surface to exactly the
@@ -12,6 +13,7 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
   // sidebar and composer off-screen and the whole document scrolls.
   return (
     <AuthGuard>
+      <TimezoneSync />
       <div className="flex h-screen flex-col overflow-hidden">
         <AppHeader active="chat" />
         {/* Head-only: warns in the 7 days before a payment deadline, then "Expired". */}

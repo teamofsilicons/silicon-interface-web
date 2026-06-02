@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -26,6 +26,7 @@ import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProgressCard, type ProgressEntry } from "@/components/chat/progress-card";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
+import { CronDrawer } from "@/components/chat/cron-drawer";
 import { SaveContactDialog } from "@/components/chat/save-contact-dialog";
 import type { Contact } from "@/lib/types";
 import { contactKey } from "@/lib/use-contacts";
@@ -84,6 +85,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     handle: string;
   } | null>(null);
   const [search, setSearch] = React.useState<string | null>(null);
+  const [cronOpen, setCronOpen] = React.useState(false);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
   // #5 — Per-handle activity state. Each entry expires after `until`.
@@ -670,6 +672,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             Save Contact
           </Button>
         )}
+        {/* Crons — only in a 1-on-1 silicon chat, left of search. */}
+        {peer?.kind === "silicon" && search === null && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setCronOpen(true)}
+            aria-label="view crons"
+            title="crons this silicon set for you"
+          >
+            <Clock />
+          </Button>
+        )}
         {search === null ? (
           <Button
             size="icon"
@@ -684,6 +698,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           <SearchBar value={search} onChange={setSearch} onClose={() => setSearch(null)} />
         )}
       </header>
+
+      {peer?.kind === "silicon" && (
+        <CronDrawer
+          siliconId={peer.id}
+          siliconName={contact?.name ?? peer.name}
+          open={cronOpen}
+          onOpenChange={setCronOpen}
+        />
+      )}
 
       {peer && (
         <SaveContactDialog

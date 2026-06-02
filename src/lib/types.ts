@@ -78,6 +78,34 @@ export interface RoomPeer {
   profile_photo_url: string | null;
 }
 
+/** A cron a silicon scheduled. Carbons see these read-only. */
+export interface CronTarget {
+  kind: "carbon" | "silicon";
+  id: string;
+}
+export interface Cron {
+  cron_id: string;
+  trigger: string; // linux-cron expression
+  for_targets: CronTarget[];
+  task: string;
+  is_active: boolean;
+  setup_by: { silicon_id: string; name: string };
+  created_at: string;
+  updated_at: string;
+}
+export interface CronConflict {
+  carbon_id: string;
+  cron_id: string;
+  task: string;
+  trigger: string;
+  message: string;
+}
+/** create/patch return the saved cron plus any scheduling conflicts. */
+export interface CronWriteResult {
+  cron: Cron;
+  conflicts: CronConflict[];
+}
+
 /** A saved contact (private address book entry). */
 export interface Contact {
   id: number;

@@ -10,6 +10,8 @@ import type {
   Carbon,
   CarbonPublic,
   Contact,
+  Cron,
+  CronWriteResult,
   DevOtpResponse,
   Event,
   Invite,
@@ -422,6 +424,24 @@ export const api = {
     data: { name?: string; note?: string; photo_key?: string },
   ) => call<Contact>("PATCH", `/api/v1/contacts/${id}`, data),
   deleteContact: (id: number) => call<void>("DELETE", `/api/v1/contacts/${id}`),
+
+  // -------- crons --------
+  // Reads are open; create/update/delete are silicon-only (creator-owned) and
+  // simply 403 for carbon callers — the UI keeps them read-only.
+  crons: (params: { for?: string; setup_by?: string; mine?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    if (params.for) q.set("for", params.for);
+    if (params.setup_by) q.set("setup_by", params.setup_by);
+    if (params.mine) q.set("mine", "1");
+    const qs = q.toString();
+    return call<Cron[]>("GET", `/api/v1/crons/${qs ? `?${qs}` : ""}`);
+  },
+  cron: (cron_id: string) => call<Cron>("GET", `/api/v1/crons/${cron_id}`),
+  createCron: (data: { trigger: string; for_targets: { kind: "carbon" | "silicon"; id: string }[]; task: string }) =>
+    call<CronWriteResult>("POST", "/api/v1/crons/", data),
+  patchCron: (cron_id: string, patch: Partial<{ trigger: string; task: string; is_active: boolean }>) =>
+    call<CronWriteResult>("PATCH", `/api/v1/crons/${cron_id}`, patch),
+  deleteCron: (cron_id: string) => call<void>("DELETE", `/api/v1/crons/${cron_id}`),
 
   // -------- cost (staff) --------
   costSummary: () =>

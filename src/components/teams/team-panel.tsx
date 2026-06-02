@@ -27,6 +27,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ReactivityKpi } from "./reactivity-kpi";
+import { CronList } from "./cron-list";
+import type { Cron } from "@/lib/types";
 
 export function TeamPanel({
   slug,
@@ -117,6 +119,8 @@ function TeamPanelBody({ slug }: { slug: string }) {
           ))}
         </ul>
       </Section>
+
+      <CronsSection />
 
       <InviteesSection slug={slug} />
       <InviteSection slug={slug} canInvite={head} />
@@ -356,6 +360,29 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h3 className="label-mono">{title}</h3>
       {children}
     </section>
+  );
+}
+
+function CronsSection() {
+  const [crons, setCrons] = React.useState<Cron[]>([]);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    let alive = true;
+    api
+      .crons({ for: "me" })
+      .then((rows) => alive && setCrons(rows))
+      .catch(() => alive && setCrons([]))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  return (
+    <Section title="crons">
+      <CronList crons={crons} loading={loading} showSilicon />
+    </Section>
   );
 }
 

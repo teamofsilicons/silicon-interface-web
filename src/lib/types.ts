@@ -86,6 +86,8 @@ export interface CronTarget {
 export interface Cron {
   cron_id: string;
   trigger: string; // linux-cron expression
+  timezone: string; // IANA zone the trigger is anchored to ("" == UTC)
+  next_run: string | null; // next absolute fire instant (UTC ISO)
   for_targets: CronTarget[];
   task: string;
   is_active: boolean;

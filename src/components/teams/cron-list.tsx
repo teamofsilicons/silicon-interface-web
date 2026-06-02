@@ -5,6 +5,22 @@ import { Clock } from "@phosphor-icons/react/dist/ssr";
 
 import type { Cron } from "@/lib/types";
 
+// Render the next fire instant in the *viewer's* own timezone (the browser
+// zone). A cron set at "5pm" by a GMT+5:30 carbon shows as 5:00 PM to them and
+// 3:00 PM to a GMT+3:30 viewer — same instant, localized.
+function formatNext(iso: string | null): string | null {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      weekday: "short",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read-only list of crons, shared by the silicon-chat cron drawer and the team
  * view. Carbons can't create crons, so the list always ends with a hint to ask
@@ -28,18 +44,22 @@ export function CronList({
           no crons yet.
         </div>
       ) : (
-        crons.map((c) => (
-          <div key={c.cron_id} className="flex items-start gap-3 border p-3">
-            <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            <div className="min-w-0 flex-1">
-              <p className="break-words text-sm">{c.task}</p>
-              <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{c.trigger}</code>
-                {showSilicon && <span>· set by {c.setup_by?.name ?? "a silicon"}</span>}
-              </p>
+        crons.map((c) => {
+          const next = formatNext(c.next_run);
+          return (
+            <div key={c.cron_id} className="flex items-start gap-3 border p-3">
+              <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-sm">{c.task}</p>
+                <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  {next && <span>next: {next}</span>}
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{c.trigger}</code>
+                  {showSilicon && <span>· set by {c.setup_by?.name ?? "a silicon"}</span>}
+                </p>
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       )}
       <p className="pt-1 text-center text-xs text-muted-foreground">
         talk with your silicons to add a CRON

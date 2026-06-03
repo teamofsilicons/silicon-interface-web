@@ -244,27 +244,6 @@ export const api = {
       { return_url: opts.return_url ?? "", cycle_id: opts.cycle_id },
     ),
 
-  // -------- silicons (admin) --------
-  createSilicon: (data: { name: string; team_slug: string; capabilities?: Record<string, unknown> }) =>
-    call<Silicon>("POST", "/api/v1/silicons/", data),
-  mintSiliconKey: (silicon_id: string, label = "") =>
-    call<{ id: number; prefix: string; label: string; plaintext: string; warning: string }>(
-      "POST",
-      `/api/v1/silicons/${silicon_id}/api-keys`,
-      { label },
-    ),
-  siliconKeys: (silicon_id: string) =>
-    call<{ id: number; prefix: string; label: string; created_at: string; revoked_at: string | null }[]>(
-      "GET",
-      `/api/v1/silicons/${silicon_id}/api-keys`,
-    ),
-  revokeSiliconKey: (silicon_id: string, key_id: number) =>
-    call<{ id: number; prefix: string; revoked_at: string | null }>(
-      "POST",
-      `/api/v1/silicons/${silicon_id}/api-keys/${key_id}/revoke`,
-      {},
-    ),
-
   // -------- chat --------
   rooms: () => call<Room[]>("GET", "/api/v1/rooms/"),
   createRoom: (name: string, topic = "") => call<Room>("POST", "/api/v1/rooms/", { name, topic }),

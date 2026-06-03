@@ -43,7 +43,6 @@ export default function DevPage() {
           <TabsTrigger value="voice">voice</TabsTrigger>
           <TabsTrigger value="media">media</TabsTrigger>
           <TabsTrigger value="orgs">teams</TabsTrigger>
-          <TabsTrigger value="silicons">silicons</TabsTrigger>
           <TabsTrigger value="cost">cost</TabsTrigger>
           <TabsTrigger value="ws">ws log</TabsTrigger>
         </TabsList>
@@ -78,10 +77,6 @@ export default function DevPage() {
 
         <TabsContent value="orgs">
           <OrgsTab />
-        </TabsContent>
-
-        <TabsContent value="silicons">
-          <SiliconsTab />
         </TabsContent>
 
         <TabsContent value="cost">
@@ -514,55 +509,6 @@ function OrgsTab() {
           </div>
         }
         run={() => api.createTeam({ name })}
-      />
-    </div>
-  );
-}
-
-function SiliconsTab() {
-  const [siliconId, setSiliconId] = React.useState("");
-  const [label, setLabel] = React.useState("dev");
-  const [name, setName] = React.useState("Ada");
-  const [teamSlug, setTeamSlug] = React.useState("");
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <EndpointCard
-        title="create silicon"
-        method="POST"
-        path="/api/v1/silicons/"
-        description="You must be a team admin."
-        controls={
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1">
-              <Label>name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
-            </div>
-            <div className="space-y-1">
-              <Label>team_slug</Label>
-              <Input value={teamSlug} onChange={(e) => setTeamSlug(e.target.value)} />
-            </div>
-          </div>
-        }
-        run={() => api.createSilicon({ name, team_slug: teamSlug })}
-      />
-      <EndpointCard
-        title="mint silicon API key"
-        method="POST"
-        path="/api/v1/silicons/{silicon_id}/api-keys"
-        description="Plaintext is shown ONCE. Store it now."
-        controls={
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1">
-              <Label>silicon_id</Label>
-              <Input value={siliconId} onChange={(e) => setSiliconId(e.target.value)} />
-            </div>
-            <div className="space-y-1">
-              <Label>label</Label>
-              <Input value={label} onChange={(e) => setLabel(e.target.value)} />
-            </div>
-          </div>
-        }
-        run={() => api.mintSiliconKey(siliconId, label)}
       />
     </div>
   );

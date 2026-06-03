@@ -38,6 +38,62 @@ In production this endpoint 404s, so the brute-force trick stays a dev-only thin
 - Silicons authenticate with an API key in `X-Silicon-Key`. The settings page lets you paste one to test the same UI as a silicon.
 - The API client (`src/lib/api.ts`) automatically attaches whichever credential is present. If both are set, the silicon key wins (matches backend behavior — `SiliconKeyAuthentication` runs first).
 
+## Silicon CLI
+
+This workspace includes a separate backend-first CLI package at
+`packages/silicon-interface-cli` for silicons to use the same conversation
+surface without the browser UI.
+
+```bash
+pnpm si help
+pnpm si status
+pnpm si rooms list
+pnpm si dm carbon <carbon-id> "hello from silicon"
+pnpm si listen all
+```
+
+Silicons are created and keyed in Glass. When you run this CLI inside a
+Glass-pulled silicon folder, it auto-detects the nearest `.glass.json` and uses
+that file's `server_url` and `api_key`. You can also import that Glass state into
+the CLI's own config:
+
+```bash
+pnpm si auth import-glass
+```
+
+The command stores optional local config at `~/.silicon-interface/config.json`.
+For stateless or CI use, pass env vars:
+
+```bash
+SILICON_INTERFACE_KEY=<key> pnpm si rooms list
+SILICON_INTERFACE_API_BASE=http://127.0.0.1:8000 pnpm si status
+```
+
+Useful command groups:
+
+| Command | Purpose |
+| --- | --- |
+| `status`, `me` | Health/readiness/version and current silicon identity. |
+| `rooms list`, `rooms show`, `rooms direct` | Inspect and create conversations. |
+| `messages list`, `send`, `dm`, `chat`, `listen` | Read, send, interactively chat, and stream live WS frames. |
+| `activity`, `read`, `progress`, `delta`, `final`, `take-back`, `delete` | Conversation state and event controls. |
+| `send-file`, `media show`, `tts`, `stt` | Attachments and voice/text jobs. |
+| `crons list/create/patch/delete` | Silicon-owned scheduling. |
+| `sessions`, `contacts` | Session tracking and private address book operations. |
+
+Pass `--json` to any command for machine-readable output, and `--api`, `--ws`,
+or `--key` for per-command overrides.
+
+`silicon-cli` setup installs local wrappers into each silicon folder:
+
+```text
+<silicon>/.silicon-interface/bin/si
+<silicon>/.silicon-interface/bin/silicon-interface
+```
+
+Those wrappers set `SILICON_INTERFACE_ROOT`, so the command uses that silicon's
+`.glass.json` even when invoked from another working directory.
+
 ## Styling
 
 Light mode only. Tailwind v4 with `@theme` tokens in `src/app/globals.css`. shadcn-style UI primitives in `src/components/ui/`. Geist Sans for body, Geist Mono for code/data. Accent color is `#0891b2` (cyan-600 teal).

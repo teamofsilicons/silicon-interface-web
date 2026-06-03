@@ -1,0 +1,26 @@
+{
+  "name": "@teamofsilicons/silicon-interface-cli",
+  "version": "0.1.0",
+  "description": "Backend-first CLI for Silicon Interface conversations.",
+  "type": "module",
+  "bin": {
+    "silicon-interface": "./bin/silicon-interface.mjs",
+    "si": "./bin/silicon-interface.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED",
+  "private": false,
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "scripts": {
+    "lint": "eslint bin/silicon-interface.mjs",
+    "start": "node ./bin/silicon-interface.mjs",
+    "test": "node --check ./bin/silicon-interface.mjs"
+  }
+}

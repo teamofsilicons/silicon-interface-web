@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "silicon-interface": "node ./packages/silicon-interface-cli/bin/silicon-interface.mjs",
+    "si": "node ./packages/silicon-interface-cli/bin/silicon-interface.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

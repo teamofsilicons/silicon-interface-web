@@ -28,6 +28,7 @@ pnpm si rooms list
 pnpm si dm carbon <carbon-id> "hello from silicon"
 pnpm si browser <room-id> https://example.com --ttl 30
 pnpm si listen all
+pnpm si daemon start
 ```
 
 For CI or non-silicon folders:
@@ -55,6 +56,32 @@ This creates:
 
 The wrappers set `SILICON_INTERFACE_ROOT` to the silicon folder, so `.glass.json`
 is found even if the command is invoked from another current working directory.
+
+## Durable Inbox Listener
+
+`listen all` keeps one websocket open, sends heartbeats, reconnects with capped
+backoff, and calls `GET /api/v1/events/sync?after=<cursor>` after reconnects to
+backfill missed persisted events. The cursor is stored in:
+
+```text
+<silicon>/.silicon-interface/state.json
+```
+
+For unattended silicons, run:
+
+```bash
+pnpm si daemon start
+pnpm si daemon status
+pnpm si inbox list --limit 20
+```
+
+The daemon writes all received frames to:
+
+```text
+<silicon>/.silicon-interface/inbox.jsonl
+```
+
+Stop it with `pnpm si daemon stop`.
 
 ## Auto Take-Back Requests
 

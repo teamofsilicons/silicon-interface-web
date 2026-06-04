@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
@@ -12,7 +13,9 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
+const PING_INTERVAL_MS = 25_000;
+const MAX_RECONNECT_MS = 15_000;
 
 class UsageError extends Error {}
 
@@ -48,6 +51,57 @@ function writeConfig(config) {
   } catch {
     // Best effort: Windows and some filesystems do not support chmod.
   }
+}
+
+function interfaceRoot() {
+  return path.resolve(process.env.SILICON_INTERFACE_ROOT || process.cwd());
+}
+
+function stateDir() {
+  return path.join(interfaceRoot(), ".silicon-interface");
+}
+
+function statePath() {
+  return process.env.SILICON_INTERFACE_STATE || path.join(stateDir(), "state.json");
+}
+
+function inboxPath() {
+  return process.env.SILICON_INTERFACE_INBOX || path.join(stateDir(), "inbox.jsonl");
+}
+
+function pidPath() {
+  return path.join(stateDir(), "daemon.pid");
+}
+
+function logPath(kind = "log") {
+  return path.join(stateDir(), `daemon.${kind}`);
+}
+
+function readState() {
+  const data = readJsonFile(statePath());
+  return data && typeof data === "object" ? data : {};
+}
+
+function writeState(state) {
+  const filePath = statePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+function updateCursor(eventId) {
+  if (!eventId) return;
+  const state = readState();
+  if (!state.lastEventId || eventId > state.lastEventId) {
+    state.lastEventId = eventId;
+    state.updatedAt = new Date().toISOString();
+    writeState(state);
+  }
+}
+
+function appendInbox(frame) {
+  const filePath = inboxPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.appendFileSync(filePath, `${JSON.stringify(frame)}\n`);
 }
 
 function readJsonFile(filePath) {
@@ -325,6 +379,12 @@ function asBool(value) {
   throw new UsageError(`Expected a boolean, got '${value}'.`);
 }
 
+function numberOption(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = Number(value ?? fallback);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(raw, max));
+}
+
 function requireAuth(ctx) {
   if (!ctx.config.siliconKey && !ctx.config.accessToken) {
     throw new UsageError(
@@ -457,10 +517,16 @@ const api = {
   rooms: (ctx) => request(ctx, "GET", "/api/v1/rooms/"),
   room: (ctx, roomId) => request(ctx, "GET", `/api/v1/rooms/${encodeURIComponent(roomId)}/`),
   members: (ctx, roomId) => request(ctx, "GET", `/api/v1/rooms/${encodeURIComponent(roomId)}/members`),
-  events: (ctx, roomId, { before, limit = 50 } = {}) => {
+  events: (ctx, roomId, { before, after, limit = 50 } = {}) => {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (before) qs.set("before", before);
+    if (after) qs.set("after", after);
     return request(ctx, "GET", `/api/v1/rooms/${encodeURIComponent(roomId)}/events?${qs}`);
+  },
+  syncEvents: (ctx, { after, limit = 200 } = {}) => {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (after) qs.set("after", after);
+    return request(ctx, "GET", `/api/v1/events/sync?${qs}`);
   },
   directRoom: (ctx, kind, targetId) =>
     request(ctx, "POST", "/api/v1/rooms/direct", { target_kind: kind, target_id: targetId }),
@@ -613,7 +679,10 @@ Rooms and messages:
   browser <room> <url> [--ttl 60]
   remote-browser <room> <url> [--ttl-minutes 60]
   chat <room>             Interactive stdin chat for a room.
-  listen [room|all]       Stream live WebSocket frames.
+  listen [room|all]       Durable live stream with reconnect + missed-event sync.
+  daemon start|stop|status|run
+                          Keep a background silicon inbox listener alive.
+  inbox list|clear|path   Read or manage the daemon JSONL inbox.
 
 Activity and event controls:
   activity <room> <typing|uploading|recording> <on|off>
@@ -958,7 +1027,7 @@ async function openSocket(ctx, roomIds, onFrame) {
   }
   const ping = setInterval(() => {
     if (socket.readyState === SocketCtor.OPEN) socket.send(JSON.stringify({ type: "ping" }));
-  }, 25_000);
+  }, PING_INTERVAL_MS);
   socket.addEventListener("message", (event) => {
     try {
       onFrame(JSON.parse(event.data));
@@ -970,6 +1039,46 @@ async function openSocket(ctx, roomIds, onFrame) {
   return socket;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function eventIdFromFrame(frame) {
+  return frame?.type === "event" ? frame.event?.event_id || "" : "";
+}
+
+function emitFrame(ctx, frame, { print = true, spool = false, cursor = false, seen } = {}) {
+  const eventId = eventIdFromFrame(frame);
+  if (eventId && seen) {
+    if (seen.has(eventId)) return;
+    seen.add(eventId);
+  }
+  if (spool) appendInbox(frame);
+  if (cursor && eventId) updateCursor(eventId);
+  if (!print) return;
+  if (ctx.config.json) printJson(frame, true);
+  else console.log(frameLine(frame));
+}
+
+async function syncBackfill(ctx, { limit = 200, print = true, spool = false, cursor = true, seen } = {}) {
+  let total = 0;
+  while (true) {
+    const after = readState().lastEventId || "";
+    const page = await api.syncEvents(ctx, { after, limit });
+    for (const frame of page.frames || []) {
+      emitFrame(ctx, frame, { print, spool, cursor, seen });
+      total += 1;
+    }
+    if (!page.has_more || !(page.frames || []).length) return total;
+  }
+}
+
+function waitForSocketClose(socket) {
+  return new Promise((resolve) => {
+    socket.addEventListener("close", resolve, { once: true });
+  });
+}
+
 async function roomIdsForListen(ctx, target) {
   if (!target || target === "all") {
     const rooms = await api.rooms(ctx);
@@ -979,20 +1088,211 @@ async function roomIdsForListen(ctx, target) {
 }
 
 async function cmdListen(ctx, args) {
-  const { positionals } = parseOptions(args);
-  const roomIds = await roomIdsForListen(ctx, positionals[0]);
-  const socket = await openSocket(ctx, roomIds, (frame) => {
-    if (ctx.config.json) printJson(frame, true);
-    else console.log(frameLine(frame));
+  const { options, positionals } = parseOptions(args, ["once", "noSync", "spool"]);
+  const target = positionals[0] || "all";
+  await runDurableListen(ctx, {
+    target,
+    print: true,
+    spool: Boolean(options.spool),
+    once: Boolean(options.once),
+    sync: target === "all" && !options.noSync,
+    syncLimit: numberOption(options.syncLimit, 200, { min: 1, max: 500 }),
   });
-  console.error(`listening to ${roomIds.length} room(s). Ctrl+C to stop.`);
-  await new Promise((resolve) => {
-    process.once("SIGINT", () => {
-      socket.close();
-      resolve();
+}
+
+async function runDurableListen(
+  ctx,
+  { target = "all", print = true, spool = false, once = false, sync = true, syncLimit = 200 } = {},
+) {
+  requireAuth(ctx);
+  let stopping = false;
+  let activeSocket = null;
+  const seen = new Set();
+  process.once("SIGINT", () => {
+    stopping = true;
+    if (activeSocket) activeSocket.close();
+  });
+
+  let attempts = 0;
+  while (!stopping) {
+    try {
+      const roomIds = await roomIdsForListen(ctx, target);
+      const useCursor = sync && target === "all";
+      const socket = await openSocket(ctx, roomIds, (frame) =>
+        emitFrame(ctx, frame, { print, spool, cursor: useCursor, seen }),
+      );
+      activeSocket = socket;
+      attempts = 0;
+      if (useCursor) {
+        const missed = await syncBackfill(ctx, {
+          limit: syncLimit,
+          print,
+          spool,
+          cursor: true,
+          seen,
+        });
+        if (missed && print) console.error(`backfilled ${missed} missed event(s).`);
+      }
+      if (print) console.error(`listening to ${roomIds.length} room(s). Ctrl+C to stop.`);
+      await waitForSocketClose(socket);
+      activeSocket = null;
+      if (once) break;
+    } catch (error) {
+      if (print) console.error(`listener error: ${error.message || error}`);
+      if (once) throw error;
+    }
+    if (stopping || once) break;
+    const delay = Math.min(1000 * 2 ** attempts, MAX_RECONNECT_MS);
+    attempts += 1;
+    if (print) console.error(`reconnecting in ${Math.round(delay / 1000)}s...`);
+    await sleep(delay);
+  }
+}
+
+function readPid() {
+  try {
+    const value = fs.readFileSync(pidPath(), "utf8").trim();
+    const pid = Number(value);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cmdDaemon(ctx, args) {
+  const [sub = "status", ...rest] = args;
+  if (sub === "run") {
+    const { options } = parseOptions(rest, ["noSync", "noSpool", "once", "quiet"]);
+    await runDurableListen(ctx, {
+      target: "all",
+      print: !options.quiet,
+      spool: !options.noSpool,
+      once: Boolean(options.once),
+      sync: !options.noSync,
+      syncLimit: numberOption(options.syncLimit, 200, { min: 1, max: 500 }),
     });
-    socket.addEventListener("close", resolve, { once: true });
-  });
+    return;
+  }
+
+  if (sub === "start") {
+    requireAuth(ctx);
+    const existing = readPid();
+    if (isProcessAlive(existing)) {
+      console.log(`Silicon Interface daemon already running (PID ${existing}).`);
+      return;
+    }
+    fs.mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
+    const stdout = fs.openSync(logPath("out.log"), "a");
+    const stderr = fs.openSync(logPath("err.log"), "a");
+    const env = {
+      ...process.env,
+      SILICON_INTERFACE_ROOT: interfaceRoot(),
+      SILICON_INTERFACE_API_BASE: ctx.config.apiBase,
+      SILICON_INTERFACE_WS_BASE: ctx.config.wsBase,
+    };
+    if (ctx.config.siliconKey) env.SILICON_INTERFACE_KEY = ctx.config.siliconKey;
+    if (ctx.config.accessToken) env.SILICON_INTERFACE_ACCESS_TOKEN = ctx.config.accessToken;
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(import.meta.url), "--json", "daemon", "run"],
+      {
+        cwd: interfaceRoot(),
+        detached: true,
+        env,
+        stdio: ["ignore", stdout, stderr],
+      },
+    );
+    child.unref();
+    fs.writeFileSync(pidPath(), `${child.pid}\n`);
+    console.log(`Silicon Interface daemon started (PID ${child.pid}).`);
+    console.log(`inbox: ${inboxPath()}`);
+    console.log(`logs:  ${logPath("out.log")} / ${logPath("err.log")}`);
+    return;
+  }
+
+  if (sub === "stop") {
+    const pid = readPid();
+    if (!pid || !isProcessAlive(pid)) {
+      console.log("Silicon Interface daemon is not running.");
+      return;
+    }
+    process.kill(pid, "SIGTERM");
+    try {
+      fs.rmSync(pidPath(), { force: true });
+    } catch {
+      // Best effort.
+    }
+    console.log(`Silicon Interface daemon stopped (PID ${pid}).`);
+    return;
+  }
+
+  if (sub === "status") {
+    const pid = readPid();
+    const running = isProcessAlive(pid);
+    const value = {
+      running,
+      pid,
+      state: statePath(),
+      inbox: inboxPath(),
+      logs: { stdout: logPath("out.log"), stderr: logPath("err.log") },
+      cursor: readState().lastEventId || "",
+    };
+    printResult(ctx, value, (data) => {
+      console.log(`running: ${data.running ? "yes" : "no"}`);
+      if (data.pid) console.log(`pid: ${data.pid}`);
+      console.log(`cursor: ${data.cursor || "(none)"}`);
+      console.log(`inbox: ${data.inbox}`);
+      console.log(`logs: ${data.logs.stdout} / ${data.logs.stderr}`);
+    });
+    return;
+  }
+
+  throw new UsageError("Usage: daemon <start|stop|status|run>");
+}
+
+async function cmdInbox(ctx, args) {
+  const [sub = "list", ...rest] = args;
+  if (sub === "path") {
+    console.log(inboxPath());
+    return;
+  }
+  if (sub === "clear") {
+    fs.rmSync(inboxPath(), { force: true });
+    console.log("Inbox cleared.");
+    return;
+  }
+  if (sub === "list" || sub === "tail") {
+    const { options } = parseOptions(rest);
+    const limit = numberOption(options.limit, 50, { min: 1, max: 1000 });
+    let lines = [];
+    try {
+      lines = fs.readFileSync(inboxPath(), "utf8").trim().split(/\r?\n/).filter(Boolean);
+    } catch {
+      lines = [];
+    }
+    const frames = lines.slice(-limit).map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { type: "raw", line };
+      }
+    });
+    printResult(ctx, frames, (rows) => {
+      for (const frame of rows) console.log(frameLine(frame));
+    });
+    return;
+  }
+  throw new UsageError("Usage: inbox [list|tail|clear|path] [--limit 50]");
 }
 
 async function cmdChat(ctx, args) {
@@ -1446,6 +1746,12 @@ async function dispatch(ctx, cmd, args) {
     case "listen":
     case "tail":
       await cmdListen(ctx, args);
+      return;
+    case "daemon":
+      await cmdDaemon(ctx, args);
+      return;
+    case "inbox":
+      await cmdInbox(ctx, args);
       return;
     case "chat":
       await cmdChat(ctx, args);

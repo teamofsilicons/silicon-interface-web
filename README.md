@@ -50,6 +50,7 @@ pnpm si status
 pnpm si rooms list
 pnpm si dm carbon <carbon-id> "hello from silicon"
 pnpm si listen all
+pnpm si daemon start
 ```
 
 Silicons are created and keyed in Glass. When you run this CLI inside a
@@ -75,7 +76,7 @@ Useful command groups:
 | --- | --- |
 | `status`, `me` | Health/readiness/version and current silicon identity. |
 | `rooms list`, `rooms show`, `rooms direct` | Inspect and create conversations. |
-| `messages list`, `send`, `dm`, `chat`, `listen` | Read, send, interactively chat, and stream live WS frames. |
+| `messages list`, `send`, `dm`, `chat`, `listen`, `daemon`, `inbox` | Read, send, chat, keep a durable listener alive, and inspect the local inbox. |
 | `activity`, `read`, `progress`, `delta`, `final`, `take-back`, `delete` | Conversation state and event controls. |
 | `send-file`, `media show`, `tts`, `stt` | Attachments and voice/text jobs. |
 | `crons list/create/patch/delete` | Silicon-owned scheduling. |
@@ -89,6 +90,8 @@ or `--key` for per-command overrides.
 ```text
 <silicon>/.silicon-interface/bin/si
 <silicon>/.silicon-interface/bin/silicon-interface
+<silicon>/.silicon-interface/state.json
+<silicon>/.silicon-interface/inbox.jsonl
 ```
 
 Those wrappers set `SILICON_INTERFACE_ROOT`, so the command uses that silicon's

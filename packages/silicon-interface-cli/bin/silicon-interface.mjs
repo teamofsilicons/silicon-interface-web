@@ -12,7 +12,7 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 class UsageError extends Error {}
 
@@ -125,9 +125,12 @@ function copyPackage(targetDir) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.cpSync(src, dest, {
     recursive: true,
-    filter: (source) =>
-      !source.includes(`${path.sep}node_modules${path.sep}`) &&
-      !source.includes(`${path.sep}.silicon-interface${path.sep}`),
+    filter: (source) => {
+      const relative = path.relative(src, source);
+      if (!relative) return true;
+      const parts = relative.split(path.sep);
+      return !parts.includes("node_modules") && !parts.includes(".silicon-interface");
+    },
   });
   return dest;
 }

@@ -1,12 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { CircleNotch, Copy, Envelope, LinkSimple } from "@phosphor-icons/react/dist/ssr";
+import { CircleNotch, Copy, Envelope, LinkSimple, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { isTeamHead } from "@/lib/use-teams";
-import { relativeTime } from "@/lib/utils";
+import { cn, relativeTime } from "@/lib/utils";
 import type {
   BillingCycle,
   BillingData,
@@ -20,38 +20,32 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { IdAvatar } from "@/components/profile/id-avatar";
 import { ReactivityKpi } from "./reactivity-kpi";
 import { CronList } from "./cron-list";
 import type { Cron } from "@/lib/types";
 
 export function TeamPanel({
   slug,
-  open,
-  onOpenChange,
+  onClose,
 }: {
-  slug: string | null;
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
+  slug: string;
+  onClose?: () => void;
 }) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] w-full max-w-2xl overflow-y-auto">
-        {open && slug ? <TeamPanelBody key={slug} slug={slug} /> : null}
-      </DialogContent>
-    </Dialog>
+    <section className="flex min-w-0 flex-1 flex-col bg-background">
+      <TeamPanelBody key={slug} slug={slug} onClose={onClose} />
+    </section>
   );
 }
 
-function TeamPanelBody({ slug }: { slug: string }) {
+type TeamPanelTab = "structure" | "members" | "crons" | "invites" | "settings" | "billing";
+
+function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }) {
   const [team, setTeam] = React.useState<Team | null>(null);
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
   const [structure, setStructure] = React.useState<string>("");
+  const [tab, setTab] = React.useState<TeamPanelTab>("structure");
 
   React.useEffect(() => {
     let alive = true;
@@ -77,56 +71,160 @@ function TeamPanelBody({ slug }: { slug: string }) {
 
   if (!team) {
     return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
+      <div className="grid flex-1 place-items-center text-muted-foreground">
         <CircleNotch className="h-6 w-6 animate-spin" />
       </div>
     );
   }
 
   const head = isTeamHead(team);
+  const allTabs: Array<{ id: TeamPanelTab; label: string; headOnly?: boolean }> = [
+    { id: "structure", label: "Structure" },
+    { id: "members", label: "Members" },
+    { id: "crons", label: "Crons" },
+    { id: "invites", label: "Invites", headOnly: true },
+    { id: "settings", label: "Settings", headOnly: true },
+    { id: "billing", label: "Billing", headOnly: true },
+  ];
+  const tabs = allTabs.filter((item) => !item.headOnly || head);
 
   return (
-    <div className="space-y-6">
-      <DialogHeader>
-        <DialogTitle className="text-xl">{team.name}</DialogTitle>
-      </DialogHeader>
+    <>
+      <div className="flex min-h-[72px] items-center justify-between gap-3 border-b px-8">
+        <div className="min-w-0">
+          <div className="truncate text-xl font-semibold">{team.name}</div>
+          <div className="label-mono mt-1">{slug}</div>
+        </div>
+        <div className="flex items-center gap-3">
+          <ReactivityKpi slug={slug} className="hidden w-40 p-3 sm:block [&_span.font-mono]:text-2xl" />
+          {onClose ? (
+            <Button size="icon" variant="ghost" onClick={onClose} aria-label="close team">
+              <X />
+            </Button>
+          ) : null}
+        </div>
+      </div>
 
-      <ReactivityKpi slug={slug} />
+      <div className="flex h-12 shrink-0 items-stretch overflow-x-auto border-b px-6">
+        {tabs.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setTab(item.id)}
+            className={cn(
+              "shrink-0 border-b-2 px-4 text-sm font-medium transition-colors",
+              tab === item.id
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
 
-      <Section title="structure">
-        {structure ? (
-          <div
-            className="overflow-x-auto border bg-card p-3 [&_svg]:max-w-full"
-            dangerouslySetInnerHTML={{ __html: structure }}
-          />
-        ) : (
-          <p className="text-sm text-muted-foreground">No structure chart yet.</p>
+      <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
+        {tab === "structure" && (
+          <Section title="structure">
+            {structure ? (
+              <div
+                className="overflow-x-auto border bg-card p-4 [&_svg]:max-w-full"
+                dangerouslySetInnerHTML={{ __html: structure }}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">No structure chart yet.</p>
+            )}
+          </Section>
         )}
-      </Section>
+        {tab === "members" && <MembersSection members={members} />}
+        {tab === "crons" && <CronsSection />}
+        {tab === "invites" && head && (
+          <div className="space-y-6">
+            <InviteSection slug={slug} />
+            <InviteesSection slug={slug} />
+          </div>
+        )}
+        {tab === "settings" && head && <SettingsSection team={team} onSaved={setTeam} />}
+        {tab === "billing" && head && <BillingSection slug={slug} />}
+      </div>
+    </>
+  );
+}
 
-      <Section title={`members · ${members.length}`}>
-        <ul className="divide-y border">
-          {members.map((m) => (
-            <li key={m.id} className="flex items-center justify-between px-3 py-2 text-sm">
-              <span className="flex items-center gap-2">
-                <span className="grid h-6 w-6 place-items-center bg-secondary text-[10px] font-medium">
-                  {m.member_kind === "silicon" ? "Si" : "Cb"}
+function MembersSection({ members }: { members: TeamMembership[] }) {
+  const [active, setActive] = React.useState<"carbon" | "silicon">("carbon");
+  const carbons = members.filter((m) => m.member_kind === "carbon");
+  const silicons = members.filter((m) => m.member_kind === "silicon");
+  const rows = active === "carbon" ? carbons : silicons;
+
+  return (
+    <Section title={`members · ${members.length}`}>
+      <div className="flex h-10 items-stretch border-b">
+        <MemberTab
+          active={active === "carbon"}
+          count={carbons.length}
+          label="Carbons"
+          onClick={() => setActive("carbon")}
+        />
+        <MemberTab
+          active={active === "silicon"}
+          count={silicons.length}
+          label="Silicons"
+          onClick={() => setActive("silicon")}
+        />
+      </div>
+      {rows.length === 0 ? (
+        <p className="border px-3 py-6 text-sm text-muted-foreground">No {active}s in this team.</p>
+      ) : (
+        <ul className="divide-y border-x border-b">
+          {rows.map((m) => {
+            const handle = m.member_handle ? `@${m.member_handle}` : `${m.member_kind} #${m.member_id}`;
+            return (
+              <li key={m.id} className="flex items-center justify-between gap-3 px-3 py-3 text-sm">
+                <span className="flex min-w-0 items-center gap-3">
+                  <IdAvatar
+                    seed={`${m.member_kind}:${m.member_handle ?? m.member_id}`}
+                    src={m.member_photo_url}
+                    size={34}
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{handle}</span>
+                    <span className="label-mono">{m.member_kind}</span>
+                  </span>
                 </span>
-                {m.member_handle ? `@${m.member_handle}` : `${m.member_kind} #${m.member_id}`}
-              </span>
-              <span className="label-mono">{m.role}</span>
-            </li>
-          ))}
+                <span className="label-mono shrink-0">{m.role}</span>
+              </li>
+            );
+          })}
         </ul>
-      </Section>
+      )}
+    </Section>
+  );
+}
 
-      <CronsSection />
-
-      <InviteesSection slug={slug} />
-      <InviteSection slug={slug} canInvite={head} />
-      {head && <SettingsSection team={team} onSaved={setTeam} />}
-      {head && <BillingSection slug={slug} />}
-    </div>
+function MemberTab({
+  active,
+  count,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  count: number;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex items-center gap-2 border-x border-t px-4 text-sm font-medium transition-colors",
+        active ? "bg-foreground text-background" : "bg-card text-muted-foreground hover:text-foreground",
+      )}
+    >
+      <span>{label}</span>
+      <span className="text-xs opacity-70">{count}</span>
+    </button>
   );
 }
 
@@ -448,21 +546,11 @@ function InviteesSection({ slug }: { slug: string }) {
   );
 }
 
-function InviteSection({ slug, canInvite }: { slug: string; canInvite: boolean }) {
+function InviteSection({ slug }: { slug: string }) {
   const [invite, setInvite] = React.useState<Invite | null>(null);
   const [email, setEmail] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(5);
   const [busy, setBusy] = React.useState(false);
-
-  if (!canInvite) {
-    return (
-      <Section title="invites">
-        <p className="text-sm text-muted-foreground">
-          Only team heads can invite people to the team.
-        </p>
-      </Section>
-    );
-  }
 
   const make = (fn: () => Promise<void>) => async () => {
     setBusy(true);

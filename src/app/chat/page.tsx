@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Info, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -68,7 +68,6 @@ import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
 import { TeamFilterBar, EMPTY_FILTERS, type ChatFilters } from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
-import { TeamSiliconRoster } from "@/components/teams/team-silicon-roster";
 
 // Resizable sidebar bounds + storage. Width persists across reloads.
 const SB_DEFAULT = 320;
@@ -96,11 +95,11 @@ function ChatPageInner() {
   const router = useRouter();
   const search = useSearchParams();
   const selected = search.get("room");
+  const teamViewSlug = search.get("team");
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
-  const [panelSlug, setPanelSlug] = React.useState<string | null>(null);
   const [activeTeamTab, setActiveTeamTab] = React.useState<string>("all");
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
   // Sidebar search — filters the conversation list by display name, handle,
@@ -119,10 +118,14 @@ function ChatPageInner() {
     activeTeamTab !== "all" && teams.some((t) => t.slug === activeTeamTab)
       ? activeTeamTab
       : null;
-  const activeRosterTeams = React.useMemo(
-    () => (activeTeamSlug ? teams.filter((t) => t.slug === activeTeamSlug) : teams),
-    [teams, activeTeamSlug],
-  );
+  const activeTeam = activeTeamSlug ? teams.find((t) => t.slug === activeTeamSlug) : null;
+  const viewedTeam = teamViewSlug ? teams.find((t) => t.slug === teamViewSlug) : null;
+
+  React.useEffect(() => {
+    if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) {
+      setActiveTeamTab(teamViewSlug);
+    }
+  }, [teamViewSlug, teams]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -417,7 +420,7 @@ function ChatPageInner() {
           // `min-h-0` so the room list scrolls *inside* the aside instead of
           // pushing the page taller than the viewport.
           "relative min-h-0 w-full shrink-0 flex-col border-r md:flex md:w-[var(--sidebar-w)]",
-          selected ? "hidden" : "flex",
+          selected || viewedTeam ? "hidden" : "flex",
         )}
       >
         {/* Drag handle — right edge, desktop only. */}
@@ -453,56 +456,61 @@ function ChatPageInner() {
           </button>
         </div>
         {teams.length > 0 && (
-          <div className="flex h-11 items-stretch gap-1 overflow-x-auto border-b px-3">
-            <button
-              type="button"
-              onClick={() => setActiveTeamTab("all")}
-              className={cn(
-                "shrink-0 border-b-2 px-3 text-xs font-medium transition-colors",
-                activeTeamSlug === null
-                  ? "border-foreground text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              All chats
-            </button>
-            {teams.map((team) => (
-              <span key={team.slug} className="flex shrink-0 items-stretch">
+          <div className="flex h-12 items-stretch border-b bg-background">
+            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTeamTab("all");
+                  if (viewedTeam) router.push("/chat");
+                }}
+                className={cn(
+                  "shrink-0 border px-3 py-1.5 text-xs font-semibold transition-colors",
+                  activeTeamSlug === null
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border bg-card text-muted-foreground hover:text-foreground",
+                )}
+              >
+                All chats
+              </button>
+              {teams.map((team) => (
                 <button
+                  key={team.slug}
                   type="button"
-                  onClick={() => setActiveTeamTab(team.slug)}
+                  onClick={() => {
+                    setActiveTeamTab(team.slug);
+                    if (viewedTeam) router.push(`/chat?team=${encodeURIComponent(team.slug)}`);
+                  }}
                   className={cn(
-                    "max-w-36 truncate border-b-2 px-3 text-xs font-medium transition-colors",
+                    "max-w-40 shrink-0 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
                     activeTeamSlug === team.slug
-                      ? "border-foreground text-foreground"
-                      : "border-transparent text-muted-foreground hover:text-foreground",
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-card text-muted-foreground hover:text-foreground",
                   )}
                 >
                   {team.name}
                 </button>
-                <button
-                  type="button"
-                  aria-label={`${team.name} details`}
-                  title={`${team.name} details`}
-                  onClick={() => setPanelSlug(team.slug)}
-                  className="grid w-7 place-items-center border-b-2 border-transparent text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  <Info className="h-3.5 w-3.5" />
-                </button>
-              </span>
-            ))}
+              ))}
+            </div>
+            {activeTeam ? (
+              <button
+                type="button"
+                aria-label={`${activeTeam.name} team workspace`}
+                title={`${activeTeam.name} team workspace`}
+                onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
+                className={cn(
+                  "grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent",
+                  viewedTeam?.slug === activeTeam.slug && "bg-secondary",
+                )}
+              >
+                <GearSix className="h-4 w-4" />
+              </button>
+            ) : null}
           </div>
         )}
         <TeamFilterBar
           filters={filters}
           onChange={setFilters}
-        />
-        <TeamSiliconRoster
-          teams={activeRosterTeams}
-          onOpenRoom={(room) => {
-            setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
-            router.push(`/chat?room=${room.room_id}`);
-          }}
         />
         <RoomList
           rooms={filtered}
@@ -526,6 +534,8 @@ function ChatPageInner() {
           contacts={contacts.byPeer}
           onContactsChanged={contacts.refresh}
         />
+      ) : viewedTeam ? (
+        <TeamPanel slug={viewedTeam.slug} onClose={() => router.push("/chat")} />
       ) : (
         <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
           <div className="max-w-md space-y-3 text-center">
@@ -545,11 +555,6 @@ function ChatPageInner() {
           setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
           router.push(`/chat?room=${room.room_id}`);
         }}
-      />
-      <TeamPanel
-        slug={panelSlug}
-        open={panelSlug !== null}
-        onOpenChange={(v) => !v && setPanelSlug(null)}
       />
     </>
   );

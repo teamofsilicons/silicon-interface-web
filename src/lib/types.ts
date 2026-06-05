@@ -188,6 +188,7 @@ export interface TeamMembership {
   member_kind: Kind;
   member_id: number;
   member_handle: string | null;
+  member_photo_url: string | null;
   role: TeamRole;
   joined_at: string;
 }

@@ -112,9 +112,11 @@ export function TeamSiliconRoster({
                         />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">{silicon.name}</span>
-                          <span className="block truncate text-xs text-muted-foreground">
-                            {silicon.tagline || silicon.silicon_id}
-                          </span>
+                          {silicon.tagline ? (
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {silicon.tagline}
+                            </span>
+                          ) : null}
                         </span>
                         {busy ? (
                           <CircleNotch className="h-4 w-4 shrink-0 animate-spin" />

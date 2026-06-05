@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { Info, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -100,6 +100,7 @@ function ChatPageInner() {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
   const [panelSlug, setPanelSlug] = React.useState<string | null>(null);
+  const [activeTeamTab, setActiveTeamTab] = React.useState<string>("all");
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
   // Sidebar search — filters the conversation list by display name, handle,
   // or last message body.
@@ -112,6 +113,14 @@ function ChatPageInner() {
   const contacts = useContacts();
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
+  const activeTeamSlug =
+    activeTeamTab !== "all" && teams.some((t) => t.slug === activeTeamTab)
+      ? activeTeamTab
+      : null;
+  const activeRosterTeams = React.useMemo(
+    () => (activeTeamSlug ? teams.filter((t) => t.slug === activeTeamSlug) : teams),
+    [teams, activeTeamSlug],
+  );
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -344,8 +353,8 @@ function ChatPageInner() {
     const q = sidebarQuery.trim().toLowerCase();
     const list = rooms.filter((r) => {
       // #8 — Unread filter hides any room that has nothing new for me.
+      if (activeTeamSlug && r.team_slug !== activeTeamSlug) return false;
       if (filters.unread && !r.unread) return false;
-      if (filters.teams.length && !(r.team_slug && filters.teams.includes(r.team_slug))) return false;
       if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
       if (q) {
         const hayName = (r.name || "").toLowerCase();
@@ -372,7 +381,7 @@ function ChatPageInner() {
       return tb.localeCompare(ta);
     });
     return list;
-  }, [rooms, filters, sidebarQuery]);
+  }, [rooms, filters, sidebarQuery, activeTeamSlug]);
 
   const selectedRoom = rooms.find((r) => r.room_id === selected);
 
@@ -421,14 +430,53 @@ function ChatPageInner() {
             <Plus />
           </button>
         </div>
+        {teams.length > 0 && (
+          <div className="flex h-11 items-stretch gap-1 overflow-x-auto border-b px-3">
+            <button
+              type="button"
+              onClick={() => setActiveTeamTab("all")}
+              className={cn(
+                "shrink-0 border-b-2 px-3 text-xs font-medium transition-colors",
+                activeTeamSlug === null
+                  ? "border-foreground text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground",
+              )}
+            >
+              All chats
+            </button>
+            {teams.map((team) => (
+              <span key={team.slug} className="flex shrink-0 items-stretch">
+                <button
+                  type="button"
+                  onClick={() => setActiveTeamTab(team.slug)}
+                  className={cn(
+                    "max-w-36 truncate border-b-2 px-3 text-xs font-medium transition-colors",
+                    activeTeamSlug === team.slug
+                      ? "border-foreground text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {team.name}
+                </button>
+                <button
+                  type="button"
+                  aria-label={`${team.name} details`}
+                  title={`${team.name} details`}
+                  onClick={() => setPanelSlug(team.slug)}
+                  className="grid w-7 place-items-center border-b-2 border-transparent text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <Info className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <TeamFilterBar
-          teams={teams}
           filters={filters}
           onChange={setFilters}
-          onOpenTeam={(slug) => setPanelSlug(slug)}
         />
         <TeamSiliconRoster
-          teams={teams}
+          teams={activeRosterTeams}
           onOpenRoom={(room) => {
             setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
             router.push(`/chat?room=${room.room_id}`);

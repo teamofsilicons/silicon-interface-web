@@ -12,6 +12,7 @@ import type { Event, Room } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { useContacts } from "@/lib/use-contacts";
+import { loadCachedRooms, saveCachedRooms } from "@/lib/sidebar-cache";
 import { cn } from "@/lib/utils";
 
 // Message types that count toward the unread badge + drive the sidebar
@@ -110,8 +111,9 @@ function ChatPageInner() {
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const socket = useChatSocket();
   const { teams } = useTeams();
-  const contacts = useContacts();
   const { carbon } = useAuth();
+  const ownerId = carbon?.carbon_id ?? null;
+  const contacts = useContacts(ownerId);
   const myUsername = carbon?.username ?? null;
   const activeTeamSlug =
     activeTeamTab !== "all" && teams.some((t) => t.slug === activeTeamTab)
@@ -135,6 +137,7 @@ function ChatPageInner() {
   // Event ids already folded into the sidebar — guards against double-counting
   // if the effect re-runs for the same frame.
   const processedRef = React.useRef<Set<string>>(new Set());
+  const roomsCacheOwnerRef = React.useRef<string | null>(null);
 
   const clearHover = React.useCallback(() => {
     if (hoverTimerRef.current) {
@@ -207,18 +210,37 @@ function ChatPageInner() {
 
   const refresh = React.useCallback(async () => {
     try {
-      setRooms(await api.rooms());
+      const next = await api.rooms();
+      setRooms(next);
+      if (ownerId) saveCachedRooms(ownerId, next);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      roomsCacheOwnerRef.current = ownerId;
+      setLoading(false);
     }
-    setLoading(false);
-  }, []);
+  }, [ownerId]);
 
   React.useEffect(() => {
-    (async () => {
-      await refresh();
-    })();
-  }, [refresh]);
+    roomsCacheOwnerRef.current = null;
+    const cached = ownerId ? loadCachedRooms(ownerId) : null;
+    if (cached) {
+      setRooms(cached);
+      setLoading(false);
+    } else {
+      setRooms([]);
+      setLoading(true);
+    }
+    queueMicrotask(() => {
+      roomsCacheOwnerRef.current = ownerId;
+    });
+    void refresh();
+  }, [ownerId, refresh]);
+
+  React.useEffect(() => {
+    if (!ownerId || roomsCacheOwnerRef.current !== ownerId) return;
+    saveCachedRooms(ownerId, rooms);
+  }, [ownerId, rooms]);
 
   // Tick every 15s so the sidebar's relative timestamps keep advancing
   // ("just now" → "1m" → "2m") without a network fetch — purely a re-render.

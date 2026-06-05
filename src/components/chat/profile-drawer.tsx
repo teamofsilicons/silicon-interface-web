@@ -172,6 +172,11 @@ export function ProfileDrawer({
                 {counterpart?.kind === "silicon" ? "Silicon" : "Carbon"}
               </p>
             )}
+            {contact?.custom_photo && (
+              <p className="label-mono mt-1 text-center text-[10px] text-muted-foreground">
+                Picture set by you
+              </p>
+            )}
           </div>
         </div>
 
@@ -215,11 +220,6 @@ export function ProfileDrawer({
             <p className="whitespace-pre-wrap text-sm text-foreground/90">
               {contact.note || <span className="text-muted-foreground">—</span>}
             </p>
-            {contact.custom_photo && (
-              <p className="label-mono text-[10px] text-muted-foreground">
-                Picture set by you
-              </p>
-            )}
           </div>
         )}
         {!contact && onEditContact && (

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CaretRight, Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -28,7 +28,7 @@ import { CronDrawer } from "@/components/chat/cron-drawer";
 import { SaveContactDialog } from "@/components/chat/save-contact-dialog";
 import type { Contact } from "@/lib/types";
 import { contactKey } from "@/lib/use-contacts";
-import { UserPlus } from "@phosphor-icons/react/dist/ssr";
+import { NotePencil, UserPlus } from "@phosphor-icons/react/dist/ssr";
 
 interface Props {
   room: Room;
@@ -70,6 +70,39 @@ const PROGRESS_MESSAGE_TYPES = new Set([
   "m.tts",
   "m.remote_browser",
 ]);
+const SILICON_PROGRESS_COPY = [
+  "Polishing the logic wafer",
+  "Asking the semicolons to behave",
+  "Counting electrons with suspicious confidence",
+  "Making the bits stand in a straight line",
+  "Convincing the cache it remembers this",
+  "Warming up the tiny decision engine",
+  "Sorting nonsense into useful nonsense",
+  "Consulting the motherboard council",
+];
+const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
+  reading_file: [
+    "Reading the file like it owes rent",
+    "Dusting fingerprints off the data",
+    "Turning document fog into clues",
+  ],
+  writing_file: [
+    "Negotiating with the blank file",
+    "Typing with ceremonial seriousness",
+    "Putting pixels where pixels belong",
+  ],
+  executing: [
+    "Pressing the serious-looking buttons",
+    "Letting the command line have opinions",
+    "Running the tiny factory floor",
+  ],
+  searching_web: [
+    "Checking the outside universe",
+    "Borrowing facts from the internet shelf",
+    "Peeking over the network fence",
+  ],
+  thinking: SILICON_PROGRESS_COPY,
+};
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
@@ -557,7 +590,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           roomId: room.room_id,
           groupId: `local:${clientId}`,
           state: "thinking",
-          note: "Thinking",
+          note: "",
           updatedAt: Date.now(),
         });
       }
@@ -687,7 +720,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       {/* Header — clicking anywhere on the left side opens the profile. */}
       {/* Header — fixed height so clicking search doesn't shift the row when
           the search field swaps in for the icon button. */}
-      <header className="flex h-[68px] items-center gap-3 border-b pl-6 pr-6">
+      <header className="group/header flex h-[68px] items-center gap-3 border-b pl-6 pr-6">
         <button
           type="button"
           onClick={() => {
@@ -725,6 +758,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           >
             <UserPlus className="h-3.5 w-3.5" />
             Save Contact
+          </Button>
+        )}
+        {peer && contact && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setSaveOpen(true)}
+            className="shrink-0 gap-1.5 opacity-0 transition-opacity group-hover/header:opacity-100 focus-visible:opacity-100"
+            title="edit saved contact"
+          >
+            <NotePencil className="h-3.5 w-3.5" />
+            Edit
           </Button>
         )}
         {/* Crons — only in a 1-on-1 silicon chat, left of search. */}
@@ -903,25 +948,48 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 }
 
 function ProgressLine({ entry }: { entry: ProgressEntry }) {
+  const [tick, setTick] = React.useState(0);
+
+  React.useEffect(() => {
+    setTick(0);
+    const id = window.setInterval(() => setTick((n) => n + 1), 2600);
+    return () => window.clearInterval(id);
+  }, [entry.groupId, entry.state, entry.note]);
+
   return (
-    <div className="progress-flow-line my-2 flex min-h-7 items-center text-sm text-muted-foreground">
-      <span className="progress-flow-line__text inline-flex min-w-0 items-center gap-1.5 truncate">
-        <span className="truncate">{formatProgressLine(entry)}</span>
-        <CaretRight className="h-3.5 w-3.5 shrink-0" />
+    <div className="silicon-activity-line my-2 flex min-h-7 items-center text-sm">
+      <span className="inline-flex min-w-0 items-center gap-2 truncate">
+        <span className="silicon-activity-core" aria-hidden="true">
+          {Array.from({ length: 16 }, (_, i) => (
+            <span key={i} />
+          ))}
+        </span>
+        <span className="silicon-activity-copy truncate">{formatProgressLine(entry, tick)}</span>
       </span>
     </div>
   );
 }
 
-function formatProgressLine(entry: ProgressEntry): string {
-  const note = entry.note.trim();
+function formatProgressLine(entry: ProgressEntry, tick = 0): string {
+  const note = meaningfulProgressNote(entry.note, entry.state);
   if (note) return sentenceCase(note);
-  return sentenceCase(entry.state.replaceAll("_", " "));
+  const lines = PROGRESS_STATE_COPY[entry.state] ?? SILICON_PROGRESS_COPY;
+  return lines[tick % lines.length];
+}
+
+function meaningfulProgressNote(note: string, state: ProgressState): string {
+  const text = note.trim();
+  if (!text) return "";
+  const normalized = text.toLowerCase().replace(/[.…]+$/g, "").trim();
+  if (state === "thinking" && (normalized === "thinking" || normalized.startsWith("thought for "))) {
+    return "";
+  }
+  return text;
 }
 
 function sentenceCase(value: string): string {
   const text = value.trim();
-  if (!text) return "Thinking";
+  if (!text) return SILICON_PROGRESS_COPY[0];
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 

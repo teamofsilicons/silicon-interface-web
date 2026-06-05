@@ -82,7 +82,7 @@ export function RoomList({
             const avatarSrc = contact?.photo_url ?? d.photoUrl;
             const avatarSeed = peer?.id ?? d.handle;
             const nameClass = cn(
-              "truncate text-sm",
+              "block min-w-0 truncate text-sm",
               unread > 0 ? "font-semibold" : "font-medium",
             );
             return (
@@ -116,9 +116,9 @@ export function RoomList({
                     size={36}
                     className="mt-0.5"
                   />
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-1 overflow-hidden">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                         {r.observed && (
                           <Eye
                             className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
@@ -153,10 +153,10 @@ export function RoomList({
                     {/* Last-message preview (one line, type-aware) + unread
                         badge. Preview falls back to the static subtitle when
                         the room has no events. */}
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center justify-between gap-2">
                       <p
                         className={cn(
-                          "truncate text-xs",
+                          "min-w-0 flex-1 truncate text-xs",
                           unread > 0 ? "text-foreground" : "text-muted-foreground",
                         )}
                       >

@@ -13,7 +13,7 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 const PING_INTERVAL_MS = 25_000;
 const MAX_RECONNECT_MS = 15_000;
 

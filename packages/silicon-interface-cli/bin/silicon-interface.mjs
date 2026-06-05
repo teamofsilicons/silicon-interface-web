@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
@@ -428,6 +428,29 @@ function printResult(ctx, value, renderHuman) {
   else renderHuman(value);
 }
 
+function runPython(scriptPath, args = [], cwd = process.cwd()) {
+  const candidates = [
+    process.env.SILICON_PYTHON,
+    "python3",
+    "python",
+  ].filter(Boolean);
+  const tried = [];
+  for (const command of [...new Set(candidates)]) {
+    const result = spawnSync(command, [scriptPath, ...args], {
+      cwd,
+      encoding: "utf8",
+    });
+    tried.push(command);
+    if (result.error?.code === "ENOENT") continue;
+    return { command, result, tried };
+  }
+  return {
+    command: "",
+    result: { status: 127, stdout: "", stderr: `No Python executable found. Tried: ${tried.join(", ")}` },
+    tried,
+  };
+}
+
 function printRows(rows, columns) {
   const widths = columns.map((col) =>
     Math.max(
@@ -667,6 +690,7 @@ Setup:
 Status:
   status                  Health, readiness, version, silicon identity, room count.
   me                      Show /silicons/me.
+  update check|trigger    Trigger this silicon's system update check now.
 
 Rooms and messages:
   rooms list              List rooms.
@@ -857,6 +881,39 @@ async function cmdStatus(ctx) {
     if (me) console.log(`silicon: ${me.ok ? `${me.value.name} (${me.value.silicon_id})` : me.error.message}`);
     if (rooms) console.log(`rooms: ${rooms.ok ? rooms.value.length : rooms.error.message}`);
   });
+}
+
+async function cmdUpdate(ctx, args) {
+  const [first, ...tail] = args;
+  const sub = first && !first.startsWith("--") ? first : "check";
+  const rest = first && !first.startsWith("--") ? tail : args;
+  if (!["check", "trigger", "now"].includes(sub)) {
+    throw new UsageError("Usage: update check|trigger [--no-force]");
+  }
+  const { options } = parseOptions(rest, ["noForce"]);
+  const updatePath = findUp("update.py", interfaceRoot());
+  if (!updatePath) {
+    throw new UsageError("No update.py found. Run this inside a Glass-pulled silicon folder.");
+  }
+  const scriptArgs = options.noForce ? ["--no-force"] : [];
+  const cwd = path.dirname(updatePath);
+  const { command, result } = runPython(updatePath, scriptArgs, cwd);
+  const payload = {
+    ok: result.status === 0,
+    command: [command, updatePath, ...scriptArgs].filter(Boolean).join(" "),
+    cwd,
+    status: result.status ?? 1,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+  };
+  if (ctx.config.json) {
+    printJson(payload);
+  } else {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    console.log(payload.ok ? "Update check finished." : "Update check failed.");
+  }
+  if (!payload.ok) process.exitCode = payload.status || 1;
 }
 
 async function cmdMe(ctx) {
@@ -1720,6 +1777,11 @@ async function dispatch(ctx, cmd, args) {
       return;
     case "status":
       await cmdStatus(ctx);
+      return;
+    case "update":
+    case "update-check":
+    case "check-update":
+      await cmdUpdate(ctx, cmd === "update" ? args : ["check", ...args]);
       return;
     case "me":
       await cmdMe(ctx);

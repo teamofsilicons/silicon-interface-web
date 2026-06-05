@@ -194,6 +194,11 @@ export function MessageBubble({
         inGroupGap ? "my-0.5" : "my-1.5",
         isMine ? "justify-end" : "justify-start",
       )}
+      onDoubleClick={(e) => {
+        if (redacted || !onReply) return;
+        if (e.target !== e.currentTarget) return;
+        onReply(event);
+      }}
     >
       {!isMine && (
         // Avatar slot stays present even on middle-of-group bubbles so the
@@ -239,9 +244,6 @@ export function MessageBubble({
                 ? "bubble-sent bg-primary text-primary-foreground"
                 : "border bg-bubble-received",
           )}
-          // Double-click anywhere on a non-redacted bubble triggers a reply
-          // — same as Telegram/iMessage.
-          onDoubleClick={() => !redacted && onReply?.(event)}
         >
           {/* Quoted parent so a reply visibly references its target. */}
           {replyToEvent && !redacted && (

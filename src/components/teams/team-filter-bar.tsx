@@ -28,7 +28,7 @@ export function TeamFilterBar({ filters, onChange }: Props) {
     });
 
   return (
-    <div className="flex items-center gap-1.5 overflow-x-auto border-b py-2 pl-6 pr-3">
+    <div className="flex items-center gap-1.5 overflow-x-auto border-b px-3 py-2">
       <Chip active={filters.unread} onClick={() => onChange({ ...filters, unread: !filters.unread })}>
         <Tray className="h-3.5 w-3.5" /> Unread
       </Chip>

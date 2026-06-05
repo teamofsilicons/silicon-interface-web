@@ -85,6 +85,7 @@ export function RoomList({
               "block min-w-0 truncate text-sm",
               unread > 0 ? "font-semibold" : "font-medium",
             );
+            const preview = roomPreview(r, d.subtitle);
             return (
               <li key={r.room_id}>
                 <button
@@ -170,7 +171,7 @@ export function RoomList({
                           // as a width fallback).
                           fileNamePreview(r.last_event.preview)
                         ) : (
-                          r.last_event?.preview || d.subtitle
+                          preview
                         )}
                       </p>
                       {unread > 0 ? (
@@ -223,4 +224,10 @@ function middleEllipsis(s: string, max = 30): string {
 function fileNamePreview(preview: string): string {
   const m = preview.match(/^(📎\s*)(.*)$/);
   return m ? `${m[1]}${middleEllipsis(m[2])}` : middleEllipsis(preview);
+}
+
+function roomPreview(room: Room, fallback: string): string {
+  const raw = room.last_event?.preview || fallback;
+  const compact = raw.replace(/\s+/g, " ").trim();
+  return middleEllipsis(compact, 34);
 }

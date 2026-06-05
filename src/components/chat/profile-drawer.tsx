@@ -155,7 +155,7 @@ export function ProfileDrawer({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] w-full max-w-md overflow-y-auto">
+      <DialogContent className="max-h-[88vh] w-full max-w-md overflow-x-hidden overflow-y-auto">
         <DialogHeader className="sr-only">
           <DialogTitle>{displayName}</DialogTitle>
         </DialogHeader>
@@ -339,7 +339,7 @@ function AllTab({
 }) {
   if (empty) return <Empty />;
   return (
-    <div className="space-y-5">
+    <div className="min-w-0 space-y-5">
       {images.length > 0 && (
         <Section title="images">
           <ImagesTab events={images} />
@@ -366,7 +366,7 @@ function AllTab({
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       <h3 className="label-mono text-[10px] opacity-60">{title}</h3>
       {children}
     </div>
@@ -418,14 +418,14 @@ function VoiceTab({ events }: { events: Event[] }) {
 function LinksTab({ links }: { links: string[] }) {
   if (links.length === 0) return <Empty title="no links yet" hint="share a link to see it here." />;
   return (
-    <ul className="space-y-1">
+    <ul className="min-w-0 space-y-1">
       {links.map((u) => (
-        <li key={u}>
+        <li key={u} className="min-w-0">
           <a
             href={u}
             target="_blank"
             rel="noopener noreferrer"
-            className="block truncate text-sm text-primary hover:underline"
+            className="block max-w-full break-all text-sm text-primary hover:underline"
           >
             {u}
           </a>

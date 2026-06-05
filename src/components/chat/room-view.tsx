@@ -964,24 +964,33 @@ function ProgressLine({
 
   React.useEffect(() => {
     setTick(0);
-    const id = window.setInterval(() => setTick((n) => n + 1), 2600);
-    return () => window.clearInterval(id);
+    let timeoutId: number | null = null;
+    const schedule = () => {
+      timeoutId = window.setTimeout(() => {
+        setTick((n) => n + 1);
+        schedule();
+      }, 5000 + Math.floor(Math.random() * 5001));
+    };
+    schedule();
+    return () => {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
   }, [entry.groupId, entry.state, entry.note]);
 
   return (
-    <div className="my-2 flex w-full justify-start gap-2">
-      <div className="mt-1 w-7 shrink-0">
+    <div className="my-2 flex w-full items-center justify-start gap-2">
+      <div className="w-7 shrink-0">
         <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} />
       </div>
       <div className="max-w-[70%]">
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
-          <span className="inline-flex min-w-0 items-center gap-2 truncate">
+          <span className="inline-flex min-w-0 items-center gap-3 truncate">
+            <span className="silicon-activity-copy truncate">{formatProgressLine(entry, tick)}</span>
             <span className="silicon-activity-core" aria-hidden="true">
               {Array.from({ length: 16 }, (_, i) => (
                 <span key={i} />
               ))}
             </span>
-            <span className="silicon-activity-copy truncate">{formatProgressLine(entry, tick)}</span>
           </span>
         </span>
       </div>

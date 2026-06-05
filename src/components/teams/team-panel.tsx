@@ -114,10 +114,10 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
             type="button"
             onClick={() => setTab(item.id)}
             className={cn(
-              "shrink-0 border-b-[3px] px-4 text-sm font-medium transition-colors",
+              "relative h-full shrink-0 px-4 text-sm font-medium transition-colors",
               tab === item.id
-                ? "border-black text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
+                ? "text-foreground after:absolute after:inset-x-4 after:bottom-[-1px] after:h-[3px] after:bg-black"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             {item.label}
@@ -130,16 +130,16 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
           <div className="space-y-6">
             <ReactivityKpi slug={slug} className="max-w-xl p-4 [&_span.font-mono]:text-3xl" />
             <Section title="structure">
-            {structureSvg ? (
-              <div
-                className="overflow-x-auto border bg-card p-4 [&_svg]:max-w-full"
-                dangerouslySetInnerHTML={{ __html: structureSvg }}
-              />
-            ) : structureDsl ? (
-              <QuarkStructureFrame dsl={structureDsl} />
-            ) : (
-              <p className="text-sm text-muted-foreground">No structure chart yet.</p>
-            )}
+              {structureSvg ? (
+                <div
+                  className="overflow-x-auto border bg-card p-4 [&_svg]:max-w-full"
+                  dangerouslySetInnerHTML={{ __html: structureSvg }}
+                />
+              ) : structureDsl ? (
+                <QuarkStructureFrame dsl={structureDsl} />
+              ) : (
+                <p className="text-sm text-muted-foreground">No structure chart yet.</p>
+              )}
             </Section>
           </div>
         )}
@@ -195,9 +195,21 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
   <script>
     (function () {
       var source = ${source};
+      function focusMain(attempts) {
+        var svg = document.getElementById("rough");
+        if (!window.Quark || !svg || !svg.children.length) {
+          if (attempts > 0) window.setTimeout(function () { focusMain(attempts - 1); }, 100);
+          return;
+        }
+        if (window.Quark.fitMain) window.Quark.fitMain();
+        else if (window.Quark.fit) window.Quark.fit();
+      }
       function apply() {
-        if (window.Quark) window.Quark.setSource(source || "");
-        else window.setTimeout(apply, 80);
+        if (window.Quark) {
+          window.Quark.setSource(source || "");
+          window.setTimeout(function () { focusMain(20); }, 80);
+          window.setTimeout(function () { focusMain(1); }, 500);
+        } else window.setTimeout(apply, 80);
       }
       apply();
     })();

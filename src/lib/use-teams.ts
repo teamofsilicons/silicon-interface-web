@@ -4,29 +4,51 @@ import * as React from "react";
 
 import { api } from "./api";
 import { authStore } from "./auth";
+import { loadCachedTeams, saveCachedTeams } from "./sidebar-cache";
 import type { Team } from "./types";
 
 /** Loads the teams the current principal belongs to. */
 export function useTeams() {
   const [teams, setTeams] = React.useState<Team[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [ownerId, setOwnerId] = React.useState<string | null>(
+    () => authStore.getCarbon()?.carbon_id ?? null,
+  );
+
+  React.useEffect(() => {
+    return authStore.subscribe(() => {
+      setOwnerId(authStore.getCarbon()?.carbon_id ?? null);
+    });
+  }, []);
 
   const refresh = React.useCallback(async () => {
     try {
-      setTeams(await api.teams());
+      const next = await api.teams();
+      setTeams(next);
+      if (ownerId) saveCachedTeams(ownerId, next);
     } catch {
       /* leave prior teams */
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  }, []);
+  }, [ownerId]);
 
-  // Inline the mount load so no setState runs synchronously in the effect body.
   React.useEffect(() => {
     let alive = true;
+    const cached = ownerId ? loadCachedTeams(ownerId) : null;
+    if (cached) {
+      setTeams(cached);
+      setLoading(false);
+    } else {
+      setTeams([]);
+      setLoading(true);
+    }
     (async () => {
       try {
-        const t = await api.teams();
-        if (alive) setTeams(t);
+        const next = await api.teams();
+        if (!alive) return;
+        setTeams(next);
+        if (ownerId) saveCachedTeams(ownerId, next);
       } catch {
         /* leave prior teams */
       }
@@ -35,7 +57,7 @@ export function useTeams() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [ownerId]);
 
   return { teams, loading, refresh };
 }

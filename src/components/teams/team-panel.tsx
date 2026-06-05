@@ -5,6 +5,7 @@ import { CircleNotch, Copy, Envelope, LinkSimple, X } from "@phosphor-icons/reac
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { env } from "@/lib/env";
 import { isTeamHead } from "@/lib/use-teams";
 import { cn, relativeTime } from "@/lib/utils";
 import type {
@@ -44,7 +45,8 @@ type TeamPanelTab = "structure" | "members" | "crons" | "invites" | "settings" |
 function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }) {
   const [team, setTeam] = React.useState<Team | null>(null);
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
-  const [structure, setStructure] = React.useState<string>("");
+  const [structureSvg, setStructureSvg] = React.useState<string>("");
+  const [structureDsl, setStructureDsl] = React.useState<string>("");
   const [tab, setTab] = React.useState<TeamPanelTab>("structure");
 
   React.useEffect(() => {
@@ -59,7 +61,8 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
         if (!alive) return;
         setTeam(t);
         setMembers(m);
-        setStructure(s.svg || "");
+        setStructureSvg(s.svg || "");
+        setStructureDsl(s.dsl || "");
       } catch (e) {
         if (alive) toast.error(e instanceof ApiError ? e.message : String(e));
       }
@@ -96,7 +99,6 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
           <div className="label-mono mt-1">{slug}</div>
         </div>
         <div className="flex items-center gap-3">
-          <ReactivityKpi slug={slug} className="hidden w-40 p-3 sm:block [&_span.font-mono]:text-2xl" />
           {onClose ? (
             <Button size="icon" variant="ghost" onClick={onClose} aria-label="close team">
               <X />
@@ -112,9 +114,9 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
             type="button"
             onClick={() => setTab(item.id)}
             className={cn(
-              "shrink-0 border-b-2 px-4 text-sm font-medium transition-colors",
+              "shrink-0 border-b-[3px] px-4 text-sm font-medium transition-colors",
               tab === item.id
-                ? "border-foreground text-foreground"
+                ? "border-black text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground",
             )}
           >
@@ -125,16 +127,21 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
 
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
         {tab === "structure" && (
-          <Section title="structure">
-            {structure ? (
+          <div className="space-y-6">
+            <ReactivityKpi slug={slug} className="max-w-xl p-4 [&_span.font-mono]:text-3xl" />
+            <Section title="structure">
+            {structureSvg ? (
               <div
                 className="overflow-x-auto border bg-card p-4 [&_svg]:max-w-full"
-                dangerouslySetInnerHTML={{ __html: structure }}
+                dangerouslySetInnerHTML={{ __html: structureSvg }}
               />
+            ) : structureDsl ? (
+              <QuarkStructureFrame dsl={structureDsl} />
             ) : (
               <p className="text-sm text-muted-foreground">No structure chart yet.</p>
             )}
-          </Section>
+            </Section>
+          </div>
         )}
         {tab === "members" && <MembersSection members={members} />}
         {tab === "crons" && <CronsSection />}
@@ -148,6 +155,66 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
         {tab === "billing" && head && <BillingSection slug={slug} />}
       </div>
     </>
+  );
+}
+
+function QuarkStructureFrame({ dsl }: { dsl: string }) {
+  const srcDoc = React.useMemo(() => {
+    const cssUrl = `${env.apiBase}/static/glass/quark/quark.css`;
+    const jsUrl = `${env.apiBase}/static/glass/quark/quark.js`;
+    const source = JSON.stringify(dsl).replace(/<\/script/gi, "<\\/script");
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="${cssUrl}" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #ede8e0; overflow: hidden; }
+    #stage { flex: 1 1 auto; min-height: 0; height: 100vh; width: 100vw; }
+    #src, #dl, #png, #pdf { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+  </style>
+</head>
+<body>
+  <textarea id="src" spellcheck="false"></textarea>
+  <button id="dl"></button><button id="png"></button><button id="pdf"></button>
+  <div class="stage" id="stage">
+    <div class="viewport" id="viewport">
+      <div class="canvas" id="canvas"><svg class="rough" id="rough" preserveAspectRatio="none"></svg></div>
+    </div>
+    <div class="zoombadge" id="zoombadge">100%</div>
+    <div class="zoomctl">
+      <button id="zin" title="Zoom in">+</button>
+      <button id="zout" title="Zoom out">-</button>
+      <button id="zfit" class="fit" title="Fit to screen">fit</button>
+      <button id="zreset" class="fit" title="Reset to 100%">1:1</button>
+    </div>
+    <div class="err" id="err" style="display:none;"></div>
+  </div>
+  <script src="${jsUrl}"></script>
+  <script>
+    (function () {
+      var source = ${source};
+      function apply() {
+        if (window.Quark) window.Quark.setSource(source || "");
+        else window.setTimeout(apply, 80);
+      }
+      apply();
+    })();
+  </script>
+</body>
+</html>`;
+  }, [dsl]);
+
+  return (
+    <div className="h-[min(62vh,720px)] min-h-[420px] overflow-hidden border bg-card">
+      <iframe
+        title="team structure"
+        srcDoc={srcDoc}
+        className="h-full w-full"
+        sandbox="allow-scripts allow-same-origin"
+      />
+    </div>
   );
 }
 

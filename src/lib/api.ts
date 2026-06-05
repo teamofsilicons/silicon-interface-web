@@ -188,7 +188,8 @@ export const api = {
   teamMembers: (slug: string) => call<TeamMembership[]>("GET", `/api/v1/teams/${slug}/members`),
   teamSilicons: (slug: string) => call<Silicon[]>("GET", `/api/v1/teams/${slug}/silicons`),
   teamReactivity: (slug: string) => call<{ value: number }>("GET", `/api/v1/teams/${slug}/reactivity`),
-  teamStructure: (slug: string) => call<{ svg: string }>("GET", `/api/v1/teams/${slug}/structure`),
+  teamStructure: (slug: string) =>
+    call<{ svg: string; dsl?: string }>("GET", `/api/v1/teams/${slug}/structure`),
   teamInvites: (slug: string) => call<Invite[]>("GET", `/api/v1/teams/${slug}/invites`),
   createInvite: (
     slug: string,

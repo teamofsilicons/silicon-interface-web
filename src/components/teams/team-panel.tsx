@@ -40,14 +40,14 @@ export function TeamPanel({
   );
 }
 
-type TeamPanelTab = "structure" | "members" | "crons" | "invites" | "settings" | "billing";
+type TeamPanelTab = "overview" | "structure" | "members" | "crons" | "invites" | "settings" | "billing";
 
 function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }) {
   const [team, setTeam] = React.useState<Team | null>(null);
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
   const [structureSvg, setStructureSvg] = React.useState<string>("");
   const [structureDsl, setStructureDsl] = React.useState<string>("");
-  const [tab, setTab] = React.useState<TeamPanelTab>("structure");
+  const [tab, setTab] = React.useState<TeamPanelTab>("overview");
 
   React.useEffect(() => {
     let alive = true;
@@ -82,6 +82,7 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
 
   const head = isTeamHead(team);
   const allTabs: Array<{ id: TeamPanelTab; label: string; headOnly?: boolean }> = [
+    { id: "overview", label: "Overview" },
     { id: "structure", label: "Structure" },
     { id: "members", label: "Members" },
     { id: "crons", label: "Crons" },
@@ -94,9 +95,12 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
   return (
     <>
       <div className="flex min-h-[72px] items-center justify-between gap-3 border-b px-8">
-        <div className="min-w-0">
-          <div className="truncate text-xl font-semibold">{team.name}</div>
-          <div className="label-mono mt-1">{slug}</div>
+        <div className="flex min-w-0 items-center gap-3">
+          <IdAvatar seed={`team:${team.slug}`} src={team.logo_url} size={42} />
+          <div className="min-w-0">
+            <div className="truncate text-xl font-semibold">{team.name}</div>
+            <div className="label-mono mt-1">{slug}</div>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           {onClose ? (
@@ -126,22 +130,28 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
-        {tab === "structure" && (
+        {tab === "overview" && (
           <div className="space-y-6">
             <ReactivityKpi slug={slug} className="w-full p-4 [&_span.font-mono]:text-3xl" />
-            <Section title="structure">
-              {structureSvg ? (
-                <div
-                  className="flex h-[min(70vh,760px)] min-h-[420px] items-center justify-center overflow-hidden border bg-card p-4 [&_svg]:max-h-full [&_svg]:max-w-full"
-                  dangerouslySetInnerHTML={{ __html: structureSvg }}
-                />
-              ) : structureDsl ? (
-                <QuarkStructureFrame dsl={structureDsl} />
-              ) : (
-                <p className="text-sm text-muted-foreground">No structure chart yet.</p>
-              )}
-            </Section>
+            <div className="grid gap-6 xl:grid-cols-2">
+              <MembersPreview members={members} onViewAll={() => setTab("members")} />
+              <CronsSection limit={10} onViewAll={() => setTab("crons")} />
+            </div>
           </div>
+        )}
+        {tab === "structure" && (
+          <Section title="structure">
+            {structureSvg ? (
+              <div
+                className="flex h-[min(74vh,820px)] min-h-[460px] items-center justify-center overflow-hidden border bg-card p-4 [&_svg]:max-h-full [&_svg]:max-w-full"
+                dangerouslySetInnerHTML={{ __html: structureSvg }}
+              />
+            ) : structureDsl ? (
+              <QuarkStructureFrame dsl={structureDsl} />
+            ) : (
+              <p className="text-sm text-muted-foreground">No structure chart yet.</p>
+            )}
+          </Section>
         )}
         {tab === "members" && <MembersSection members={members} />}
         {tab === "crons" && <CronsSection />}
@@ -227,6 +237,50 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
         sandbox="allow-scripts allow-same-origin"
       />
     </div>
+  );
+}
+
+function MembersPreview({
+  members,
+  onViewAll,
+}: {
+  members: TeamMembership[];
+  onViewAll: () => void;
+}) {
+  const preview = members.slice(0, 10);
+  return (
+    <Section title={`members · ${members.length}`}>
+      {preview.length === 0 ? (
+        <p className="border bg-muted/40 p-4 text-sm text-muted-foreground">No members in this team yet.</p>
+      ) : (
+        <ul className="divide-y border">
+          {preview.map((m) => {
+            const handle = m.member_handle ? `@${m.member_handle}` : `${m.member_kind} #${m.member_id}`;
+            return (
+              <li key={m.id} className="flex items-center justify-between gap-3 px-3 py-3 text-sm">
+                <span className="flex min-w-0 items-center gap-3">
+                  <IdAvatar
+                    seed={`${m.member_kind}:${m.member_handle ?? m.member_id}`}
+                    src={m.member_photo_url}
+                    size={32}
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{handle}</span>
+                    <span className="label-mono">{m.member_kind}</span>
+                  </span>
+                </span>
+                <span className="label-mono shrink-0">{m.role}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {members.length > 10 ? (
+        <Button variant="outline" size="sm" onClick={onViewAll}>
+          View all members
+        </Button>
+      ) : null}
+    </Section>
   );
 }
 
@@ -540,9 +594,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function CronsSection() {
+function CronsSection({
+  limit,
+  onViewAll,
+}: {
+  limit?: number;
+  onViewAll?: () => void;
+}) {
   const [crons, setCrons] = React.useState<Cron[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const visible = limit ? crons.slice(0, limit) : crons;
 
   React.useEffect(() => {
     let alive = true;
@@ -557,8 +618,13 @@ function CronsSection() {
   }, []);
 
   return (
-    <Section title="crons">
-      <CronList crons={crons} loading={loading} showSilicon />
+    <Section title={`crons${loading ? "" : ` · ${crons.length}`}`}>
+      <CronList crons={visible} loading={loading} showSilicon />
+      {limit && crons.length > limit && onViewAll ? (
+        <Button variant="outline" size="sm" onClick={onViewAll}>
+          View all crons
+        </Button>
+      ) : null}
     </Section>
   );
 }
@@ -730,8 +796,23 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
   const [domains, setDomains] = React.useState((team.email_whitelist.domains || []).join(", "));
   const [emails, setEmails] = React.useState((team.email_whitelist.emails || []).join(", "));
   const [busy, setBusy] = React.useState(false);
+  const [logoBusy, setLogoBusy] = React.useState(false);
 
   const split = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+  const uploadLogo = async (file: File | null | undefined) => {
+    if (!file) return;
+    setLogoBusy(true);
+    try {
+      const updated = await api.uploadTeamLogo(team.slug, file);
+      onSaved(updated);
+      toast.success("team logo updated");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLogoBusy(false);
+    }
+  };
 
   const save = async () => {
     setBusy(true);
@@ -753,6 +834,24 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
   return (
     <Section title="settings (heads only)">
       <div className="space-y-4">
+        <div className="flex items-center gap-4 border p-3">
+          <IdAvatar seed={`team:${team.slug}`} src={team.logo_url} size={64} />
+          <div className="min-w-0 flex-1 space-y-1">
+            <Label htmlFor="team-logo">team logo</Label>
+            <Input
+              id="team-logo"
+              type="file"
+              accept="image/*"
+              disabled={logoBusy}
+              onChange={(e) => {
+                void uploadLogo(e.target.files?.[0]);
+                e.currentTarget.value = "";
+              }}
+            />
+          </div>
+          {logoBusy ? <CircleNotch className="h-5 w-5 animate-spin text-muted-foreground" /> : null}
+        </div>
+
         <div className="space-y-1">
           <Label htmlFor="teamname">team name</Label>
           <Input id="teamname" value={name} onChange={(e) => setName(e.target.value)} />

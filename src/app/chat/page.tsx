@@ -68,6 +68,7 @@ import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
 import { TeamFilterBar, EMPTY_FILTERS, type ChatFilters } from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
+import { IdAvatar } from "@/components/profile/id-avatar";
 
 // Resizable sidebar bounds + storage. Width persists across reloads.
 const SB_DEFAULT = 320;
@@ -477,7 +478,7 @@ function ChatPageInner() {
         </div>
         {(teams.length > 0 || hasOtherRooms) && (
           <div className="flex h-12 items-stretch border-b bg-background">
-            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-3">
+            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-2 pl-6 pr-3">
               {teams.map((team) => (
                 <button
                   key={team.slug}
@@ -487,13 +488,19 @@ function ChatPageInner() {
                     if (viewedTeam) router.push(`/chat?team=${encodeURIComponent(team.slug)}`);
                   }}
                   className={cn(
-                    "max-w-40 shrink-0 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
+                    "inline-flex max-w-48 shrink-0 items-center gap-2 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
                     activeTeamSlug === team.slug
                       ? "border-foreground bg-foreground text-background"
                       : "border-border bg-card text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {team.name}
+                  <IdAvatar
+                    seed={`team:${team.slug}`}
+                    src={team.logo_url}
+                    size={18}
+                    className={cn(activeTeamSlug === team.slug && "border-background")}
+                  />
+                  <span className="min-w-0 truncate">{team.name}</span>
                 </button>
               ))}
               {hasOtherRooms && (

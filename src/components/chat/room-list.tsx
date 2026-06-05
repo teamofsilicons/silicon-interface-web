@@ -229,5 +229,5 @@ function fileNamePreview(preview: string): string {
 function roomPreview(room: Room, fallback: string): string {
   const raw = room.last_event?.preview || fallback;
   const compact = raw.replace(/\s+/g, " ").trim();
-  return middleEllipsis(compact, 34);
+  return compact.length > 42 ? `${compact.slice(0, 42).trimEnd()}...` : compact;
 }

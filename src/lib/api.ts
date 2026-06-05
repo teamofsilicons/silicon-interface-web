@@ -185,6 +185,11 @@ export const api = {
   team: (slug: string) => call<Team>("GET", `/api/v1/teams/${slug}/`),
   createTeam: (data: { name: string; slug?: string }) => call<Team>("POST", "/api/v1/teams/", data),
   patchTeam: (slug: string, patch: Partial<Team>) => call<Team>("PATCH", `/api/v1/teams/${slug}/`, patch),
+  uploadTeamLogo: (slug: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return call<Team>("POST", `/api/v1/teams/${slug}/logo`, form);
+  },
   teamMembers: (slug: string) => call<TeamMembership[]>("GET", `/api/v1/teams/${slug}/members`),
   teamSilicons: (slug: string) => call<Silicon[]>("GET", `/api/v1/teams/${slug}/silicons`),
   teamReactivity: (slug: string) => call<{ value: number }>("GET", `/api/v1/teams/${slug}/reactivity`),

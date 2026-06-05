@@ -171,6 +171,8 @@ export interface Team {
   name: string;
   slug: string;
   team_heads: string[]; // carbon_ids
+  logo_key: string;
+  logo_url: string | null;
   settings: { let_employees_invite: boolean; verify_carbons: boolean } & Record<string, unknown>;
   email_whitelist: { domains: string[]; emails: string[] };
   trust_chart: Record<string, unknown>;

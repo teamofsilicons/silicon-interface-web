@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { CaretRight, Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -9,7 +9,6 @@ import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent } from "@/lib/sounds";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,7 +23,6 @@ import { IdAvatar } from "@/components/profile/id-avatar";
 import { Composer, type OptimisticPayload } from "@/components/chat/composer";
 import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
-import { ProgressCard, type ProgressEntry } from "@/components/chat/progress-card";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 import { CronDrawer } from "@/components/chat/cron-drawer";
 import { SaveContactDialog } from "@/components/chat/save-contact-dialog";
@@ -52,10 +50,26 @@ type LocalEvent = Event & {
   _clientId?: string;
 };
 
+interface ProgressEntry {
+  roomId: string;
+  groupId: string;
+  state: ProgressState;
+  note: string;
+  updatedAt: number;
+}
+
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
 // Background refresh interval — keeps relative timestamps, read receipts,
 // and any out-of-band events fresh even if the WS connection blips.
 const POLL_INTERVAL_MS = 10_000;
+const PROGRESS_MESSAGE_TYPES = new Set([
+  "m.text",
+  "m.image",
+  "m.file",
+  "m.voice",
+  "m.tts",
+  "m.remote_browser",
+]);
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
@@ -75,10 +89,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // room I may only watch. No composer, no reactions/replies/take-backs, and
   // no read-receipts (I'm not a member, so the read POST would 403 anyway).
   const readOnly = !!room.observed;
+  const showsProgressForReplies = !readOnly && room.peers.some((p) => p.kind === "silicon");
 
   const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [progress, setProgress] = React.useState<Record<string, ProgressEntry>>({});
+  const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
   const [profileOpen, setProfileOpen] = React.useState(false);
   const [focusSender, setFocusSender] = React.useState<{
     kind: "carbon" | "silicon";
@@ -212,6 +227,22 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (f.type === "event") {
       const incoming = f.event;
       const mine = incoming.sender_handle && incoming.sender_handle === myUsername;
+      if (incoming.type === "m.progress") {
+        const state = (incoming.content.state as ProgressState) || "thinking";
+        if (state === "done") {
+          setActiveProgress(null);
+        } else {
+          setActiveProgress({
+            roomId: room.room_id,
+            groupId: String(incoming.content.progress_group_id || incoming.event_id),
+            state,
+            note: String(incoming.content.note || ""),
+            updatedAt: Date.now(),
+          });
+        }
+        return;
+      }
+      if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) setActiveProgress(null);
       // The received tone is played once, globally, by the chat page (so it
       // fires for any room, not just the open one).
       setEvents((prev) => {
@@ -290,21 +321,17 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       );
     } else if (f.type === "progress") {
       if (f.state && f.progress_group_id) {
-        setProgress((prev) => {
-          if (f.state === "done") {
-            const { [f.progress_group_id!]: _drop, ...rest } = prev;
-            return rest;
-          }
-          return {
-            ...prev,
-            [f.progress_group_id!]: {
-              groupId: f.progress_group_id!,
-              state: f.state as ProgressState,
-              note: f.note || "",
-              updatedAt: Date.now(),
-            },
-          };
-        });
+        if (f.state === "done") {
+          setActiveProgress(null);
+        } else {
+          setActiveProgress({
+            roomId: room.room_id,
+            groupId: f.progress_group_id,
+            state: f.state as ProgressState,
+            note: f.note || "",
+            updatedAt: Date.now(),
+          });
+        }
       }
       // #5 — Activity beacon (typing | uploading | recording). Skip my own
       // beacons; track per-handle so we can show "@alice is recording…"
@@ -357,7 +384,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       cancelAnimationFrame(raf);
       if (t) window.clearTimeout(t);
     };
-  }, [events.length, progress, loading, room.room_id]);
+  }, [events.length, activeProgress, loading, room.room_id]);
 
   // Auto-read: derive the latest event from someone other than me, and only
   // POST when *that event_id* changes. The previous version depended on the
@@ -491,7 +518,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // Visible events drop reactions (they render as chips under the target) and
   // deleted/redacted messages (hidden entirely — no "message deleted" row).
   const visibleEvents = React.useMemo(
-    () => events.filter((e) => e.type !== "m.reaction" && !e.redacted_at),
+    () => events.filter((e) => e.type !== "m.reaction" && e.type !== "m.progress" && !e.redacted_at),
     [events],
   );
 
@@ -525,11 +552,20 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         _clientId: clientId,
       };
       setEvents((prev) => [...prev, placeholder]);
+      if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(payload.type)) {
+        setActiveProgress({
+          roomId: room.room_id,
+          groupId: `local:${clientId}`,
+          state: "thinking",
+          note: "Thinking",
+          updatedAt: Date.now(),
+        });
+      }
       // Audible "sent" tone — small ascending chirp. Respects reduced-motion
       // + the silicon-interface:sounds=off opt-out.
       playSent();
     },
-    [myUsername],
+    [myUsername, room.room_id, showsProgressForReplies],
   );
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
@@ -585,6 +621,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     setEvents((prev) =>
       prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
     );
+    setActiveProgress((prev) => (prev?.groupId === `local:${clientId}` ? null : prev));
     toast.error(err instanceof ApiError ? err.message : String(err));
   }, []);
 
@@ -801,7 +838,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               );
             })
           )}
-          <ProgressCard entries={Object.values(progress)} />
+          {!search && activeProgress?.roomId === room.room_id ? (
+            <ProgressLine entry={activeProgress} />
+          ) : null}
           <div ref={endRef} />
         </div>
       </ScrollArea>
@@ -861,6 +900,29 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       </Dialog>
     </section>
   );
+}
+
+function ProgressLine({ entry }: { entry: ProgressEntry }) {
+  return (
+    <div className="progress-flow-line my-2 flex min-h-7 items-center text-sm text-muted-foreground">
+      <span className="progress-flow-line__text inline-flex min-w-0 items-center gap-1.5 truncate">
+        <span className="truncate">{formatProgressLine(entry)}</span>
+        <CaretRight className="h-3.5 w-3.5 shrink-0" />
+      </span>
+    </div>
+  );
+}
+
+function formatProgressLine(entry: ProgressEntry): string {
+  const note = entry.note.trim();
+  if (note) return sentenceCase(note);
+  return sentenceCase(entry.state.replaceAll("_", " "));
+}
+
+function sentenceCase(value: string): string {
+  const text = value.trim();
+  if (!text) return "Thinking";
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function SearchBar({

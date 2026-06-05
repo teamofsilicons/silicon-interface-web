@@ -246,6 +246,48 @@ summary,
 .stagger-fade-in > *:nth-child(6) { animation-delay: 0.30s; }
 .stagger-fade-in > *:nth-child(n+7) { animation-delay: 0.35s; }
 
+/* One-line silicon progress indicator. The whole line breathes from 0.7 to 1 to 0.7,
+   while a soft sheen travels left-to-right on every loop. */
+.progress-flow-line {
+  opacity: 0.7;
+  animation: progress-opacity 1.8s ease-in-out infinite;
+}
+.progress-flow-line__text {
+  position: relative;
+  overflow: hidden;
+}
+.progress-flow-line__text::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(26, 26, 26, 0.16) 45%,
+    transparent 70%
+  );
+  transform: translateX(-120%);
+  animation: progress-flow 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes progress-opacity {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+@keyframes progress-flow {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(120%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-flow-line,
+  .progress-flow-line__text::after {
+    animation: none;
+  }
+}
+
 /* Uppercase mono label — pinned to JetBrains Mono so it keeps its monospace
    character regardless of the default body face. */
 .label-mono {

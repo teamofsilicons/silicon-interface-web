@@ -75,6 +75,8 @@ interface Props {
   status?: MessageStatus;
   /** Photo URL for the sender — used when rendering the message-side avatar. */
   senderPhotoUrl?: string | null;
+  /** Saved-contact display name for the sender, when the user set one. */
+  senderDisplayName?: string | null;
   /** Click on the avatar/profile chip opens the sender's profile. */
   onSenderClick?: (sender: { kind: "carbon" | "silicon"; handle: string }) => void;
   /**
@@ -109,6 +111,7 @@ export function MessageBubble({
   onTakeBack,
   status,
   senderPhotoUrl,
+  senderDisplayName,
   onSenderClick,
   showTime = true,
   showSender = true,
@@ -155,7 +158,9 @@ export function MessageBubble({
   const redacted = event.redacted_at !== null;
   // Prefer the sender's handle (carbon username == carbon_id, or silicon name);
   // fall back to the kind only if we don't have it (e.g. system events).
-  const senderLabel = event.sender_handle
+  const senderLabel = senderDisplayName?.trim()
+    ? senderDisplayName.trim()
+    : event.sender_handle
     ? `@${event.sender_handle}`
     : event.sender_kind === "silicon"
       ? "Silicon"
@@ -209,7 +214,7 @@ export function MessageBubble({
             <button
               type="button"
               onClick={handleAvatarClick}
-              aria-label={senderHandle ? `${senderHandle} — profile` : "profile"}
+              aria-label={senderDisplayName || senderHandle ? `${senderDisplayName || senderHandle} — profile` : "profile"}
               className="block transition-opacity hover:opacity-80"
             >
               <IdAvatar seed={senderHandle || "?"} src={senderPhotoUrl} size={28} />

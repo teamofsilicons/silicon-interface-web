@@ -418,7 +418,7 @@ function VoiceTab({ events }: { events: Event[] }) {
 function LinksTab({ links }: { links: string[] }) {
   if (links.length === 0) return <Empty title="no links yet" hint="share a link to see it here." />;
   return (
-    <ul className="min-w-0 space-y-1">
+    <ul className="min-w-0 list-disc space-y-1 pl-5 marker:text-muted-foreground">
       {links.map((u) => (
         <li key={u} className="min-w-0">
           <a

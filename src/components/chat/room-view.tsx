@@ -132,6 +132,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     kind: "carbon" | "silicon";
     handle: string;
   } | null>(null);
+  const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const [search, setSearch] = React.useState<string | null>(null);
   const [cronOpen, setCronOpen] = React.useState(false);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
@@ -181,8 +182,60 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
   const endRef = React.useRef<HTMLDivElement>(null);
   const sectionRef = React.useRef<HTMLElement>(null);
+  const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = React.useRef(true);
+  const forceNextBottomRef = React.useRef(false);
+
+  const scrollViewport = React.useCallback((): HTMLElement | null => {
+    return (
+      scrollRootRef.current?.querySelector("[data-radix-scroll-area-viewport]") ??
+      null
+    ) as HTMLElement | null;
+  }, []);
+
+  const isNearBottom = React.useCallback(() => {
+    const viewport = scrollViewport();
+    if (!viewport) return true;
+    return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96;
+  }, [scrollViewport]);
+
+  const scrollToBottom = React.useCallback(
+    (behavior: ScrollBehavior = "auto") => {
+      const viewport = scrollViewport();
+      if (viewport) {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+        return;
+      }
+      endRef.current?.scrollIntoView({ behavior, block: "end" });
+    },
+    [scrollViewport],
+  );
+
+  const requestBottomStick = React.useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      stickToBottomRef.current = true;
+      forceNextBottomRef.current = true;
+      requestAnimationFrame(() => scrollToBottom(behavior));
+    },
+    [scrollToBottom],
+  );
 
   // ----- Photo URL lookup per sender (for in-message avatars) -----
+  const peerByHandle = React.useMemo(() => {
+    const m = new Map<string, Room["peers"][number]>();
+    for (const p of room.peers) m.set(p.handle, p);
+    return m;
+  }, [room.peers]);
+  const contactForSender = React.useCallback(
+    (kind: "carbon" | "silicon" | "system", handle: string | null) => {
+      if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
+      return (
+        contacts?.get(contactKey(kind, handle)) ??
+        contacts?.get(contactKey(kind, peerByHandle.get(handle)?.id ?? ""))
+      );
+    },
+    [contacts, peerByHandle],
+  );
   const peerPhotoByHandle = React.useMemo(() => {
     const m = new Map<string, string | null>();
     for (const p of room.peers) m.set(p.handle, p.profile_photo_url);
@@ -190,12 +243,21 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   }, [room.peers]);
   const myPhotoUrl = carbon?.profile_photo_url ?? null;
   const photoFor = React.useCallback(
-    (handle: string | null) => {
+    (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle) return null;
       if (handle === myUsername) return myPhotoUrl;
+      const saved = contactForSender(kind, handle);
+      if (saved) return saved.photo_url ?? saved.target_photo_url;
       return peerPhotoByHandle.get(handle) ?? null;
     },
-    [myUsername, myPhotoUrl, peerPhotoByHandle],
+    [myUsername, myPhotoUrl, contactForSender, peerPhotoByHandle],
+  );
+  const displayNameFor = React.useCallback(
+    (kind: "carbon" | "silicon" | "system", handle: string | null) => {
+      const saved = contactForSender(kind, handle);
+      return saved?.name?.trim() || null;
+    },
+    [contactForSender],
   );
 
   // ----- Initial events load -----
@@ -398,26 +460,44 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const didInitialScrollRef = React.useRef(false);
   React.useEffect(() => {
     didInitialScrollRef.current = false;
+    stickToBottomRef.current = true;
+    forceNextBottomRef.current = true;
   }, [room.room_id]);
+
+  React.useEffect(() => {
+    const viewport = scrollViewport();
+    if (!viewport) return;
+    const onScroll = () => {
+      stickToBottomRef.current = isNearBottom();
+    };
+    onScroll();
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, [room.room_id, scrollViewport, isNearBottom]);
+
   React.useEffect(() => {
     if (loading) return;
     const initial = !didInitialScrollRef.current;
+    const shouldStick = initial || forceNextBottomRef.current || stickToBottomRef.current;
+    if (!shouldStick) {
+      didInitialScrollRef.current = true;
+      return;
+    }
+    const behavior: ScrollBehavior = initial ? "auto" : "smooth";
     const jump = () =>
-      endRef.current?.scrollIntoView({
-        behavior: initial ? "auto" : "smooth",
-        block: "end",
-      });
+      scrollToBottom(behavior);
     // Double rAF runs after layout settles; on first open a delayed pass also
     // catches late media reflow (images/audio that load taller after paint),
     // so we land on the true last message instead of just short of it.
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    const t = initial ? window.setTimeout(jump, 350) : undefined;
+    const t = window.setTimeout(jump, initial ? 350 : 80);
     didInitialScrollRef.current = true;
+    forceNextBottomRef.current = false;
     return () => {
       cancelAnimationFrame(raf);
       if (t) window.clearTimeout(t);
     };
-  }, [events.length, activeProgress, loading, room.room_id]);
+  }, [events.length, activeProgress, replyTo?.event_id, loading, room.room_id, scrollToBottom]);
 
   // Auto-read: derive the latest event from someone other than me, and only
   // POST when *that event_id* changes. The previous version depended on the
@@ -451,7 +531,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // Delete is two-step: clicking it stages the target; the confirm dialog
   // actually performs the redaction.
   const [pendingDelete, setPendingDelete] = React.useState<Event | null>(null);
-  const onSelfDelete = (ev: Event) => setPendingDelete(ev);
+  const onSelfDelete = (ev: Event) => {
+    if (ev.event_id === latestVisibleEventId) requestBottomStick();
+    setPendingDelete(ev);
+  };
 
   const confirmDelete = async () => {
     const ev = pendingDelete;
@@ -480,6 +563,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   };
 
   const onReact = async (ev: Event, emoji: string) => {
+    if (ev.event_id === latestVisibleEventId) requestBottomStick();
     // Toggle: if I already reacted to this message with this emoji, remove that
     // reaction; otherwise add one. Reactions are m.reaction events keyed to the
     // target via reply_to_event_id; the WS echo / take_back folds the change
@@ -520,8 +604,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     }
   };
 
-  const [replyTo, setReplyTo] = React.useState<Event | null>(null);
-  const onReply = (ev: Event) => setReplyTo(ev);
+  const onReply = (ev: Event) => {
+    setReplyTo(ev);
+    if (ev.event_id === latestVisibleEventId) requestBottomStick();
+  };
 
   // #17 — Forward picker. Setting `forwardingEvent` opens the dialog; the
   // dialog handles room selection and re-posting with forward_from metadata.
@@ -585,6 +671,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         _clientId: clientId,
       };
       setEvents((prev) => [...prev, placeholder]);
+      requestBottomStick("smooth");
       if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(payload.type)) {
         setActiveProgress({
           roomId: room.room_id,
@@ -598,10 +685,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       // + the silicon-interface:sounds=off opt-out.
       playSent();
     },
-    [myUsername, room.room_id, showsProgressForReplies],
+    [myUsername, room.room_id, showsProgressForReplies, requestBottomStick],
   );
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
+    requestBottomStick("smooth");
     setEvents((prev) => {
       const optIdx = prev.findIndex((e) => e._clientId === clientId);
       const dupIdx = prev.findIndex(
@@ -630,7 +718,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       }
       return prev;
     });
-  }, []);
+  }, [requestBottomStick]);
 
   const onOptimisticUpdate = React.useCallback(
     (clientId: string, payload: OptimisticPayload) => {
@@ -695,6 +783,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       );
     });
   }, [visibleEvents, search]);
+  const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;
+  const latestVisibleEventId = latestVisibleEvent?.event_id ?? null;
+  const shouldShowActiveProgress =
+    !search &&
+    activeProgress?.roomId === room.room_id &&
+    latestVisibleEvent?.sender_kind !== "silicon";
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -832,7 +926,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         focusSender={focusSender}
       />
 
-      <ScrollArea className="flex-1">
+      <ScrollArea ref={scrollRootRef} className="flex-1">
         {/* Messages bleed to the same horizontal margins as the navbar's
             logo (left) and avatar (right) — px-6 matches the app shell. */}
         <div className="w-full px-6 py-4">
@@ -869,7 +963,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   }
                   isDirect={room.kind === "direct"}
                   status={e._status}
-                  senderPhotoUrl={photoFor(e.sender_handle)}
+                  senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
+                  senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
                   onSenderClick={openSenderProfile}
                   onTakeBack={readOnly ? undefined : onTakeBack}
                   showSender={showSender}
@@ -883,7 +978,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               );
             })
           )}
-          {!search && activeProgress?.roomId === room.room_id ? (
+          {shouldShowActiveProgress ? (
             <ProgressLine
               entry={activeProgress}
               avatarSeed={headerSeed}
@@ -961,21 +1056,41 @@ function ProgressLine({
   avatarSrc?: string | null;
 }) {
   const [tick, setTick] = React.useState(0);
+  const [typed, setTyped] = React.useState("");
+  const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
+  const holdMsRef = React.useRef(6500);
+  const fullText = formatProgressLine(entry, tick);
 
   React.useEffect(() => {
     setTick(0);
+    setTyped("");
+    setPhase("typing");
+  }, [entry.groupId, entry.state, entry.note]);
+
+  React.useEffect(() => {
     let timeoutId: number | null = null;
-    const schedule = () => {
-      timeoutId = window.setTimeout(() => {
-        setTick((n) => n + 1);
-        schedule();
-      }, 5000 + Math.floor(Math.random() * 5001));
-    };
-    schedule();
+    if (phase === "typing") {
+      if (typed.length < fullText.length) {
+        timeoutId = window.setTimeout(
+          () => setTyped(fullText.slice(0, typed.length + 1)),
+          28 + Math.floor(Math.random() * 24),
+        );
+      } else {
+        holdMsRef.current = 5000 + Math.floor(Math.random() * 5001);
+        setPhase("holding");
+      }
+    } else if (phase === "holding") {
+      timeoutId = window.setTimeout(() => setPhase("erasing"), holdMsRef.current);
+    } else if (typed.length > 0) {
+      timeoutId = window.setTimeout(() => setTyped((text) => text.slice(0, -1)), 16);
+    } else {
+      setTick((n) => n + 1);
+      setPhase("typing");
+    }
     return () => {
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [entry.groupId, entry.state, entry.note]);
+  }, [phase, typed, fullText]);
 
   return (
     <div className="my-2 flex w-full items-center justify-start gap-2">
@@ -985,7 +1100,7 @@ function ProgressLine({
       <div className="max-w-[70%]">
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
           <span className="inline-flex min-w-0 items-center gap-3 truncate">
-            <span className="silicon-activity-copy truncate">{formatProgressLine(entry, tick)}</span>
+            <span className="silicon-activity-copy truncate">{typed || "\u00a0"}</span>
             <span className="silicon-activity-core" aria-hidden="true">
               {Array.from({ length: 16 }, (_, i) => (
                 <span key={i} />

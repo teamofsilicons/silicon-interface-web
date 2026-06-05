@@ -74,6 +74,7 @@ const SB_DEFAULT = 320;
 const SB_MIN = 240;
 const SB_MAX = 560;
 const SB_STORAGE = "silicon-interface:sidebar-width";
+const OTHERS_TAB = "__others__";
 
 function loadSidebarWidth(): number {
   if (typeof window === "undefined") return SB_DEFAULT;
@@ -100,7 +101,7 @@ function ChatPageInner() {
   const [loading, setLoading] = React.useState(true);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
-  const [activeTeamTab, setActiveTeamTab] = React.useState<string>("all");
+  const [activeTeamTab, setActiveTeamTab] = React.useState<string>("");
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
   // Sidebar search — filters the conversation list by display name, handle,
   // or last message body.
@@ -114,10 +115,12 @@ function ChatPageInner() {
   const ownerId = carbon?.carbon_id ?? null;
   const contacts = useContacts(ownerId);
   const myUsername = carbon?.username ?? null;
-  const activeTeamSlug =
-    activeTeamTab !== "all" && teams.some((t) => t.slug === activeTeamTab)
-      ? activeTeamTab
-      : null;
+  const selectedRoom = rooms.find((r) => r.room_id === selected);
+  const hasOtherRooms = rooms.some((r) => !r.team_slug);
+  const activeTeamSlug = teams.some((t) => t.slug === activeTeamTab)
+    ? activeTeamTab
+    : null;
+  const showingOthers = activeTeamTab === OTHERS_TAB && hasOtherRooms;
   const activeTeam = activeTeamSlug ? teams.find((t) => t.slug === activeTeamSlug) : null;
   const viewedTeam = teamViewSlug ? teams.find((t) => t.slug === teamViewSlug) : null;
 
@@ -126,6 +129,24 @@ function ChatPageInner() {
       setActiveTeamTab(teamViewSlug);
     }
   }, [teamViewSlug, teams]);
+
+  React.useEffect(() => {
+    if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) return;
+    if (selectedRoom?.team_slug && teams.some((t) => t.slug === selectedRoom.team_slug)) {
+      if (activeTeamTab !== selectedRoom.team_slug) setActiveTeamTab(selectedRoom.team_slug);
+      return;
+    }
+    if (selectedRoom && !selectedRoom.team_slug && hasOtherRooms) {
+      if (activeTeamTab !== OTHERS_TAB) setActiveTeamTab(OTHERS_TAB);
+      return;
+    }
+    const activeValid =
+      teams.some((t) => t.slug === activeTeamTab) ||
+      (activeTeamTab === OTHERS_TAB && hasOtherRooms);
+    if (!activeValid) {
+      setActiveTeamTab(teams[0]?.slug ?? (hasOtherRooms ? OTHERS_TAB : ""));
+    }
+  }, [teamViewSlug, teams, selectedRoom, hasOtherRooms, activeTeamTab]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -379,6 +400,7 @@ function ChatPageInner() {
     const list = rooms.filter((r) => {
       // #8 — Unread filter hides any room that has nothing new for me.
       if (activeTeamSlug && r.team_slug !== activeTeamSlug) return false;
+      if (showingOthers && r.team_slug) return false;
       if (filters.unread && !r.unread) return false;
       if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
       if (q) {
@@ -406,9 +428,7 @@ function ChatPageInner() {
       return tb.localeCompare(ta);
     });
     return list;
-  }, [rooms, filters, sidebarQuery, activeTeamSlug]);
-
-  const selectedRoom = rooms.find((r) => r.room_id === selected);
+  }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers]);
 
   return (
     <>
@@ -455,24 +475,9 @@ function ChatPageInner() {
             <Plus />
           </button>
         </div>
-        {teams.length > 0 && (
+        {(teams.length > 0 || hasOtherRooms) && (
           <div className="flex h-12 items-stretch border-b bg-background">
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTeamTab("all");
-                  if (viewedTeam) router.push("/chat");
-                }}
-                className={cn(
-                  "shrink-0 border px-3 py-1.5 text-xs font-semibold transition-colors",
-                  activeTeamSlug === null
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-border bg-card text-muted-foreground hover:text-foreground",
-                )}
-              >
-                All chats
-              </button>
               {teams.map((team) => (
                 <button
                   key={team.slug}
@@ -491,6 +496,23 @@ function ChatPageInner() {
                   {team.name}
                 </button>
               ))}
+              {hasOtherRooms && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTeamTab(OTHERS_TAB);
+                    if (viewedTeam) router.push("/chat");
+                  }}
+                  className={cn(
+                    "max-w-40 shrink-0 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
+                    showingOthers
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-card text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  Others
+                </button>
+              )}
             </div>
             {activeTeam ? (
               <button

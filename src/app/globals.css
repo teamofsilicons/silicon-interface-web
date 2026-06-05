@@ -297,6 +297,16 @@ summary,
   text-transform: uppercase;
   color: var(--muted-foreground);
 }
+.silicon-activity-copy::after {
+  content: "";
+  display: inline-block;
+  width: 0.7ch;
+  height: 1em;
+  margin-left: 0.35ch;
+  border-right: 1px solid currentColor;
+  transform: translateY(0.16em);
+  animation: silicon-type-caret 0.9s steps(1, end) infinite;
+}
 
 @keyframes silicon-activity-breathe {
   0%, 100% { opacity: 0.82; }
@@ -308,9 +318,15 @@ summary,
   50% { transform: scale(0.72); }
 }
 
+@keyframes silicon-type-caret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .silicon-activity-line,
-  .silicon-activity-core span {
+  .silicon-activity-core span,
+  .silicon-activity-copy::after {
     animation: none;
   }
 }

@@ -780,9 +780,9 @@ export function Composer({
           </button>
         </div>
       )}
-      {/* One bordered field. Controls stretch with multiline drafts so the
-          attachment and send edges never visually disappear. */}
-      <div className="flex items-stretch border border-input transition-colors focus-within:border-ring">
+      {/* One bordered field. Controls stay fixed-height at the bottom while
+          multiline drafts grow the text area. */}
+      <div className="flex items-end border border-input transition-colors focus-within:border-ring">
         <input
           type="file"
           ref={fileInputRef}
@@ -795,7 +795,7 @@ export function Composer({
           title="attach file"
           aria-label="attach file"
           disabled={busy}
-          className="flex min-h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+          className="flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
         </button>
@@ -917,7 +917,7 @@ export function Composer({
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"
-            className="flex min-h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >
             <Microphone />
           </button>
@@ -927,7 +927,7 @@ export function Composer({
             onClick={send}
             disabled={busy || (!!file && uploadStatus !== "ready")}
             aria-label="send"
-            className="flex min-h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {busy || (!!file && uploadStatus === "uploading") ? (
               <CircleNotch className="animate-spin" />

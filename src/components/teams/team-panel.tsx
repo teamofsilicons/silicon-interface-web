@@ -128,11 +128,11 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
         {tab === "structure" && (
           <div className="space-y-6">
-            <ReactivityKpi slug={slug} className="max-w-xl p-4 [&_span.font-mono]:text-3xl" />
+            <ReactivityKpi slug={slug} className="w-full p-4 [&_span.font-mono]:text-3xl" />
             <Section title="structure">
               {structureSvg ? (
                 <div
-                  className="overflow-x-auto border bg-card p-4 [&_svg]:max-w-full"
+                  className="flex h-[min(70vh,760px)] min-h-[420px] items-center justify-center overflow-hidden border bg-card p-4 [&_svg]:max-h-full [&_svg]:max-w-full"
                   dangerouslySetInnerHTML={{ __html: structureSvg }}
                 />
               ) : structureDsl ? (
@@ -219,7 +219,7 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
   }, [dsl]);
 
   return (
-    <div className="h-[min(62vh,720px)] min-h-[420px] overflow-hidden border bg-card">
+    <div className="h-[min(70vh,760px)] min-h-[420px] overflow-hidden border bg-card">
       <iframe
         title="team structure"
         srcDoc={srcDoc}

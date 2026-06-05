@@ -664,14 +664,35 @@ export function Composer({
     // Show the voice note instantly (with a pending clock) — don't make the
     // user stare at nothing while it uploads.
     const clientId = newClientId();
-    onOptimisticAdd(clientId, { type: "m.voice", content: { duration_ms: durationMs } });
+    const mime = blob.type || "audio/webm";
+    const localUrl = URL.createObjectURL(blob);
+    onOptimisticAdd(clientId, {
+      type: "m.voice",
+      content: { duration_ms: durationMs, mime, local_url: localUrl },
+    });
+    const peaksPromise = computePeaks(blob)
+      .then((peaks) => {
+        if (peaks) {
+          onOptimisticUpdate?.(clientId, {
+            type: "m.voice",
+            content: {
+              duration_ms: peaks.duration_ms || durationMs,
+              mime,
+              local_url: localUrl,
+              peaks: peaks.peaks,
+            },
+          });
+        }
+        return peaks;
+      })
+      .catch(() => null);
     api.activity(roomId, "recording", false).catch(() => undefined);
     api.activity(roomId, "uploading", true).catch(() => undefined);
     setBusy(true);
     try {
       const filename = `voice-${Date.now()}.webm`;
       const r = await api.presignUpload({
-        mime: blob.type || "audio/webm",
+        mime,
         size: blob.size,
         kind: "voice",
         filename,
@@ -684,23 +705,25 @@ export function Composer({
         form.append("file", blob, filename);
         const up = await fetch(r.upload.url, { method: "POST", body: form });
         if (!up.ok) throw new Error(`upload failed (${up.status})`);
-        // #6 — Send the peaks we computed during recording (durationMs is
-        // already known; the recorder reports it).
-        const peaks = await computePeaks(blob);
-        await api.mediaComplete(mediaId, {
-          duration_ms: durationMs,
-          ...(peaks ? { peaks: peaks.peaks } : {}),
-        });
       }
+      // #6 — Send the peaks we computed during recording (durationMs is
+      // already known; the recorder reports it). This runs for dev uploads too
+      // so the server event has metadata after the optimistic row is replaced.
+      const peaks = await peaksPromise;
+      await api.mediaComplete(mediaId, {
+        duration_ms: peaks?.duration_ms || durationMs,
+        ...(peaks ? { peaks: peaks.peaks } : {}),
+      });
       const real = await api.sendEvent(roomId, {
         type: "m.voice",
         content: {
           media_id: mediaId,
-          mime: blob.type || "audio/webm",
-          duration_ms: durationMs,
+          mime,
+          duration_ms: peaks?.duration_ms || durationMs,
         },
       });
       onAck(clientId, real);
+      URL.revokeObjectURL(localUrl);
       track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
       onFail(clientId, e);

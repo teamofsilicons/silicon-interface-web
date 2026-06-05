@@ -685,11 +685,20 @@ function Body({ event }: { event: Event }) {
       ) : (
         <span className="text-xs text-muted-foreground">{String(c.caption ?? "attachment")}</span>
       );
-    case "m.voice":
+    case "m.voice": {
+      const localPeaks = Array.isArray(c.peaks)
+        ? c.peaks.filter((v): v is number => typeof v === "number")
+        : null;
       return (
         <div className="space-y-1">
-          {c.media_id ? (
-            <MediaAttachment mediaId={String(c.media_id)} mime="audio/mpeg" />
+          {c.media_id || c.local_url ? (
+            <MediaAttachment
+              mediaId={c.media_id ? String(c.media_id) : ""}
+              mime={c.mime ? String(c.mime) : "audio/webm"}
+              localUrl={c.local_url ? String(c.local_url) : null}
+              localDurationMs={typeof c.duration_ms === "number" ? c.duration_ms : null}
+              localPeaks={localPeaks}
+            />
           ) : (
             <div className="flex items-center gap-2 text-xs">
               <MusicNote className="h-4 w-4" /> voice note
@@ -698,6 +707,7 @@ function Body({ event }: { event: Event }) {
           {c.transcript ? <VoiceTranscript text={String(c.transcript)} /> : null}
         </div>
       );
+    }
     case "m.tts":
       return (
         <div className="space-y-1">
@@ -708,7 +718,7 @@ function Body({ event }: { event: Event }) {
               <Sparkle className="h-4 w-4" /> tts
             </div>
           )}
-          {c.text ? <div className="text-xs italic">“{String(c.text)}”</div> : null}
+          {c.text ? <VoiceTranscript text={String(c.text)} /> : null}
         </div>
       );
     case "m.remote_browser":

@@ -27,6 +27,9 @@ export function MediaAttachment({
   mime,
   caption,
   showCaption = true,
+  localUrl,
+  localDurationMs,
+  localPeaks,
 }: {
   mediaId: string;
   mime?: string;
@@ -34,14 +37,63 @@ export function MediaAttachment({
   /** When false, the caption isn't rendered here — the bubble shows it as a
    *  normal message line instead (so image+text reads like a message). */
   showCaption?: boolean;
+  /** Local blob URL for optimistic voice/file renders before the server ack. */
+  localUrl?: string | null;
+  localDurationMs?: number | null;
+  localPeaks?: number[] | null;
 }) {
-  const [url, setUrl] = React.useState<string | null>(null);
-  const [media, setMedia] = React.useState<MediaObject | null>(null);
+  const [url, setUrl] = React.useState<string | null>(localUrl ?? null);
+  const [media, setMedia] = React.useState<MediaObject | null>(
+    localUrl
+      ? ({
+          media_id: mediaId || "local",
+          uploader_kind: "carbon",
+          uploader_id: 0,
+          mime: mime || "audio/webm",
+          size: 0,
+          sha256: "",
+          status: "ready",
+          kind: (mime || "").startsWith("audio/") ? "voice" : "file",
+          transcript: "",
+          duration_ms: localDurationMs ?? null,
+          peaks: localPeaks ?? null,
+          width: null,
+          height: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        } as MediaObject)
+      : null,
+  );
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
 
   const retriedRef = React.useRef(false);
   React.useEffect(() => {
+    if (localUrl) {
+      setFailed(false);
+      setUrl(localUrl);
+      setMedia(
+        {
+          media_id: mediaId || "local",
+          uploader_kind: "carbon",
+          uploader_id: 0,
+          mime: mime || "audio/webm",
+          size: 0,
+          sha256: "",
+          status: "ready",
+          kind: (mime || "").startsWith("audio/") ? "voice" : "file",
+          transcript: "",
+          duration_ms: localDurationMs ?? null,
+          peaks: localPeaks ?? null,
+          width: null,
+          height: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        } as MediaObject,
+      );
+      return;
+    }
+    if (!mediaId) return;
     let alive = true;
     retriedRef.current = false;
     (async () => {
@@ -57,18 +109,19 @@ export function MediaAttachment({
     return () => {
       alive = false;
     };
-  }, [mediaId]);
+  }, [mediaId, localUrl, localDurationMs, localPeaks, mime]);
 
   // Self-heal a stale/expired presigned URL: re-fetch a fresh one once if the
   // asset fails to load (S3 "Request has expired" after a very long session).
   const refreshUrl = React.useCallback(() => {
+    if (localUrl || !mediaId) return;
     if (retriedRef.current) return;
     retriedRef.current = true;
     api
       .mediaDetail(mediaId)
       .then((r) => setUrl(r.download_url))
       .catch(() => undefined);
-  }, [mediaId]);
+  }, [mediaId, localUrl]);
 
   const m = (mime || media?.mime || "").toLowerCase();
   const isImage = m.startsWith("image/") || media?.kind === "image";

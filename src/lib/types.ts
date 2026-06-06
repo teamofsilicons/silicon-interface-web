@@ -270,6 +270,11 @@ export interface BillingData {
   plan: { monthly_cost_cents: number; currency: string };
   addons: BillingAddon[];
   cycles: BillingCycle[];
+  pending?: {
+    amount_cents: number;
+    currency: string;
+    cycle_ids: number[];
+  };
   payment: PaymentStatus;
 }
 

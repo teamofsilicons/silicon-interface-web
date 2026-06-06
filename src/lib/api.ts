@@ -245,11 +245,18 @@ export const api = {
     call<BillingAddon>("POST", `/api/v1/teams/${slug}/billing/addons`, data),
   rollTeamCycle: (slug: string) =>
     call<BillingCycle>("POST", `/api/v1/teams/${slug}/billing/roll`, {}),
-  teamCheckout: (slug: string, opts: { return_url?: string; cycle_id?: number } = {}) =>
-    call<{ checkout_url: string; payment_id: string; dev_mode?: boolean; error?: string }>(
+  teamCheckout: (slug: string, opts: { return_url?: string; cycle_id?: number; cycle_ids?: number[] } = {}) =>
+    call<{
+      checkout_url: string;
+      payment_id: string;
+      dev_mode?: boolean;
+      error?: string;
+      amount_cents?: number;
+      cycle_ids?: number[];
+    }>(
       "POST",
       `/api/v1/teams/${slug}/billing/checkout`,
-      { return_url: opts.return_url ?? "", cycle_id: opts.cycle_id },
+      { return_url: opts.return_url ?? "", cycle_id: opts.cycle_id, cycle_ids: opts.cycle_ids },
     ),
 
   // -------- chat --------

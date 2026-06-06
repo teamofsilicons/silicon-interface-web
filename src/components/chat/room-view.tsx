@@ -56,6 +56,7 @@ interface ProgressEntry {
   state: ProgressState;
   note: string;
   updatedAt: number;
+  source: "local" | "server";
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
@@ -333,6 +334,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             state,
             note: String(incoming.content.note || ""),
             updatedAt: Date.now(),
+            source: "server",
           });
         }
         return;
@@ -425,6 +427,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             state: f.state as ProgressState,
             note: f.note || "",
             updatedAt: Date.now(),
+            source: "server",
           });
         }
       }
@@ -679,6 +682,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           state: "thinking",
           note: "",
           updatedAt: Date.now(),
+          source: "local",
         });
       }
       // Audible "sent" tone — small ascending chirp. Respects reduced-motion
@@ -1060,14 +1064,16 @@ function ProgressLine({
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
   const fullText = formatProgressLine(entry, tick);
+  const serverText = formatProgressLine(entry, 0);
 
   React.useEffect(() => {
     setTick(0);
     setTyped("");
     setPhase("typing");
-  }, [entry.groupId, entry.state, entry.note]);
+  }, [entry.groupId, entry.state, entry.note, entry.source]);
 
   React.useEffect(() => {
+    if (entry.source === "server") return;
     let timeoutId: number | null = null;
     if (phase === "typing") {
       if (typed.length < fullText.length) {
@@ -1090,7 +1096,7 @@ function ProgressLine({
     return () => {
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [phase, typed, fullText]);
+  }, [phase, typed, fullText, entry.source]);
 
   return (
     <div className="my-2 flex w-full items-center justify-start gap-2">
@@ -1100,7 +1106,9 @@ function ProgressLine({
       <div className="max-w-[70%]">
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
           <span className="inline-flex min-w-0 items-center gap-3 truncate">
-            <span className="silicon-activity-copy truncate">{typed || "\u00a0"}</span>
+            <span className="silicon-activity-copy truncate">
+              {entry.source === "server" ? serverText : typed || "\u00a0"}
+            </span>
             <span className="silicon-activity-core" aria-hidden="true">
               {Array.from({ length: 16 }, (_, i) => (
                 <span key={i} />
@@ -1116,8 +1124,27 @@ function ProgressLine({
 function formatProgressLine(entry: ProgressEntry, tick = 0): string {
   const note = meaningfulProgressNote(entry.note, entry.state);
   if (note) return sentenceCase(note);
+  if (entry.source === "server") return progressStateLabel(entry.state);
   const lines = PROGRESS_STATE_COPY[entry.state] ?? SILICON_PROGRESS_COPY;
   return lines[tick % lines.length];
+}
+
+function progressStateLabel(state: ProgressState): string {
+  switch (state) {
+    case "reading_file":
+      return "Reading file";
+    case "writing_file":
+      return "Writing file";
+    case "executing":
+      return "Running command";
+    case "searching_web":
+      return "Searching web";
+    case "done":
+      return "Wrapping up";
+    case "thinking":
+    default:
+      return "Working";
+  }
 }
 
 function meaningfulProgressNote(note: string, state: ProgressState): string {

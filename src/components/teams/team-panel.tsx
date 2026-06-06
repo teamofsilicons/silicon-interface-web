@@ -375,17 +375,12 @@ function monthLabel(iso: string): string {
 
 function BillingSection({ slug }: { slug: string }) {
   const [data, setData] = React.useState<BillingData | null>(null);
-  const [planUsd, setPlanUsd] = React.useState("");
-  const [addonLabel, setAddonLabel] = React.useState("");
-  const [addonUsd, setAddonUsd] = React.useState("");
-  const [addonRecurring, setAddonRecurring] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
       const d = await api.teamBilling(slug);
       setData(d);
-      setPlanUsd((d.plan.monthly_cost_cents / 100).toString());
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     }
@@ -406,36 +401,13 @@ function BillingSection({ slug }: { slug: string }) {
     }
   };
 
-  const savePlan = run(async () => {
-    await api.setTeamPlan(slug, Math.round((Number(planUsd) || 0) * 100));
-    await load();
-    toast.success("plan updated · applies to future cycles");
-  });
-
-  const addAddon = run(async () => {
-    if (!addonLabel.trim() || !(Number(addonUsd) > 0)) {
-      toast.error("Enter a label and amount.");
-      return;
-    }
-    await api.addTeamAddon(slug, {
-      label: addonLabel.trim(),
-      amount_cents: Math.round(Number(addonUsd) * 100),
-      recurring: addonRecurring,
-    });
-    setAddonLabel("");
-    setAddonUsd("");
-    await load();
-  });
-
-  const rollNow = run(async () => {
-    await api.rollTeamCycle(slug);
-    await load();
-    toast.success("cycle rolled");
-  });
-
-  const payCycle = (cycleId: number) =>
+  const payOutstanding = (cycleIds: number[]) =>
     run(async () => {
-      const r = await api.teamCheckout(slug, { cycle_id: cycleId, return_url: window.location.href });
+      if (cycleIds.length === 0) {
+        toast.info("No pending balance.");
+        return;
+      }
+      const r = await api.teamCheckout(slug, { cycle_ids: cycleIds, return_url: window.location.href });
       if (r.checkout_url) window.location.href = r.checkout_url;
       else toast.error(r.error || "Checkout unavailable.");
     })();
@@ -450,98 +422,100 @@ function BillingSection({ slug }: { slug: string }) {
     );
   }
 
+  const unpaidCycles = data.cycles.filter((cycle) => cycle.status !== "paid");
+  const pendingAmount =
+    data.pending?.amount_cents ?? unpaidCycles.reduce((sum, cycle) => sum + cycle.total_cents, 0);
+  const pendingCurrency = data.pending?.currency ?? data.plan.currency;
+  const pendingCycleIds = data.pending?.cycle_ids ?? unpaidCycles.map((cycle) => cycle.id);
+  const statusCopy = billingStatusCopy(data);
+
   return (
-    <Section title="billing (heads only)">
-      <div className="space-y-4">
-        {/* plan */}
-        <div className="flex items-end gap-2">
-          <div className="space-y-1">
-            <Label htmlFor="plan">monthly plan (USD)</Label>
-            <Input
-              id="plan"
-              type="number"
-              min={0}
-              step="0.01"
-              value={planUsd}
-              onChange={(e) => setPlanUsd(e.target.value)}
-              className="w-32"
-            />
+    <Section title="billing">
+      <div className="space-y-6">
+        <div className="grid gap-4 border bg-card p-5 md:grid-cols-[1fr_auto] md:items-end">
+          <div className="space-y-3">
+            <div className="label-mono">pending balance</div>
+            <div className="font-mono text-5xl font-semibold leading-none tabular-nums">
+              {fmtCents(pendingAmount, pendingCurrency)}
+            </div>
+            <p className="max-w-2xl text-sm text-muted-foreground">{statusCopy}</p>
           </div>
-          <Button onClick={savePlan} disabled={busy}>
-            save
+          <Button
+            className="h-12 min-w-40"
+            disabled={busy || pendingAmount <= 0}
+            onClick={() => payOutstanding(pendingCycleIds)}
+          >
+            {pendingAmount > 0 ? `Pay ${fmtCents(pendingAmount, pendingCurrency)}` : "Paid up"}
           </Button>
-          <span className="ml-auto flex gap-2">
-            <Button variant="outline" onClick={rollNow} disabled={busy}>
-              roll cycle
-            </Button>
-          </span>
         </div>
 
-        {/* add-ons */}
-        <div className="space-y-2">
-          <Label>add-ons</Label>
-          {data.addons.length > 0 && (
-            <ul className="divide-y border text-sm">
-              {data.addons.map((a) => (
-                <li key={a.id} className="flex items-center justify-between px-3 py-1.5">
-                  <span>
-                    {a.label}{" "}
-                    <span className="text-muted-foreground">
-                      · {a.recurring ? "recurring" : "one-time"}
-                    </span>
-                  </span>
-                  <span className="tabular-nums">{fmtCents(a.amount_cents, a.currency)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="flex items-end gap-2">
-            <Input
-              placeholder="label"
-              value={addonLabel}
-              onChange={(e) => setAddonLabel(e.target.value)}
-              className="flex-1"
-            />
-            <Input
-              type="number"
-              min={0}
-              step="0.01"
-              placeholder="USD"
-              value={addonUsd}
-              onChange={(e) => setAddonUsd(e.target.value)}
-              className="w-24"
-            />
-            <label className="flex items-center gap-1 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={addonRecurring}
-                onChange={(e) => setAddonRecurring(e.target.checked)}
-              />
-              recurring
-            </label>
-            <Button variant="outline" onClick={addAddon} disabled={busy}>
-              add
-            </Button>
+        <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+          <div className="space-y-4">
+            <div className="border bg-background p-4">
+              <Label>current plan</Label>
+              <div className="mt-3 flex items-baseline justify-between gap-3">
+                <span className="text-sm text-muted-foreground">Monthly base</span>
+                <span className="font-mono text-lg font-semibold tabular-nums">
+                  {fmtCents(data.plan.monthly_cost_cents, data.plan.currency)}
+                </span>
+              </div>
+            </div>
+            <div className="border bg-background p-4">
+              <Label>active add-ons</Label>
+              {data.addons.length === 0 ? (
+                <p className="mt-3 text-sm text-muted-foreground">No active add-ons.</p>
+              ) : (
+                <ul className="mt-3 divide-y text-sm">
+                  {data.addons.map((a) => (
+                    <li key={a.id} className="flex items-start justify-between gap-3 py-2">
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{a.label}</span>
+                        <span className="label-mono">{a.recurring ? "recurring" : "one-time"}</span>
+                      </span>
+                      <span className="shrink-0 font-mono tabular-nums">
+                        {fmtCents(a.amount_cents, a.currency)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* ledger */}
-        <div className="space-y-2">
-          <Label>ledger</Label>
-          {data.cycles.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No billing cycles yet.</p>
-          ) : (
-            data.cycles.map((c) => (
-              <CycleCard key={c.id} cycle={c} busy={busy} onPay={() => payCycle(c.id)} />
-            ))
-          )}
+          <div className="space-y-2">
+            <Label>ledger</Label>
+            {data.cycles.length === 0 ? (
+              <p className="border bg-muted/40 p-4 text-sm text-muted-foreground">
+                No billing cycles yet.
+              </p>
+            ) : (
+              data.cycles.map((c) => <CycleCard key={c.id} cycle={c} />)
+            )}
+          </div>
         </div>
       </div>
     </Section>
   );
 }
 
-function CycleCard({ cycle, busy, onPay }: { cycle: BillingCycle; busy: boolean; onPay: () => void }) {
+function billingStatusCopy(data: BillingData): string {
+  const payment = data.payment;
+  if (payment.state === "paused") {
+    return "Payment is overdue. Services are paused until the pending balance is cleared.";
+  }
+  if (payment.state === "grace") {
+    return `Payment is due now. Services pause on ${payment.pause_date}.`;
+  }
+  if (payment.state === "warning") {
+    return `Payment is due on ${payment.due_date}; ${payment.days_left} day${payment.days_left === 1 ? "" : "s"} left.`;
+  }
+  if ((data.pending?.amount_cents ?? 0) > 0) {
+    return "A balance is open, but the deadline has not entered the warning window yet.";
+  }
+  return "No pending balance. The ledger below is kept for audit.";
+}
+
+function CycleCard({ cycle }: { cycle: BillingCycle }) {
   const variant =
     cycle.status === "paid" ? "success" : cycle.status === "failed" ? "destructive" : "secondary";
   const payable = cycle.status !== "paid";
@@ -573,14 +547,10 @@ function CycleCard({ cycle, busy, onPay }: { cycle: BillingCycle; busy: boolean;
             </span>
           </li>
         ))}
+        {cycle.records.length === 0 && (
+          <li className="px-3 py-2 text-sm text-muted-foreground">No ledger lines.</li>
+        )}
       </ul>
-      {payable && (
-        <div className="border-t px-3 py-2">
-          <Button className="w-full" onClick={onPay} disabled={busy}>
-            Pay {fmtCents(cycle.total_cents, cycle.currency)} now
-          </Button>
-        </div>
-      )}
     </div>
   );
 }

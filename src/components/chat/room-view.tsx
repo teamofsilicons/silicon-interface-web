@@ -1095,41 +1095,53 @@ function ProgressLine({
   const typedRef = React.useRef("");
   const pendingTargetRef = React.useRef<string | null>(null);
   const [target, setTarget] = React.useState(() => formatProgressLine(entry, 0));
+  const targetRef = React.useRef(target);
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
-  const targetSinceRef = React.useRef(Date.now());
+  const typedDoneAtRef = React.useRef(0);
 
   React.useEffect(() => {
     typedRef.current = typed;
   }, [typed]);
 
   React.useEffect(() => {
+    targetRef.current = target;
+  }, [target]);
+
+  React.useEffect(() => {
     const next = formatProgressLine(entry, 0);
-    const apply = () => {
-      setTick(0);
-      if (typedRef.current === next) {
-        pendingTargetRef.current = null;
-        targetSinceRef.current = Date.now();
-        setTarget(next);
-        return;
-      }
-      if (typedRef.current && typedRef.current !== next) {
-        pendingTargetRef.current = next;
-        setPhase("erasing");
-        return;
-      }
+    const currentTyped = typedRef.current;
+    const currentTarget = targetRef.current;
+    const currentComplete = currentTyped === currentTarget && currentTarget.length > 0;
+    setTick(0);
+
+    if (currentTyped === next) {
       pendingTargetRef.current = null;
-      targetSinceRef.current = Date.now();
-      setTarget(next);
-      setTyped("");
-      setPhase("typing");
-    };
-    const remainingHold = MIN_PROGRESS_STATUS_MS - (Date.now() - targetSinceRef.current);
-    if (typedRef.current && typedRef.current !== next && remainingHold > 0) {
-      const timeoutId = window.setTimeout(apply, remainingHold);
-      return () => window.clearTimeout(timeoutId);
+      return;
     }
-    apply();
+
+    if (currentTyped) {
+      pendingTargetRef.current = next;
+      if (!currentComplete) return;
+
+      const typedDoneAt = typedDoneAtRef.current || Date.now();
+      const remainingHold = MIN_PROGRESS_STATUS_MS - (Date.now() - typedDoneAt);
+      if (remainingHold > 0) {
+        holdMsRef.current = remainingHold;
+        setPhase("holding");
+      } else {
+        setPhase("erasing");
+      }
+      return;
+    }
+
+    pendingTargetRef.current = null;
+    typedDoneAtRef.current = 0;
+    if (currentTarget !== next) {
+      setTarget(next);
+    }
+    setTyped("");
+    setPhase("typing");
   }, [entry.groupId, entry.state, entry.note, entry.source]);
 
   React.useEffect(() => {
@@ -1142,6 +1154,17 @@ function ProgressLine({
             Math.floor(Math.random() * (PROGRESS_TYPE_MS.max - PROGRESS_TYPE_MS.min + 1)),
         );
       } else {
+        if (!typedDoneAtRef.current) typedDoneAtRef.current = Date.now();
+        if (pendingTargetRef.current) {
+          const remainingHold = MIN_PROGRESS_STATUS_MS - (Date.now() - typedDoneAtRef.current);
+          if (remainingHold > 0) {
+            holdMsRef.current = remainingHold;
+            setPhase("holding");
+          } else {
+            setPhase("erasing");
+          }
+          return;
+        }
         if (entry.source === "server") return;
         holdMsRef.current = 5000 + Math.floor(Math.random() * 5001);
         setPhase("holding");
@@ -1152,7 +1175,7 @@ function ProgressLine({
       timeoutId = window.setTimeout(() => setTyped((text) => text.slice(0, -1)), PROGRESS_TYPE_MS.erase);
     } else {
       if (pendingTargetRef.current) {
-        targetSinceRef.current = Date.now();
+        typedDoneAtRef.current = 0;
         setTarget(pendingTargetRef.current);
         pendingTargetRef.current = null;
         setPhase("typing");
@@ -1160,7 +1183,7 @@ function ProgressLine({
       }
       const nextTick = tick + 1;
       setTick(nextTick);
-      targetSinceRef.current = Date.now();
+      typedDoneAtRef.current = 0;
       setTarget(formatProgressLine(entry, nextTick));
       setPhase("typing");
     }
@@ -1207,7 +1230,7 @@ function progressStateLabel(state: ProgressState): string {
     case "writing_file":
       return "Writing file";
     case "executing":
-      return "Running command";
+      return "Executing command";
     case "searching_web":
       return "Searching web";
     case "done":
@@ -1224,6 +1247,22 @@ function meaningfulProgressNote(note: string, state: ProgressState): string {
   const normalized = text.toLowerCase().replace(/[.…]+$/g, "").trim();
   if (state === "thinking" && (normalized === "thinking" || normalized.startsWith("thought for "))) {
     return "";
+  }
+  if (
+    state === "executing" &&
+    (normalized.startsWith("executing command failed") ||
+      normalized.startsWith("message failed:"))
+  ) {
+    return sentenceCase(text);
+  }
+  if (
+    state === "executing" &&
+    (normalized.startsWith("executing:") ||
+      normalized === "executing command" ||
+      normalized.startsWith("executing output:") ||
+      normalized.startsWith("executing done:"))
+  ) {
+    return "Executing command";
   }
   return text;
 }

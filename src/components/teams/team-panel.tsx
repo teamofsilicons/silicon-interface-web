@@ -1,7 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { CircleNotch, Copy, Envelope, LinkSimple, X } from "@phosphor-icons/react/dist/ssr";
+import {
+  CircleNotch,
+  Copy,
+  Envelope,
+  ImageSquare,
+  LinkSimple,
+  UploadSimple,
+  X,
+} from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -401,16 +409,25 @@ function BillingSection({ slug }: { slug: string }) {
     }
   };
 
-  const payOutstanding = (cycleIds: number[]) =>
-    run(async () => {
+  const payOutstanding = (cycleIds: number[]) => {
+    const checkoutTab = window.open("about:blank", "_blank");
+    if (checkoutTab) checkoutTab.opener = null;
+    return run(async () => {
       if (cycleIds.length === 0) {
+        checkoutTab?.close();
         toast.info("No pending balance.");
         return;
       }
       const r = await api.teamCheckout(slug, { cycle_ids: cycleIds, return_url: window.location.href });
-      if (r.checkout_url) window.location.href = r.checkout_url;
-      else toast.error(r.error || "Checkout unavailable.");
+      if (r.checkout_url) {
+        if (checkoutTab) checkoutTab.location.href = r.checkout_url;
+        else window.open(r.checkout_url, "_blank", "noopener,noreferrer");
+      } else {
+        checkoutTab?.close();
+        toast.error(r.error || "Checkout unavailable.");
+      }
     })();
+  };
 
   if (!data) {
     return (
@@ -449,39 +466,7 @@ function BillingSection({ slug }: { slug: string }) {
           </Button>
         </div>
 
-        <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
-          <div className="space-y-4">
-            <div className="border bg-background p-4">
-              <Label>current plan</Label>
-              <div className="mt-3 flex items-baseline justify-between gap-3">
-                <span className="text-sm text-muted-foreground">Monthly base</span>
-                <span className="font-mono text-lg font-semibold tabular-nums">
-                  {fmtCents(data.plan.monthly_cost_cents, data.plan.currency)}
-                </span>
-              </div>
-            </div>
-            <div className="border bg-background p-4">
-              <Label>active add-ons</Label>
-              {data.addons.length === 0 ? (
-                <p className="mt-3 text-sm text-muted-foreground">No active add-ons.</p>
-              ) : (
-                <ul className="mt-3 divide-y text-sm">
-                  {data.addons.map((a) => (
-                    <li key={a.id} className="flex items-start justify-between gap-3 py-2">
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">{a.label}</span>
-                        <span className="label-mono">{a.recurring ? "recurring" : "one-time"}</span>
-                      </span>
-                      <span className="shrink-0 font-mono tabular-nums">
-                        {fmtCents(a.amount_cents, a.currency)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-
+        <div className="space-y-4">
           <div className="space-y-2">
             <Label>ledger</Label>
             {data.cycles.length === 0 ? (
@@ -490,6 +475,27 @@ function BillingSection({ slug }: { slug: string }) {
               </p>
             ) : (
               data.cycles.map((c) => <CycleCard key={c.id} cycle={c} />)
+            )}
+          </div>
+
+          <div className="border bg-background p-4">
+            <Label>active add-ons</Label>
+            {data.addons.length === 0 ? (
+              <p className="mt-3 text-sm text-muted-foreground">No active add-ons.</p>
+            ) : (
+              <ul className="mt-3 divide-y text-sm">
+                {data.addons.map((a) => (
+                  <li key={a.id} className="flex items-start justify-between gap-3 py-2">
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium">{a.label}</span>
+                      <span className="label-mono">{a.recurring ? "recurring" : "one-time"}</span>
+                    </span>
+                    <span className="shrink-0 font-mono tabular-nums">
+                      {fmtCents(a.amount_cents, a.currency)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         </div>
@@ -507,12 +513,22 @@ function billingStatusCopy(data: BillingData): string {
     return `Payment is due now. Services pause on ${payment.pause_date}.`;
   }
   if (payment.state === "warning") {
-    return `Payment is due on ${payment.due_date}; ${payment.days_left} day${payment.days_left === 1 ? "" : "s"} left.`;
+    return `Due ${longDueDate(payment.due_date)}; ${payment.days_left} day${payment.days_left === 1 ? "" : "s"} left.`;
   }
   if ((data.pending?.amount_cents ?? 0) > 0) {
-    return "A balance is open, but the deadline has not entered the warning window yet.";
+    return payment.due_date ? `Due ${longDueDate(payment.due_date)}.` : "A balance is open.";
   }
   return "No pending balance. The ledger below is kept for audit.";
+}
+
+function longDueDate(iso: string | null): string {
+  if (!iso) return "";
+  const date = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return iso;
+  const day = date.getDate();
+  const month = date.toLocaleDateString(undefined, { month: "long" });
+  const year = date.getFullYear();
+  return `${day} ${month}, ${year}`;
 }
 
 function CycleCard({ cycle }: { cycle: BillingCycle }) {
@@ -759,16 +775,80 @@ function InviteSection({ slug }: { slug: string }) {
   );
 }
 
+type TeamSettingsDraft = {
+  name: string;
+  letInvite: boolean;
+  verify: boolean;
+  domains: string;
+  emails: string;
+};
+
+function settingsDraftKey(slug: string): string {
+  return `silicon-interface:team-settings:${slug}`;
+}
+
+function draftFromTeam(team: Team): TeamSettingsDraft {
+  return {
+    name: team.name,
+    letInvite: team.settings.let_employees_invite,
+    verify: team.settings.verify_carbons,
+    domains: (team.email_whitelist.domains || []).join(", "),
+    emails: (team.email_whitelist.emails || []).join(", "),
+  };
+}
+
+function readSettingsDraft(team: Team): TeamSettingsDraft {
+  const fallback = draftFromTeam(team);
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(settingsDraftKey(team.slug));
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<TeamSettingsDraft>;
+    return {
+      name: typeof parsed.name === "string" ? parsed.name : fallback.name,
+      letInvite: typeof parsed.letInvite === "boolean" ? parsed.letInvite : fallback.letInvite,
+      verify: typeof parsed.verify === "boolean" ? parsed.verify : fallback.verify,
+      domains: typeof parsed.domains === "string" ? parsed.domains : fallback.domains,
+      emails: typeof parsed.emails === "string" ? parsed.emails : fallback.emails,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function sameSettingsDraft(a: TeamSettingsDraft, b: TeamSettingsDraft): boolean {
+  return (
+    a.name === b.name &&
+    a.letInvite === b.letInvite &&
+    a.verify === b.verify &&
+    a.domains === b.domains &&
+    a.emails === b.emails
+  );
+}
+
 function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => void }) {
-  const [name, setName] = React.useState(team.name);
-  const [letInvite, setLetInvite] = React.useState(team.settings.let_employees_invite);
-  const [verify, setVerify] = React.useState(team.settings.verify_carbons);
-  const [domains, setDomains] = React.useState((team.email_whitelist.domains || []).join(", "));
-  const [emails, setEmails] = React.useState((team.email_whitelist.emails || []).join(", "));
+  const savedDraft = React.useMemo(() => draftFromTeam(team), [team]);
+  const [draft, setDraft] = React.useState<TeamSettingsDraft>(() => readSettingsDraft(team));
   const [busy, setBusy] = React.useState(false);
   const [logoBusy, setLogoBusy] = React.useState(false);
+  const dirty = !sameSettingsDraft(draft, savedDraft);
 
   const split = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+  React.useEffect(() => {
+    setDraft(readSettingsDraft(team));
+  }, [team.slug]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const key = settingsDraftKey(team.slug);
+      if (dirty) window.localStorage.setItem(key, JSON.stringify(draft));
+      else window.localStorage.removeItem(key);
+    } catch {
+      /* localStorage may be unavailable; the visible dirty marker still works */
+    }
+  }, [dirty, draft, team.slug]);
 
   const uploadLogo = async (file: File | null | undefined) => {
     if (!file) return;
@@ -788,10 +868,16 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
     setBusy(true);
     try {
       const updated = await api.patchTeam(team.slug, {
-        name,
-        settings: { ...team.settings, let_employees_invite: letInvite, verify_carbons: verify },
-        email_whitelist: { domains: split(domains), emails: split(emails) },
+        name: draft.name,
+        settings: {
+          ...team.settings,
+          let_employees_invite: draft.letInvite,
+          verify_carbons: draft.verify,
+        },
+        email_whitelist: { domains: split(draft.domains), emails: split(draft.emails) },
       });
+      window.localStorage.removeItem(settingsDraftKey(team.slug));
+      setDraft(draftFromTeam(updated));
       onSaved(updated);
       toast.success("settings saved");
     } catch (e) {
@@ -804,52 +890,91 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
   return (
     <Section title="settings (heads only)">
       <div className="space-y-4">
-        <div className="flex items-center gap-4 border p-3">
-          <IdAvatar seed={`team:${team.slug}`} src={team.logo_url} size={64} />
-          <div className="min-w-0 flex-1 space-y-1">
-            <Label htmlFor="team-logo">team logo</Label>
+        <div className="grid gap-4 border bg-card p-4 sm:grid-cols-[88px_1fr] sm:items-center">
+          <div className="relative size-20 overflow-hidden border bg-background">
+            <IdAvatar
+              seed={`team:${team.slug}`}
+              src={team.logo_url}
+              size={80}
+              className="border-0"
+            />
+            {logoBusy ? (
+              <div className="absolute inset-0 grid place-items-center bg-background/75">
+                <CircleNotch className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : null}
+          </div>
+          <div className="min-w-0 space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <ImageSquare className="h-4 w-4" />
+                <Label htmlFor="team-logo">team logo</Label>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Upload a square mark for the team tab, sidebar, and Glass workspace.
+              </p>
+            </div>
             <Input
               id="team-logo"
               type="file"
               accept="image/*"
+              className="sr-only"
               disabled={logoBusy}
               onChange={(e) => {
-                void uploadLogo(e.target.files?.[0]);
+                const file = e.currentTarget.files?.[0];
                 e.currentTarget.value = "";
+                void uploadLogo(file);
               }}
             />
+            <label
+              htmlFor="team-logo"
+              className={cn(
+                "inline-flex h-10 cursor-pointer items-center gap-2 border bg-background px-4 text-sm font-medium transition-colors hover:bg-accent",
+                logoBusy && "pointer-events-none opacity-60",
+              )}
+            >
+              {logoBusy ? (
+                <CircleNotch className="h-4 w-4 animate-spin" />
+              ) : (
+                <UploadSimple className="h-4 w-4" />
+              )}
+              change logo
+            </label>
           </div>
-          {logoBusy ? <CircleNotch className="h-5 w-5 animate-spin text-muted-foreground" /> : null}
         </div>
 
         <div className="space-y-1">
           <Label htmlFor="teamname">team name</Label>
-          <Input id="teamname" value={name} onChange={(e) => setName(e.target.value)} />
+          <Input
+            id="teamname"
+            value={draft.name}
+            onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
+          />
         </div>
 
         <Toggle
           label="Let employees invite"
           hint="Members can create invites to specific Silicons."
-          on={letInvite}
-          onToggle={() => setLetInvite((v) => !v)}
+          on={draft.letInvite}
+          onToggle={() => setDraft((prev) => ({ ...prev, letInvite: !prev.letInvite }))}
         />
 
         <Toggle
           label="Verify carbons before joining"
           hint="Require a whitelisted, verified email to join."
-          on={verify}
-          onToggle={() => setVerify((v) => !v)}
+          on={draft.verify}
+          onToggle={() => setDraft((prev) => ({ ...prev, verify: !prev.verify }))}
         />
 
-        <div className={verify ? "space-y-2" : "pointer-events-none space-y-2 opacity-50"}>
+        <div className={draft.verify ? "space-y-2" : "pointer-events-none space-y-2 opacity-50"}>
           <div className="space-y-1">
             <Label htmlFor="wldomains">allowed domains</Label>
             <Input
               id="wldomains"
               placeholder="acme.com, acme.io"
-              value={domains}
-              onChange={(e) => setDomains(e.target.value)}
-              disabled={!verify}
+              value={draft.domains}
+              onChange={(e) => setDraft((prev) => ({ ...prev, domains: e.target.value }))}
+              disabled={!draft.verify}
             />
           </div>
           <div className="space-y-1">
@@ -857,12 +982,12 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
             <Input
               id="wlemails"
               placeholder="ceo@acme.com"
-              value={emails}
-              onChange={(e) => setEmails(e.target.value)}
-              disabled={!verify}
+              value={draft.emails}
+              onChange={(e) => setDraft((prev) => ({ ...prev, emails: e.target.value }))}
+              disabled={!draft.verify}
             />
           </div>
-          {!verify && (
+          {!draft.verify && (
             <p className="text-xs text-muted-foreground">
               Enable “Verify carbons before joining” to use the whitelist.
             </p>
@@ -872,6 +997,11 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
         <Button onClick={save} disabled={busy} className="w-full">
           {busy && <CircleNotch className="animate-spin" />} save settings
         </Button>
+        {dirty ? (
+          <p className="label-mono text-center text-[11px] text-muted-foreground">
+            unsaved settings
+          </p>
+        ) : null}
       </div>
     </Section>
   );

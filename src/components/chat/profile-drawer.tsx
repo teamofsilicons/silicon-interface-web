@@ -147,6 +147,8 @@ export function ProfileDrawer({
   const photoUrl = contact?.photo_url ?? profile?.profile_photo_url ?? null;
   const bio = profile?.tagline ?? "";
   const username = profile && "username" in profile ? profile.username : "";
+  const identityLabel = counterpart?.kind === "silicon" ? "silicon id" : "carbon id";
+  const identityCopyLabel = counterpart?.kind === "silicon" ? "Silicon ID" : "Carbon ID";
 
   const copy = (label: string, value: string) => {
     navigator.clipboard.writeText(value);
@@ -184,9 +186,9 @@ export function ProfileDrawer({
         <div className="mt-3 space-y-1.5">
           {handle && (
             <CopyChip
-              label="carbon id"
+              label={identityLabel}
               value={handle}
-              onCopy={() => copy("Carbon ID", handle)}
+              onCopy={() => copy(identityCopyLabel, handle)}
             />
           )}
           {username && username !== handle && (

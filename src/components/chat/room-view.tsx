@@ -104,6 +104,7 @@ const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
   ],
   thinking: SILICON_PROGRESS_COPY,
 };
+const PROGRESS_TYPE_MS = { min: 14, max: 26, erase: 8 };
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
@@ -269,12 +270,19 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // re-render tick for `relativeTime`, not a network fetch.
   React.useEffect(() => {
     let mounted = true;
+    const roomId = room.room_id;
     setLoading(true);
+    setEvents([]);
+    setActiveProgress(null);
+    setActivities({});
+    setReplyTo(null);
+    setFocusSender(null);
+    setProfileOpen(false);
     api
-      .events(room.room_id, undefined, 100)
+      .events(roomId, undefined, 100)
       .then((evs) => {
         if (!mounted) return;
-        setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
+        setEvents(mergeServerEvents([], evs, myUsername));
         setLoading(false);
       })
       .catch((e) => {
@@ -1064,7 +1072,6 @@ function ProgressLine({
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
   const fullText = formatProgressLine(entry, tick);
-  const serverText = formatProgressLine(entry, 0);
 
   React.useEffect(() => {
     setTick(0);
@@ -1073,22 +1080,22 @@ function ProgressLine({
   }, [entry.groupId, entry.state, entry.note, entry.source]);
 
   React.useEffect(() => {
-    if (entry.source === "server") return;
     let timeoutId: number | null = null;
     if (phase === "typing") {
       if (typed.length < fullText.length) {
         timeoutId = window.setTimeout(
           () => setTyped(fullText.slice(0, typed.length + 1)),
-          28 + Math.floor(Math.random() * 24),
+          PROGRESS_TYPE_MS.min + Math.floor(Math.random() * (PROGRESS_TYPE_MS.max - PROGRESS_TYPE_MS.min + 1)),
         );
       } else {
+        if (entry.source === "server") return;
         holdMsRef.current = 5000 + Math.floor(Math.random() * 5001);
         setPhase("holding");
       }
     } else if (phase === "holding") {
       timeoutId = window.setTimeout(() => setPhase("erasing"), holdMsRef.current);
     } else if (typed.length > 0) {
-      timeoutId = window.setTimeout(() => setTyped((text) => text.slice(0, -1)), 16);
+      timeoutId = window.setTimeout(() => setTyped((text) => text.slice(0, -1)), PROGRESS_TYPE_MS.erase);
     } else {
       setTick((n) => n + 1);
       setPhase("typing");
@@ -1107,7 +1114,7 @@ function ProgressLine({
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
           <span className="inline-flex min-w-0 items-center gap-3 truncate">
             <span className="silicon-activity-copy truncate">
-              {entry.source === "server" ? serverText : typed || "\u00a0"}
+              {typed || "\u00a0"}
             </span>
             <span className="silicon-activity-core" aria-hidden="true">
               {Array.from({ length: 16 }, (_, i) => (

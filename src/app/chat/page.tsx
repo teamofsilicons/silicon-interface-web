@@ -560,6 +560,7 @@ function ChatPageInner() {
 
       {selectedRoom ? (
         <RoomView
+          key={selectedRoom.room_id}
           room={selectedRoom}
           allRooms={rooms}
           socket={socket}

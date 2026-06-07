@@ -797,13 +797,16 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (!search) return visibleEvents;
     const s = search.toLowerCase();
     return visibleEvents.filter((e) => {
-      const body = String(e.content.body ?? "");
-      const caption = String(e.content.caption ?? "");
-      return (
-        body.toLowerCase().includes(s) ||
-        caption.toLowerCase().includes(s) ||
-        (e.sender_handle ?? "").toLowerCase().includes(s)
-      );
+      const searchable = [
+        e.content.body,
+        e.content.caption,
+        e.content.transcript,
+        e.content.text,
+        e.sender_handle,
+      ]
+        .map((value) => String(value ?? "").toLowerCase())
+        .join("\n");
+      return searchable.includes(s);
     });
   }, [visibleEvents, search]);
   const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;

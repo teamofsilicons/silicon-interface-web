@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useAuth } from "@/lib/auth";
 
 import { Logo } from "@/components/logo";
+import { NotificationCenter } from "@/components/notifications/notification-center";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
 interface Props {
@@ -23,14 +24,17 @@ export function AppHeader(_: Props) {
           <Logo size={26} withWordmark />
         </Link>
         {carbon && (
-          <Link
-            href="/settings"
-            aria-label={`@${carbon.username} — profile`}
-            title="profile"
-            className="transition-opacity hover:opacity-80"
-          >
-            <IdAvatar seed={carbon.carbon_id} src={carbon.profile_photo_url} size={32} />
-          </Link>
+          <div className="flex items-center gap-2">
+            <NotificationCenter ownerId={carbon.carbon_id} />
+            <Link
+              href="/settings"
+              aria-label={`@${carbon.username} — profile`}
+              title="profile"
+              className="transition-opacity hover:opacity-80"
+            >
+              <IdAvatar seed={carbon.carbon_id} src={carbon.profile_photo_url} size={32} />
+            </Link>
+          </div>
         )}
       </div>
     </header>

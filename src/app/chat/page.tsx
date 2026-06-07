@@ -7,11 +7,17 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import {
+  addNotification,
+  markRoomNotificationsRead,
+  showBrowserNotification,
+} from "@/lib/notifications";
+import { roomDisplay } from "@/lib/peers";
 import { playReceived } from "@/lib/sounds";
-import type { Event, Room } from "@/lib/types";
+import type { Contact, Event, Room } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
-import { useContacts } from "@/lib/use-contacts";
+import { contactKey, useContacts } from "@/lib/use-contacts";
 import { loadCachedRooms, saveCachedRooms } from "@/lib/sidebar-cache";
 import { cn } from "@/lib/utils";
 
@@ -61,6 +67,22 @@ function eventPreview(ev: Event): string | null {
     default:
       return null;
   }
+}
+
+function notificationBody(ev: Event): string {
+  const preview = eventPreview(ev) ?? "New message";
+  return preview.length > 180 ? `${preview.slice(0, 177)}...` : preview;
+}
+
+function notificationDisplay(room: Room, contacts: Map<string, Contact>) {
+  const display = roomDisplay(room);
+  const peer = display.peer;
+  const saved = peer ? contacts.get(contactKey(peer.kind, peer.id)) : undefined;
+  return {
+    title: saved?.name?.trim() || display.name || "New message",
+    avatarUrl: saved?.photo_url ?? display.photoUrl ?? null,
+    avatarSeed: peer?.id ?? display.handle ?? room.room_id,
+  };
 }
 
 import { RoomList } from "@/components/chat/room-list";
@@ -305,18 +327,47 @@ function ChatPageInner() {
       // Received-message sound — global (any room), once per event.
       if (!mine && isCountableEvent(ev)) playReceived();
       const rid = f.room_id;
-      if (!roomsRef.current.some((r) => r.room_id === rid)) {
+      const room = roomsRef.current.find((r) => r.room_id === rid);
+      if (!room) {
         void refresh();
         return;
       }
       const isOpen = selectedRef.current === rid;
       const preview = eventPreview(ev);
+      const countableIncoming = isCountableEvent(ev) && !mine && !isOpen;
+      if (countableIncoming && ownerId) {
+        const body = notificationBody(ev);
+        const display = notificationDisplay(room, contacts.byPeer);
+        addNotification(ownerId, {
+          id: ev.event_id,
+          roomId: rid,
+          eventId: ev.event_id,
+          title: display.title,
+          body,
+          at: ev.created_at,
+          avatarUrl: display.avatarUrl,
+          avatarSeed: display.avatarSeed,
+        });
+        showBrowserNotification(display.title, {
+          body,
+          tag: rid,
+          roomId: rid,
+        });
+        if (typeof document !== "undefined" && document.visibilityState === "visible") {
+          toast.message(display.title, {
+            description: body,
+            action: {
+              label: "open",
+              onClick: () => router.push(`/chat?room=${encodeURIComponent(rid)}`),
+            },
+          });
+        }
+      }
       setRooms((prev) =>
         prev.map((r) => {
           if (r.room_id !== rid) return r;
           // Counts toward unread only if it's a real message from someone
           // else and I'm not already looking at this room.
-          const countable = isCountableEvent(ev) && !mine && !isOpen;
           return {
             ...r,
             last_event:
@@ -330,8 +381,8 @@ function ChatPageInner() {
                     read: false,
                   }
                 : r.last_event,
-            unread: countable ? true : r.unread,
-            unread_count: countable
+            unread: countableIncoming ? true : r.unread,
+            unread_count: countableIncoming
               ? (r.unread_count ?? 0) + 1
               : r.unread_count,
           };
@@ -361,7 +412,7 @@ function ChatPageInner() {
     } else if (f.type === "room.added") {
       if (!roomsRef.current.some((r) => r.room_id === f.room_id)) void refresh();
     }
-  }, [socket.lastFrame, refresh, myUsername]);
+  }, [socket.lastFrame, refresh, myUsername, ownerId, contacts.byPeer, router]);
 
   // Esc closes the open conversation (back to the list / welcome pane). We
   // bail when the event was already handled — an open dialog, popover, emoji
@@ -381,6 +432,7 @@ function ChatPageInner() {
   // server-side, but we zero the count immediately so the sidebar matches.
   React.useEffect(() => {
     if (!selected) return;
+    if (ownerId) markRoomNotificationsRead(ownerId, selected);
     queueMicrotask(() => {
       setRooms((prev) => {
         // Bail out (return the same array) when there's nothing to clear so we
@@ -394,7 +446,7 @@ function ChatPageInner() {
         );
       });
     });
-  }, [selected]);
+  }, [selected, ownerId]);
 
   const filtered = React.useMemo(() => {
     const q = sidebarQuery.trim().toLowerCase();

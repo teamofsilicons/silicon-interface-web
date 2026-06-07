@@ -27,6 +27,14 @@ import type {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -689,6 +697,7 @@ function InviteSection({ slug }: { slug: string }) {
   const [email, setEmail] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(5);
   const [busy, setBusy] = React.useState(false);
+  const [linksOpen, setLinksOpen] = React.useState(false);
 
   const loadInvites = React.useCallback(async () => {
     const rows = await api.teamInvites(slug);
@@ -729,6 +738,8 @@ function InviteSection({ slug }: { slug: string }) {
   });
 
   const disableInvite = make(async (invite: Invite) => {
+    const ok = window.confirm("Disable this invite link? This cannot be reversed.");
+    if (!ok) return;
     const updated = await api.disableInvite(slug, invite.id);
     setInvites((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     toast.success("invite link disabled");
@@ -736,6 +747,58 @@ function InviteSection({ slug }: { slug: string }) {
 
   const inviteLink = (invite: Invite) =>
     `${typeof window === "undefined" ? "" : window.location.origin}/join/${invite.token}?code=${invite.code}`;
+  const latestInvite = invites[0] ?? null;
+
+  const renderInviteCard = (invite: Invite, compact = false) => {
+    const link = inviteLink(invite);
+    return (
+      <div
+        key={invite.id}
+        className={cn("border bg-background", !invite.is_active && "opacity-60")}
+      >
+        <div className="flex items-center gap-2 border-b px-3 py-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-xs">{link}</span>
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => {
+              navigator.clipboard.writeText(link);
+              toast.success("link copied");
+            }}
+            aria-label="copy invite link"
+          >
+            <Copy />
+          </Button>
+          {!compact ? (
+            <Button
+              size="sm"
+              variant={invite.is_active ? "destructive" : "ghost"}
+              disabled={busy || !invite.is_active}
+              onClick={() => disableInvite(invite)}
+            >
+              {invite.is_active ? "disable" : "disabled"}
+            </Button>
+          ) : null}
+        </div>
+        <div className="grid grid-cols-3 divide-x text-sm">
+          <div className="p-3">
+            <div className="label-mono">code</div>
+            <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
+          </div>
+          <div className="p-3">
+            <div className="label-mono">seats left</div>
+            <div className="mt-1 font-mono text-xl font-semibold">{invite.remaining_uses}</div>
+          </div>
+          <div className="p-3">
+            <div className="label-mono">status</div>
+            <div className="mt-1 font-mono text-sm font-semibold">
+              {invite.is_active ? "active" : "disabled"}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <Section title="invites">
@@ -768,61 +831,27 @@ function InviteSection({ slug }: { slug: string }) {
               </Button>
             </div>
 
-            {invites.length > 0 ? (
-              <div className="space-y-3">
-                {invites.map((invite) => {
-                  const link = inviteLink(invite);
-                  return (
-                    <div
-                      key={invite.id}
-                      className={cn(
-                        "border bg-background",
-                        !invite.is_active && "opacity-60",
-                      )}
-                    >
-                      <div className="flex items-center gap-2 border-b px-3 py-2">
-                        <span className="min-w-0 flex-1 truncate font-mono text-xs">{link}</span>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => {
-                            navigator.clipboard.writeText(link);
-                            toast.success("link copied");
-                          }}
-                          aria-label="copy invite link"
-                        >
-                          <Copy />
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={busy || !invite.is_active}
-                          onClick={() => disableInvite(invite)}
-                        >
-                          disable
-                        </Button>
-                      </div>
-                      <div className="grid grid-cols-3 divide-x text-sm">
-                        <div className="p-3">
-                          <div className="label-mono">code</div>
-                          <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
-                        </div>
-                        <div className="p-3">
-                          <div className="label-mono">seats left</div>
-                          <div className="mt-1 font-mono text-xl font-semibold">
-                            {invite.remaining_uses}
-                          </div>
-                        </div>
-                        <div className="p-3">
-                          <div className="label-mono">status</div>
-                          <div className="mt-1 font-mono text-sm font-semibold">
-                            {invite.is_active ? "active" : "disabled"}
-                          </div>
-                        </div>
-                      </div>
+            {latestInvite ? (
+              <div className="space-y-2">
+                {renderInviteCard(latestInvite, true)}
+                <Dialog open={linksOpen} onOpenChange={setLinksOpen}>
+                  <DialogTrigger asChild>
+                    <Button variant="link" size="sm" className="h-auto p-0 text-xs">
+                      view all generated links
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-3xl">
+                    <DialogHeader>
+                      <DialogTitle>Generated invite links</DialogTitle>
+                      <DialogDescription>
+                        Disable is permanent. Create a new link if you need seats again.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+                      {invites.map((invite) => renderInviteCard(invite))}
                     </div>
-                  );
-                })}
+                  </DialogContent>
+                </Dialog>
               </div>
             ) : (
               <div className="border border-dashed bg-background/50 p-4 text-sm text-muted-foreground">

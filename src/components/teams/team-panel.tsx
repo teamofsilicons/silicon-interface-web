@@ -264,7 +264,11 @@ function MembersPreview({
   onViewAll: () => void;
 }) {
   const visibleMembers = members.filter((m) => !isHiddenInterfaceMember(m));
-  const preview = visibleMembers.slice(0, 10);
+  const orderedMembers = [...visibleMembers].sort((a, b) => {
+    if (a.member_kind !== b.member_kind) return a.member_kind === "carbon" ? -1 : 1;
+    return teamMemberHandle(a).localeCompare(teamMemberHandle(b));
+  });
+  const preview = orderedMembers.slice(0, 10);
   return (
     <Section title={`members · ${visibleMembers.length}`}>
       {preview.length === 0 ? (

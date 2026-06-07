@@ -698,6 +698,8 @@ function InviteSection({ slug }: { slug: string }) {
   const [maxUses, setMaxUses] = React.useState(5);
   const [busy, setBusy] = React.useState(false);
   const [linksOpen, setLinksOpen] = React.useState(false);
+  const [newInviteOpen, setNewInviteOpen] = React.useState(false);
+  const [newInvite, setNewInvite] = React.useState<Invite | null>(null);
 
   const loadInvites = React.useCallback(async () => {
     const rows = await api.teamInvites(slug);
@@ -723,7 +725,9 @@ function InviteSection({ slug }: { slug: string }) {
   };
 
   const createLink = make(async () => {
-    await api.createInvite(slug, { channel: "link", max_uses: maxUses });
+    const invite = await api.createInvite(slug, { channel: "link", max_uses: maxUses });
+    setNewInvite(invite);
+    setNewInviteOpen(true);
     await loadInvites();
   });
 
@@ -747,7 +751,6 @@ function InviteSection({ slug }: { slug: string }) {
 
   const inviteLink = (invite: Invite) =>
     `${typeof window === "undefined" ? "" : window.location.origin}/join/${invite.token}?code=${invite.code}`;
-  const latestInvite = invites[0] ?? null;
 
   const renderInviteCard = (invite: Invite, compact = false) => {
     const link = inviteLink(invite);
@@ -831,33 +834,52 @@ function InviteSection({ slug }: { slug: string }) {
               </Button>
             </div>
 
-            {latestInvite ? (
-              <div className="space-y-2">
-                {renderInviteCard(latestInvite, true)}
-                <Dialog open={linksOpen} onOpenChange={setLinksOpen}>
-                  <DialogTrigger asChild>
-                    <Button variant="link" size="sm" className="h-auto p-0 text-xs">
-                      view all generated links
-                    </Button>
-                  </DialogTrigger>
-                  <DialogContent className="max-w-3xl">
-                    <DialogHeader>
-                      <DialogTitle>Generated invite links</DialogTitle>
-                      <DialogDescription>
-                        Disable is permanent. Create a new link if you need seats again.
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-                      {invites.map((invite) => renderInviteCard(invite))}
-                    </div>
-                  </DialogContent>
-                </Dialog>
+            <div className="border border-dashed bg-background/50 p-4 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="text-muted-foreground">
+                  {invites.length > 0
+                    ? `${invites.length} generated invite link${invites.length === 1 ? "" : "s"}.`
+                    : "Generated invite links will appear here."}
+                </span>
+                {invites.length > 0 ? (
+                  <Dialog open={linksOpen} onOpenChange={setLinksOpen}>
+                    <DialogTrigger asChild>
+                      <Button variant="link" size="sm" className="h-auto p-0 text-xs">
+                        view all generated links
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-3xl">
+                      <DialogHeader>
+                        <DialogTitle>Generated invite links</DialogTitle>
+                        <DialogDescription>
+                          Disable is permanent. Create a new link if you need seats again.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+                        {invites.map((invite) => renderInviteCard(invite))}
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+                ) : null}
               </div>
-            ) : (
-              <div className="border border-dashed bg-background/50 p-4 text-sm text-muted-foreground">
-                Generated invite links will appear here.
-              </div>
-            )}
+            </div>
+
+            <Dialog open={newInviteOpen} onOpenChange={setNewInviteOpen}>
+              <DialogContent className="max-w-xl">
+                <DialogHeader>
+                  <DialogTitle>Invite link created</DialogTitle>
+                  <DialogDescription>
+                    Share this link or code now. All generated links stay under the generated-links view.
+                  </DialogDescription>
+                </DialogHeader>
+                {newInvite ? renderInviteCard(newInvite, true) : null}
+                <div className="flex justify-end">
+                  <Button size="sm" onClick={() => setNewInviteOpen(false)}>
+                    done
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
           </div>
         </div>
 

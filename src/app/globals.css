@@ -291,6 +291,12 @@ summary,
   animation-delay: 0.56s;
 }
 .silicon-activity-copy {
+  display: inline-block;
+  min-width: 0;
+  max-width: min(64ch, calc(100vw - 160px));
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: clip;
   font-family: var(--font-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 11px;
   letter-spacing: 0.13em;

@@ -106,6 +106,7 @@ const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
 };
 const MIN_PROGRESS_STATUS_MS = 1000;
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
+const MAX_PROGRESS_LINE_CHARS = 64;
 const ROOM_SNIPPET_LIMIT = 40;
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
@@ -862,7 +863,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           className="flex min-w-0 flex-1 items-center gap-3 text-left transition-opacity hover:opacity-80"
           title="view profile & attachments"
         >
-          <IdAvatar seed={headerSeed} src={headerPhoto} size={36} />
+          <IdAvatar seed={headerSeed} src={headerPhoto} size={36} family={peer?.kind ?? "carbon"} />
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold tracking-tight">
               {headerTitle ?? (
@@ -1002,6 +1003,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   isDirect={room.kind === "direct"}
                   status={e._status}
                   senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
+                  senderAvatarKind={e.sender_kind}
                   senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
                   onSenderClick={openSenderProfile}
                   onTakeBack={readOnly ? undefined : onTakeBack}
@@ -1021,6 +1023,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               entry={activeProgress}
               avatarSeed={progressAvatarHandle || headerSeed}
               avatarSrc={progressAvatarSrc}
+              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
             />
           ) : null}
           <div ref={endRef} />
@@ -1088,16 +1091,22 @@ function ProgressLine({
   entry,
   avatarSeed,
   avatarSrc,
+  avatarFamily,
 }: {
   entry: ProgressEntry;
   avatarSeed: string;
   avatarSrc?: string | null;
+  avatarFamily?: "carbon" | "silicon";
 }) {
-  const [tick, setTick] = React.useState(0);
+  const initialTickRef = React.useRef<number | null>(null);
+  if (initialTickRef.current === null) {
+    initialTickRef.current = randomProgressTick(progressLineOptions(entry).length, -1);
+  }
+  const [tick, setTick] = React.useState(initialTickRef.current);
   const [typed, setTyped] = React.useState("");
   const typedRef = React.useRef("");
   const pendingTargetRef = React.useRef<string | null>(null);
-  const [target, setTarget] = React.useState(() => formatProgressLine(entry, 0));
+  const [target, setTarget] = React.useState(() => formatProgressLine(entry, initialTickRef.current ?? 0));
   const targetRef = React.useRef(target);
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
@@ -1112,11 +1121,12 @@ function ProgressLine({
   }, [target]);
 
   React.useEffect(() => {
-    const next = formatProgressLine(entry, 0);
+    const nextTick = randomProgressTick(progressLineOptions(entry).length, tick);
+    const next = formatProgressLine(entry, nextTick);
     const currentTyped = typedRef.current;
     const currentTarget = targetRef.current;
     const currentComplete = currentTyped === currentTarget && currentTarget.length > 0;
-    setTick(0);
+    setTick(nextTick);
 
     if (currentTyped === next) {
       pendingTargetRef.current = null;
@@ -1184,7 +1194,7 @@ function ProgressLine({
         setPhase("typing");
         return;
       }
-      const nextTick = tick + 1;
+      const nextTick = randomProgressTick(progressLineOptions(entry).length, tick);
       setTick(nextTick);
       typedDoneAtRef.current = 0;
       setTarget(formatProgressLine(entry, nextTick));
@@ -1198,12 +1208,12 @@ function ProgressLine({
   return (
     <div className="my-2 flex w-full items-center justify-start gap-2">
       <div className="w-7 shrink-0">
-        <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} />
+        <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "carbon"} />
       </div>
-      <div className="max-w-[70%]">
+      <div className="min-w-0 max-w-[70%]">
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
-          <span className="inline-flex min-w-0 items-center gap-3 truncate">
-            <span className="silicon-activity-copy truncate">
+          <span className="inline-flex min-w-0 max-w-full items-center gap-3 overflow-hidden">
+            <span className="silicon-activity-copy">
               {typed || "\u00a0"}
             </span>
             <span className="silicon-activity-core" aria-hidden="true">
@@ -1218,12 +1228,31 @@ function ProgressLine({
   );
 }
 
-function formatProgressLine(entry: ProgressEntry, tick = 0): string {
+function progressLineOptions(entry: ProgressEntry): string[] {
   const note = meaningfulProgressNote(entry.note, entry.state);
-  if (note) return sentenceCase(note);
-  if (entry.source === "server") return progressStateLabel(entry.state);
-  const lines = PROGRESS_STATE_COPY[entry.state] ?? SILICON_PROGRESS_COPY;
-  return lines[tick % lines.length];
+  if (note) return [sentenceCase(note)];
+  if (entry.source === "server") return [progressStateLabel(entry.state)];
+  return PROGRESS_STATE_COPY[entry.state] ?? SILICON_PROGRESS_COPY;
+}
+
+function randomProgressTick(length: number, previous: number): number {
+  if (length <= 1) return 0;
+  let next = Math.floor(Math.random() * length);
+  if (next === previous) {
+    next = (next + 1 + Math.floor(Math.random() * (length - 1))) % length;
+  }
+  return next;
+}
+
+function formatProgressLine(entry: ProgressEntry, tick = 0): string {
+  const lines = progressLineOptions(entry);
+  return truncateProgressLine(lines[tick % lines.length]);
+}
+
+function truncateProgressLine(value: string): string {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= MAX_PROGRESS_LINE_CHARS) return text;
+  return `${text.slice(0, Math.max(0, MAX_PROGRESS_LINE_CHARS - 2)).trimEnd()}..`;
 }
 
 function progressStateLabel(state: ProgressState): string {

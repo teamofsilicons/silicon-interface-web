@@ -47,8 +47,8 @@ const SCREENS: Screen[] = [
     preview: true,
   },
   {
-    text: () =>
-      "Awesome man! You are all setup, enjoy Silicon Interface. Have some great conversations with Silicons and Carbons",
+    text: ({ name, carbonId }) =>
+      `Perfect ${name || carbonId || "there"}! You are all setup, enjoy Silicon Interface. Have some great conversations with Silicons and Carbons`,
     cta: "Enter Silicon Interface",
   },
 ];

@@ -23,6 +23,7 @@ export function ProfileEditor() {
   const [tagline, setTagline] = React.useState(me?.tagline ?? "");
   const [tz, setTz] = React.useState(me?.timezone || guessTimezone());
   const [busy, setBusy] = React.useState(false);
+  const [photoBusy, setPhotoBusy] = React.useState(false);
   const [shareOpen, setShareOpen] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
@@ -75,6 +76,7 @@ export function ProfileEditor() {
 
   const onUpload = async (file: File) => {
     setBusy(true);
+    setPhotoBusy(true);
     try {
       const r = await api.presignUpload({
         mime: file.type || "image/png",
@@ -99,6 +101,8 @@ export function ProfileEditor() {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
       setBusy(false);
+      setPhotoBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
     }
   };
 
@@ -112,7 +116,16 @@ export function ProfileEditor() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-center gap-4">
-          <IdAvatar seed={me.carbon_id} src={me.profile_photo_url} size={64} />
+          <div className="relative h-16 w-16 shrink-0">
+            <div className={photoBusy ? "opacity-45" : ""}>
+              <IdAvatar seed={me.carbon_id} src={me.profile_photo_url} size={64} />
+            </div>
+            {photoBusy ? (
+              <div className="absolute inset-0 grid place-items-center border border-border bg-background/55">
+                <CircleNotch className="h-5 w-5 animate-spin" />
+              </div>
+            ) : null}
+          </div>
           <div>
             <input
               ref={fileRef}
@@ -125,7 +138,7 @@ export function ProfileEditor() {
               }}
             />
             <Button variant="outline" size="sm" disabled={busy} onClick={() => fileRef.current?.click()}>
-              <UploadSimple /> change photo
+              {photoBusy ? <CircleNotch className="animate-spin" /> : <UploadSimple />} change photo
             </Button>
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               @{me.username} · {me.carbon_id}

@@ -18,6 +18,7 @@ import { isTeamHead } from "@/lib/use-teams";
 import { cn, relativeTime } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
 import { QRCodeSVG } from "qrcode.react";
+import { safeSession } from "@/lib/safe-storage";
 import type {
   BillingCycle,
   BillingData,
@@ -483,6 +484,18 @@ function BillingSection({ slug }: { slug: string }) {
     void load();
   }, [load]);
 
+  // §8e — "paid up" beat. We stash a flag before redirecting to checkout; on
+  // return, if the balance is now clear, mark the moment instead of a silent
+  // ledger refresh.
+  React.useEffect(() => {
+    if (!data) return;
+    if (!safeSession.get(`si:checkout:${slug}`)) return;
+    safeSession.remove(`si:checkout:${slug}`);
+    if (!data.pending || (data.pending.amount_cents ?? 0) === 0) {
+      toast.success("> balance cleared");
+    }
+  }, [data, slug]);
+
   // QA P0-4: checkout had no idempotency. A lost response after the server
   // committed the charge, followed by a retry, could double-charge. We keep a
   // stable key per cycle-set for the life of this panel so every retry of the
@@ -519,6 +532,7 @@ function BillingSection({ slug }: { slug: string }) {
         // Navigation is starting. Deliberately leave the button disabled (do
         // NOT reset busy/checkoutLoading) so a second click can't fire another
         // checkout during the redirect.
+        safeSession.set(`si:checkout:${slug}`, "1"); // §8e — celebrate on return
         window.location.assign(r.checkout_url);
         return;
       }

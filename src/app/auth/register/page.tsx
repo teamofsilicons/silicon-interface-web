@@ -7,8 +7,9 @@ import { ArrowLeft, Check, Warning } from "@phosphor-icons/react/dist/ssr";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "sonner";
 
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { toastError } from "@/lib/errors";
 import { useResendCooldown } from "@/lib/use-resend";
 import {
   findCountry,
@@ -97,7 +98,8 @@ function RegisterPageInner() {
     try {
       await fn();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : String(e));
+      // §5b/§5d — mono `stderr: …` voice for API/network failures.
+      toastError(e);
     } finally {
       setLoading(false);
     }
@@ -106,7 +108,7 @@ function RegisterPageInner() {
   // ---- email ----
   const submitEmail = () => {
     if (!isValidEmail(email)) {
-      toast.error("Enter a valid email address.");
+      toastError("enter a valid email address");
       return;
     }
     setNoticeDismissed(true);

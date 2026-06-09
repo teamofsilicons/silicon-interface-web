@@ -3,11 +3,11 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { UploadSimple } from "@phosphor-icons/react/dist/ssr";
-import { toast } from "sonner";
 
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { track } from "@/lib/analytics";
+import { toastError } from "@/lib/errors";
 import { generateAndStoreAvatar } from "@/lib/avatar";
 import { suggestCarbonId } from "@/lib/email";
 import { safeSession } from "@/lib/safe-storage";
@@ -218,7 +218,8 @@ function OnboardingInner() {
         safeSession.remove(EMAIL_KEY);
         setStep((s) => s + 1);
       } catch (e) {
-        toast.error(e instanceof ApiError ? e.message : String(e));
+        // §5b/§5d — mono `stderr: …` voice for the finalize failure.
+        toastError(e);
       } finally {
         setFinalizing(false);
       }

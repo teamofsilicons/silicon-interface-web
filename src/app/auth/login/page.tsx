@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { track } from "@/lib/analytics";
+import { toastError } from "@/lib/errors";
 import { useResendCooldown } from "@/lib/use-resend";
 import {
   findCountry,
@@ -86,7 +87,9 @@ function LoginPageInner() {
     try {
       await fn();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : String(e));
+      // §5b/§5d — failures read as mono `stderr: …` in the brand voice instead
+      // of raw `TypeError: Failed to fetch`-style text.
+      toastError(e);
     } finally {
       setLoading(false);
     }

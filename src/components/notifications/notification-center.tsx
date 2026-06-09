@@ -90,8 +90,13 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
     router.push(`/chat?room=${encodeURIComponent(item.roomId)}`);
   };
 
+  // §6c — permission priming. Don't fire the cold OS prompt on the first click;
+  // surface a one-line mono explainer first so the browser dialog isn't a
+  // surprise (and grant rates lift). The second click actually requests.
+  const [priming, setPriming] = React.useState(false);
   const enableBrowser = async () => {
     const next = await requestBrowserNotifications();
+    setPriming(false);
     setPermission(next);
   };
 
@@ -134,7 +139,12 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
         </div>
 
         <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-          <PermissionStatus permission={permission} onEnable={enableBrowser} />
+          <PermissionStatus
+            permission={permission}
+            priming={priming}
+            onPrime={() => setPriming(true)}
+            onEnable={enableBrowser}
+          />
           <div className="flex shrink-0 items-center gap-1">
             <Button
               size="icon"
@@ -223,9 +233,13 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
 
 function PermissionStatus({
   permission,
+  priming,
+  onPrime,
   onEnable,
 }: {
   permission: NotificationPermission | "unsupported";
+  priming: boolean;
+  onPrime: () => void;
   onEnable: () => void;
 }) {
   if (permission === "unsupported") {
@@ -237,10 +251,25 @@ function PermissionStatus({
   if (permission === "denied") {
     return <span className="text-xs text-muted-foreground">browser notifications blocked</span>;
   }
+  // §6c — priming step: a one-line mono explainer before the cold OS prompt.
+  if (priming) {
+    return (
+      <span className="min-w-0 font-mono text-[11px] leading-snug text-muted-foreground">
+        <span className="block">&gt; we&apos;ll ping you when a silicon replies.</span>
+        <button
+          type="button"
+          onClick={onEnable}
+          className="mt-0.5 font-medium text-foreground underline-offset-4 hover:underline"
+        >
+          allow
+        </button>
+      </span>
+    );
+  }
   return (
     <button
       type="button"
-      onClick={onEnable}
+      onClick={onPrime}
       className="text-xs font-medium text-foreground underline-offset-4 hover:underline"
     >
       enable browser notifications

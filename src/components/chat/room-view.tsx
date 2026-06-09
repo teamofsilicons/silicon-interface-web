@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
-import { playSent, playAckTick } from "@/lib/sounds";
+import { playSent, playAckTick, vibrate } from "@/lib/sounds";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
@@ -876,6 +876,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       // Audible "sent" tone — small ascending chirp. Respects reduced-motion
       // + the silicon-interface:sounds=off opt-out.
       playSent();
+      vibrate(8); // §3c — feather-light haptic on send
     },
     [myUsername, room.room_id, showsProgressForReplies, requestBottomStick],
   );

@@ -136,3 +136,14 @@ export function playReceivedSilicon() {
 export function playAckTick() {
   play("ack", 1500, 1500, 0.05, 0.04, "sine");
 }
+
+// Delights §3c — a feather-light haptic on send / record-start, gated by the
+// same sound preference (a no-op where Vibration isn't supported, e.g. desktop).
+export function vibrate(ms = 8) {
+  if (!enabled()) return;
+  try {
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate(ms);
+  } catch {
+    /* unsupported — fine */
+  }
+}

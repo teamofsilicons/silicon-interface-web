@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { vibrate } from "@/lib/sounds";
 
 interface Props {
   /** Recording is "locked" the moment the icon is clicked — there is no
@@ -115,6 +116,7 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
         };
         startedAtRef.current = Date.now();
         rec.start(200); // 200ms timeslice — even pacing for the level meter
+        vibrate(8); // §3c — feather-light haptic on record start
         setArmed(true);
 
         // Live level meter. fftSize 2048 gives 2048 time-domain samples per

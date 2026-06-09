@@ -1191,6 +1191,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   no events match{" "}
                   <span className="text-foreground">&quot;{search}&quot;</span>
                 </span>
+              ) : peer ? (
+                // §2b — first-contact welcome: the two marks facing each other.
+                <span className="flex items-center justify-center gap-4 py-2">
+                  <IdAvatar seed={myUsername || "me"} src={myPhotoUrl} asciiSrc={myAscii} size={44} family="carbon" />
+                  <span className="font-mono text-xs text-muted-foreground">say hi →</span>
+                  <IdAvatar seed={peer.id} src={headerPhoto} asciiSrc={headerAscii} size={44} family={peer.kind} />
+                </span>
               ) : (
                 "no messages yet. say hi."
               )}

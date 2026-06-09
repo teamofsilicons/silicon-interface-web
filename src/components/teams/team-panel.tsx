@@ -16,6 +16,7 @@ import { api, ApiError } from "@/lib/api";
 import { env } from "@/lib/env";
 import { isTeamHead } from "@/lib/use-teams";
 import { cn, relativeTime } from "@/lib/utils";
+import { Spinner } from "@/components/ui/spinner";
 import type {
   BillingCycle,
   BillingData,
@@ -91,7 +92,7 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
   if (!team) {
     return (
       <div className="grid flex-1 place-items-center text-muted-foreground">
-        <CircleNotch className="h-6 w-6 animate-spin" />
+        <Spinner className="text-lg" />
       </div>
     );
   }
@@ -538,7 +539,7 @@ function BillingSection({ slug }: { slug: string }) {
     return (
       <Section title="billing">
         <div className="grid place-items-center py-6 text-muted-foreground">
-          <CircleNotch className="h-5 w-5 animate-spin" />
+          <Spinner className="text-base" />
         </div>
       </Section>
     );
@@ -638,7 +639,7 @@ function BillingSection({ slug }: { slug: string }) {
           >
             {checkoutLoading ? (
               <>
-                <CircleNotch className="animate-spin" /> loading
+                <Spinner /> loading
               </>
             ) : mixedCurrencies ? (
               "Pay below"

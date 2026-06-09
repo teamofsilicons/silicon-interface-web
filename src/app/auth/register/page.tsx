@@ -3,7 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Check, CircleNotch, Warning } from "@phosphor-icons/react/dist/ssr";
+import { ArrowLeft, Check, Warning } from "@phosphor-icons/react/dist/ssr";
+import { Spinner } from "@/components/ui/spinner";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -270,7 +271,7 @@ function RegisterPageInner() {
             />
           </div>
           <Button onClick={submitEmail} disabled={!email.trim() || loading} className="w-full">
-            {loading && <CircleNotch className="animate-spin" />}
+            {loading && <Spinner />}
             Get OTP
           </Button>
         </section>
@@ -304,7 +305,7 @@ function RegisterPageInner() {
             </div>
           </div>
           <Button onClick={submitPhone} disabled={!number.trim() || loading} className="w-full">
-            {loading && <CircleNotch className="animate-spin" />}
+            {loading && <Spinner />}
             Get OTP
           </Button>
         </section>
@@ -337,7 +338,7 @@ function RegisterPageInner() {
               disabled={loading}
               className="inline-flex items-center gap-1.5 text-sm text-black transition-opacity hover:underline disabled:opacity-50"
             >
-              {loading && <CircleNotch className="h-3.5 w-3.5 animate-spin" />}
+              {loading && <Spinner />}
               Continue anyway
             </button>
           </div>

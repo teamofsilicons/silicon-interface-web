@@ -2,7 +2,10 @@
 
 import * as React from "react";
 
+import { toast } from "sonner";
+
 import { identiconSvg, identiconAscii, type MarkFamily } from "@/lib/avatar";
+import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 /** Square avatar: uploaded photo if present, else a deterministic MarkSystem glyph. */
@@ -44,6 +47,18 @@ export function IdAvatar({
     setFailed(false);
   }, [effective]);
 
+  // §0g — right-click any avatar to copy its mark as ASCII, perfect for pasting
+  // a silicon identity into a terminal / README.
+  const onContextMenu = React.useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      void copyText(identiconAscii(seed || "?", family)).then((ok) => {
+        if (ok) toast.success("mark copied");
+      });
+    },
+    [seed, family],
+  );
+
   if (effective && !failed) {
     return (
       // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL, not a static asset
@@ -56,6 +71,7 @@ export function IdAvatar({
         style={style}
         className={cn("shrink-0 border object-cover", className)}
         onError={() => setFailed(true)}
+        onContextMenu={onContextMenu}
       />
     );
   }
@@ -63,6 +79,7 @@ export function IdAvatar({
     return (
       <pre
         aria-hidden
+        onContextMenu={onContextMenu}
         style={{ ...style, fontSize: size / 7, lineHeight: 1 }}
         className={cn(
           "m-0 grid shrink-0 place-items-center overflow-hidden border bg-background font-mono text-foreground",
@@ -76,6 +93,7 @@ export function IdAvatar({
   return (
     <span
       aria-hidden
+      onContextMenu={onContextMenu}
       style={style}
       className={cn("inline-block shrink-0 overflow-hidden border", className)}
       dangerouslySetInnerHTML={{ __html: svg }}

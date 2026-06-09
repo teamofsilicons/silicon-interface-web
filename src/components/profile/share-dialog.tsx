@@ -6,6 +6,7 @@ import { Copy, DownloadSimple, LinkSimple } from "@phosphor-icons/react/dist/ssr
 import { toast } from "sonner";
 
 import { copyText } from "@/lib/clipboard";
+import { glyphAscii } from "@/lib/glyph";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -134,6 +135,13 @@ export function ShareDialog({
             onCopy={copyLink}
             copyLabel="copy link"
           />
+
+          {/* §8d — a copy-code button distinct from copy-link. The Carbon ID is
+              the OTP-style code people read aloud, so it earns its own action
+              separate from the URL copy above. */}
+          <Button variant="outline" onClick={copyId} className="w-full">
+            <Copy /> copy code
+          </Button>
 
           <Button onClick={download} className="mt-1 w-full">
             <DownloadSimple /> Download share card
@@ -287,6 +295,12 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   const qrY = eyebrowY + 72;
   ctx.drawImage(qr, qrX, qrY, qrSize, qrSize);
 
+  // ---- §8a — the recipient's ASCII mark, in monospace beside the QR. Same
+  // deterministic grid that renders their avatar everywhere else, so the share
+  // card carries their actual silicon identity, not just a generic QR. Drawn in
+  // the left gutter, vertically centered on the QR.
+  drawAsciiMark(ctx, carbonId, { qrX, qrY, qrSize });
+
   // ---- Divider: hairline with a brand glyph in the middle. The middle gap
   // is a subtle decorative beat that breaks the rule cleanly without needing
   // extra ornaments.
@@ -350,6 +364,54 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+/**
+ * §8a — draw the recipient's MarkSystem mark as ASCII in the left gutter beside
+ * the QR. The grid is the same one `IdAvatar` falls back to, so the poster
+ * carries the user's real silicon identity. Sized to fit the gutter width and
+ * vertically centered on the QR; falls back to a no-op if the mark is empty.
+ */
+function drawAsciiMark(
+  ctx: CanvasRenderingContext2D,
+  carbonId: string,
+  qr: { qrX: number; qrY: number; qrSize: number },
+): void {
+  const rows = glyphAscii(carbonId, { family: "carbon" }).split("\n");
+  const cols = rows.reduce((m, r) => Math.max(m, [...r].length), 0);
+  if (!rows.length || !cols) return;
+
+  // Fit the mark into the left gutter: the clear beige between the card frame
+  // and the QR. Leave breathing room on both sides.
+  const gutterLeft = FRAME_INSET + 28;
+  const gutterRight = qr.qrX - 28;
+  const gutterW = gutterRight - gutterLeft;
+  if (gutterW <= 0) return;
+
+  // Monospace: cell width ≈ 0.6 × font size. Solve so the grid fills the gutter,
+  // then clamp to a tasteful range.
+  const cellW = gutterW / cols;
+  const fontSize = Math.max(10, Math.min(20, cellW / 0.6));
+  const lineH = fontSize; // line-height:1, like the in-app <pre>
+  const blockH = lineH * rows.length;
+
+  ctx.save();
+  ctx.font = `${fontSize}px "JetBrains Mono", ui-monospace, monospace`;
+  ctx.fillStyle = INK;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const startX = gutterLeft;
+  const startY = qr.qrY + (qr.qrSize - blockH) / 2;
+  // Draw cell-by-cell at fixed column centers so the grid stays aligned even if
+  // the block/triangle glyphs (█ ◤◥◢◣) carry different advance widths than the
+  // space — relying on string layout would skew the mark.
+  rows.forEach((row, r) => {
+    [...row].forEach((ch, c) => {
+      if (ch === " ") return;
+      ctx.fillText(ch, startX + (c + 0.5) * cellW, startY + r * lineH);
+    });
+  });
+  ctx.restore();
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {

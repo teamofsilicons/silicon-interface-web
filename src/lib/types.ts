@@ -31,6 +31,8 @@ export interface Carbon {
   name: string;
   profile_photo_key: string;
   profile_photo_url: string | null;
+  /** Delights §0a — colored ASCII treatment of the photo; preferred for avatars. */
+  profile_ascii_url?: string | null;
   tagline: string;
   timezone: string;
   // Core-team flag. Gates the /dev console client-side; the backend
@@ -47,6 +49,7 @@ export interface CarbonPublic {
   name: string;
   profile_photo_key: string;
   profile_photo_url: string | null;
+  profile_ascii_url?: string | null;
   tagline: string;
   timezone: string;
 }
@@ -56,6 +59,7 @@ export interface Silicon {
   name: string;
   profile_photo_key: string;
   profile_photo_url: string | null;
+  profile_ascii_url?: string | null;
   tagline: string;
   owner_team_id: number;
   capabilities: Record<string, unknown>;
@@ -68,6 +72,7 @@ export interface SiliconPublic {
   name: string;
   profile_photo_key: string;
   profile_photo_url: string | null;
+  profile_ascii_url?: string | null;
   tagline: string;
 }
 
@@ -79,6 +84,8 @@ export interface RoomPeer {
   handle: string;
   name: string;
   profile_photo_url: string | null;
+  /** Delights §0a — colored ASCII treatment of the photo; preferred for avatars. */
+  profile_ascii_url?: string | null;
 }
 
 /** A cron a silicon scheduled. Carbons see these read-only. */

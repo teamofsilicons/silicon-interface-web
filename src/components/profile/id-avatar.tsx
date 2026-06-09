@@ -9,18 +9,23 @@ import { cn } from "@/lib/utils";
 export function IdAvatar({
   seed,
   src,
+  asciiSrc,
   size = 40,
   family = "carbon",
   className,
 }: {
   seed: string;
   src?: string | null;
+  /** Delights §0a — colored ASCII "Silicon Treatment" of the photo. Preferred
+   *  over the raw photo when present so every avatar carries the terminal look. */
+  asciiSrc?: string | null;
   size?: number;
   family?: MarkFamily;
   className?: string;
 }) {
   const svg = React.useMemo(() => identiconSvg(seed || "?", size, family), [seed, size, family]);
   const style = { width: size, height: size };
+  const effective = asciiSrc || src;
 
   // QA §7.6: presigned S3 photo URLs expire. Without an onError handler an
   // expired (or otherwise broken) URL renders the browser's broken-image icon
@@ -30,13 +35,13 @@ export function IdAvatar({
   const [failed, setFailed] = React.useState(false);
   React.useEffect(() => {
     setFailed(false);
-  }, [src]);
+  }, [effective]);
 
-  if (src && !failed) {
+  if (effective && !failed) {
     return (
       // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL, not a static asset
       <img
-        src={src}
+        src={effective}
         alt=""
         aria-hidden
         width={size}

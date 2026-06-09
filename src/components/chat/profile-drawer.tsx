@@ -146,6 +146,8 @@ export function ProfileDrawer({
   // A saved contact's custom name/photo win over the target's defaults.
   const displayName = contact?.name?.trim() || profile?.name?.trim() || handle;
   const photoUrl = contact?.photo_url ?? profile?.profile_photo_url ?? null;
+  // §0a — prefer the ASCII treatment unless the user set a custom contact photo.
+  const asciiUrl = contact?.photo_url ? null : (profile?.profile_ascii_url ?? null);
   const bio = profile?.tagline ?? "";
   const username = profile && "username" in profile ? profile.username : "";
   const identityLabel = counterpart?.kind === "silicon" ? "silicon id" : "carbon id";
@@ -168,7 +170,7 @@ export function ProfileDrawer({
             border. Stacking another bordered card around it was the "two
             bounding boxes" the user noticed. Single box now. */}
         <div className="flex flex-col items-center gap-3">
-          <IdAvatar seed={handle || "?"} src={photoUrl} size={132} family={counterpart?.kind ?? "carbon"} />
+          <IdAvatar seed={handle || "?"} src={photoUrl} asciiSrc={asciiUrl} size={132} family={counterpart?.kind ?? "carbon"} />
           <div className="text-center">
             <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
             {profile && (

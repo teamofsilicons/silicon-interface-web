@@ -27,7 +27,7 @@ export function ProfileView({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-3">
-        <IdAvatar seed={publicId} src={profile.profile_photo_url} size={56} family={isCarbon ? "carbon" : "silicon"} />
+        <IdAvatar seed={publicId} src={profile.profile_photo_url} asciiSrc={profile.profile_ascii_url} size={56} family={isCarbon ? "carbon" : "silicon"} />
         <div className="min-w-0">
           <div className="truncate text-base font-semibold">{displayName}</div>
           <div className="truncate font-mono text-xs text-muted-foreground">{publicId}</div>

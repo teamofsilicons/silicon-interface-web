@@ -11,6 +11,8 @@ export interface RoomDisplay {
   handle: string;
   /** Photo URL for IdAvatar, or null to use the deterministic identicon. */
   photoUrl: string | null;
+  /** Delights §0a — colored ASCII treatment URL, preferred over the photo. */
+  asciiUrl: string | null;
   /** Underlying peer object, if any — direct rooms have one. */
   peer: RoomPeer | null;
   /** For group rooms, the secondary line ("3 members" etc.). */
@@ -35,6 +37,7 @@ export function roomDisplay(room: Room): RoomDisplay {
         name: `${label(a)} ↔ ${label(b)}`,
         handle: a.handle,
         photoUrl: a.profile_photo_url,
+        asciiUrl: a.profile_ascii_url ?? null,
         peer: a,
         subtitle: "Silicon ↔ Silicon",
       };
@@ -45,6 +48,7 @@ export function roomDisplay(room: Room): RoomDisplay {
         name: peer.name?.trim() || peer.handle,
         handle: peer.handle,
         photoUrl: peer.profile_photo_url,
+        asciiUrl: peer.profile_ascii_url ?? null,
         peer,
         subtitle: peer.kind === "silicon" ? "Silicon" : "Carbon",
       };
@@ -57,6 +61,7 @@ export function roomDisplay(room: Room): RoomDisplay {
       name: "new chat",
       handle: room.room_id,
       photoUrl: null,
+      asciiUrl: null,
       peer: null,
       subtitle: "say hi to get started",
     };
@@ -66,6 +71,7 @@ export function roomDisplay(room: Room): RoomDisplay {
     name: groupName,
     handle: room.room_id,
     photoUrl: null,
+    asciiUrl: null,
     peer: null,
     subtitle:
       room.peers.length > 0

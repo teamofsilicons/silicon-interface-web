@@ -80,6 +80,9 @@ export function RoomList({
               ? contacts?.get(contactKey(peer.kind, peer.id))
               : undefined;
             const avatarSrc = contact?.photo_url ?? d.photoUrl;
+            // §0a — prefer the peer's ASCII treatment, but a custom saved-contact
+            // photo wins (the user chose it).
+            const avatarAscii = contact?.photo_url ? null : d.asciiUrl;
             const avatarSeed = peer?.id ?? d.handle;
             const nameClass = cn(
               "block min-w-0 truncate text-sm",
@@ -114,6 +117,7 @@ export function RoomList({
                   <IdAvatar
                     seed={avatarSeed}
                     src={avatarSrc}
+                    asciiSrc={avatarAscii}
                     size={36}
                     family={peer?.kind ?? "carbon"}
                     className="mt-0.5"

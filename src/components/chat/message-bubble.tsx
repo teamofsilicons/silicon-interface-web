@@ -76,6 +76,8 @@ interface Props {
   status?: MessageStatus;
   /** Photo URL for the sender — used when rendering the message-side avatar. */
   senderPhotoUrl?: string | null;
+  /** Delights §0a — colored ASCII treatment for the sender's avatar. */
+  senderAsciiUrl?: string | null;
   senderAvatarKind?: "carbon" | "silicon" | "system";
   /** Saved-contact display name for the sender, when the user set one. */
   senderDisplayName?: string | null;
@@ -113,6 +115,7 @@ export function MessageBubble({
   onTakeBack,
   status,
   senderPhotoUrl,
+  senderAsciiUrl,
   senderAvatarKind,
   senderDisplayName,
   onSenderClick,
@@ -227,6 +230,7 @@ export function MessageBubble({
               <IdAvatar
                 seed={senderHandle || "?"}
                 src={senderPhotoUrl}
+                asciiSrc={senderAsciiUrl}
                 size={28}
                 family={senderAvatarKind === "silicon" ? "silicon" : "carbon"}
               />

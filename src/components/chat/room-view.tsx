@@ -133,6 +133,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     ? contact?.name || null // null → render the styled @id below
     : display.name;
   const headerPhoto = contact?.photo_url ?? display.photoUrl;
+  // §0a — prefer the peer's ASCII treatment unless the user set a custom photo.
+  const headerAscii = contact?.photo_url ? null : display.asciiUrl;
   const headerSeed = peer?.id ?? display.handle;
   // Observer mode: I'm in the backend allowlist and this is a silicon↔silicon
   // room I may only watch. No composer, no reactions/replies/take-backs, and
@@ -275,7 +277,14 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     for (const p of room.peers) m.set(p.handle, p.profile_photo_url);
     return m;
   }, [room.peers]);
+  // §0a — per-handle ASCII treatment, parallel to the photo map.
+  const peerAsciiByHandle = React.useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const p of room.peers) m.set(p.handle, p.profile_ascii_url ?? null);
+    return m;
+  }, [room.peers]);
   const myPhotoUrl = carbon?.profile_photo_url ?? null;
+  const myAscii = carbon?.profile_ascii_url ?? null;
   const photoFor = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle) return null;
@@ -285,6 +294,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       return peerPhotoByHandle.get(handle) ?? null;
     },
     [myUsername, myPhotoUrl, contactForSender, peerPhotoByHandle],
+  );
+  // §0a — ASCII treatment for the in-message avatar. A custom saved-contact
+  // photo wins; otherwise prefer the peer's (or my own) ASCII.
+  const asciiFor = React.useCallback(
+    (kind: "carbon" | "silicon" | "system", handle: string | null) => {
+      if (!handle) return null;
+      if (handle === myUsername) return myAscii;
+      const saved = contactForSender(kind, handle);
+      if (saved && (saved.photo_url || saved.target_photo_url)) return null;
+      return peerAsciiByHandle.get(handle) ?? null;
+    },
+    [myUsername, myAscii, contactForSender, peerAsciiByHandle],
   );
   const displayNameFor = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
@@ -1039,7 +1060,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           className="flex min-w-0 flex-1 items-center gap-3 text-left transition-opacity hover:opacity-80"
           title="view profile & attachments"
         >
-          <IdAvatar seed={headerSeed} src={headerPhoto} size={36} family={peer?.kind ?? "carbon"} />
+          <IdAvatar seed={headerSeed} src={headerPhoto} asciiSrc={headerAscii} size={36} family={peer?.kind ?? "carbon"} />
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold tracking-tight">
               {headerTitle ?? (
@@ -1194,6 +1215,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   isDirect={room.kind === "direct"}
                   status={e._status}
                   senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
+                  senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
                   senderAvatarKind={e.sender_kind}
                   senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
                   onSenderClick={openSenderProfile}

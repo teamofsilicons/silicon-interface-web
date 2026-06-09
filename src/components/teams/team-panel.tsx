@@ -17,6 +17,7 @@ import { env } from "@/lib/env";
 import { isTeamHead } from "@/lib/use-teams";
 import { cn, relativeTime } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
+import { QRCodeSVG } from "qrcode.react";
 import type {
   BillingCycle,
   BillingData,
@@ -1031,6 +1032,12 @@ function InviteSection({ slug }: { slug: string }) {
             </div>
           </div>
         </div>
+        {/* §8b — a scannable QR for in-person onboarding (brand beige/ink). */}
+        {invite.is_active ? (
+          <div className="flex items-center justify-center border-t p-3">
+            <QRCodeSVG value={link} size={92} bgColor="#ede8e0" fgColor="#111111" level="M" />
+          </div>
+        ) : null}
       </div>
     );
   };

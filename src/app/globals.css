@@ -343,10 +343,27 @@ summary,
    page/stagger/notice enter animations carry transform + opacity motion; under
    reduced-motion we drop the animation so content appears immediately (opacity
    forced to 1, no transform), and we still the looping activity indicator. */
+/* Delights §1c — read-receipt "fill": the tick scales hollow→solid when a
+   receipt arrives, so "they saw it" feels earned. */
+@keyframes receipt-fill {
+  from {
+    transform: scale(0.55);
+    opacity: 0.35;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.receipt-fill {
+  animation: receipt-fill 0.28s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .silicon-activity-line,
   .silicon-activity-core span,
-  .silicon-activity-copy::after {
+  .silicon-activity-copy::after,
+  .receipt-fill {
     animation: none;
   }
   .page-enter,

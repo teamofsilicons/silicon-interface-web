@@ -612,7 +612,7 @@ function Receipt({ status }: { status: MessageStatus }) {
   // only by text colour on a beige canvas). Use the brand success colour, full
   // opacity — the confident "they saw it" beat every messenger gets right.
   if (status === "read")
-    return <Checks className="h-3 w-3 text-[var(--success)]" aria-label={title} weight="bold" />;
+    return <Checks className="receipt-fill h-3 w-3 text-[var(--success)]" aria-label={title} weight="bold" />;
   return <Check className="h-3 w-3" aria-label={title} />;
 }
 

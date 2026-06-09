@@ -57,7 +57,19 @@ export function WsLog() {
         <ScrollArea className="h-80 rounded border bg-muted">
           <div className="p-2 space-y-1">
             {entries.length === 0 ? (
-              <div className="text-xs text-muted-foreground p-2">waiting for frames…</div>
+              <div className="p-2 font-mono text-xs text-muted-foreground">
+                waiting for frames…
+                {/* §2d — faint pulsing cursor, a heartbeat while the wire is
+                    quiet; stilled under prefers-reduced-motion. */}
+                <span
+                  aria-hidden
+                  className="ml-1 inline-block motion-reduce:animate-none"
+                  style={{ animation: "ws-heartbeat 1.1s ease-in-out infinite" }}
+                >
+                  ▮
+                </span>
+                <style>{"@keyframes ws-heartbeat{0%,100%{opacity:0.25}50%{opacity:0.8}}"}</style>
+              </div>
             ) : (
               entries.map((e) => (
                 <pre

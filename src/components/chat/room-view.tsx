@@ -163,6 +163,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // §2.1 — the live frame handler, reassigned each render so the single
   // subscription always runs the latest closure.
   const frameHandlerRef = React.useRef<(f: WsFrame) => void>(() => {});
+  // §6b — ensure the "first contact" note fires at most once per room (and not
+  // twice under StrictMode's double-invoked updater).
+  const firstContactRef = React.useRef(false);
   const [profileOpen, setProfileOpen] = React.useState(false);
   const [focusSender, setFocusSender] = React.useState<{
     kind: "carbon" | "silicon";
@@ -335,6 +338,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     setProfileOpen(false);
     setUnseenBelow(false);
     deltaBufferRef.current.clear();
+    firstContactRef.current = false;
     api
       .events(roomId, undefined, 100)
       .then((evs) => {
@@ -861,7 +865,17 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         _status: "pending",
         _clientId: clientId,
       };
-      setEvents((prev) => [...prev, placeholder]);
+      setEvents((prev) => {
+        // §6b — first message ever in this room: a single mono system note.
+        const hadReal = prev.some(
+          (e) => !e.event_id.startsWith("temp-") && e.type !== "m.progress" && !e.redacted_at,
+        );
+        if (!hadReal && !firstContactRef.current) {
+          firstContactRef.current = true;
+          toast.success("> first contact established");
+        }
+        return [...prev, placeholder];
+      });
       requestBottomStick("smooth");
       if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(payload.type)) {
         setActiveProgress({

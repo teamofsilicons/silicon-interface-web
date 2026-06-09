@@ -33,6 +33,15 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   const [unread, setUnread] = React.useState(0);
   const [trimmed, setTrimmed] = React.useState(0);
   const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">("unsupported");
+  // §4a — one-step scale pop when the unread count *rises*. We bump a key so the
+  // badge remounts its animation; the previous count is held in a ref so a
+  // re-render that doesn't change `unread` never re-fires the pop.
+  const prevUnread = React.useRef(unread);
+  const [bump, setBump] = React.useState(0);
+  React.useEffect(() => {
+    if (unread > prevUnread.current) setBump((b) => b + 1);
+    prevUnread.current = unread;
+  }, [unread]);
 
   const reload = React.useCallback(() => {
     setItems(loadNotifications(ownerId));
@@ -97,8 +106,13 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
         >
           <Bell className="h-4 w-4" />
           {unread > 0 ? (
-            <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center bg-foreground px-1 font-mono text-[10px] font-semibold leading-none text-background">
+            <span
+              key={bump}
+              className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center bg-foreground px-1 font-mono text-[10px] font-semibold leading-none text-background motion-reduce:animate-none"
+              style={bump > 0 ? { animation: "unread-bump 0.28s ease-out" } : undefined}
+            >
               {unread > 99 ? "99+" : unread}
+              <style>{"@keyframes unread-bump{0%{transform:scale(1)}40%{transform:scale(1.35)}100%{transform:scale(1)}}"}</style>
             </span>
           ) : null}
         </button>

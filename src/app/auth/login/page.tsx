@@ -45,9 +45,14 @@ function LoginPageInner() {
   // Query params come from a sign-up pivot ("?identifier=…&notice=existing").
   // A "+"-prefixed identifier opens phone mode and pre-fills country + number.
   const search = useSearchParams();
-  const initialId = search.get("identifier") ?? "";
+  const initialId = search.get("identifier") ?? search.get("email") ?? "";
   const initialPhone = initialId.startsWith("+") ? parseE164(initialId) : null;
   const noticeExisting = search.get("notice") === "existing";
+  // §6d — the login pivot carries the email/phone from a sign-up bounce so the
+  // user never re-types. Remember whether we pre-filled from that handoff so we
+  // can surface a tiny mono confirmation (makes the magic feel intentional, not
+  // spooky). It's an email handoff when the carried identifier looks like one.
+  const broughtEmail = initialId.includes("@");
 
   const [mode, setMode] = React.useState<Mode>(() =>
     initialId.startsWith("+") ? "phone" : "text",
@@ -256,6 +261,11 @@ function LoginPageInner() {
               onChange={(e) => setIdentifier(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && identifier.trim() && start()}
             />
+            {broughtEmail && identifier === initialId && (
+              <p className="label-mono text-[10px] text-muted-foreground">
+                &gt; brought your email over
+              </p>
+            )}
           </div>
           <Button onClick={start} disabled={!identifier.trim() || loading} className="w-full">
             {loading && <CircleNotch className="animate-spin" />}

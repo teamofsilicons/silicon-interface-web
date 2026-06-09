@@ -44,10 +44,16 @@ const DialogContent = React.forwardRef<
         // overlay last, painting it on top of the modal and making the
         // dialog appear dimmed-out the first time it opened.
         "fixed left-1/2 top-1/2 z-[60] grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg",
+        // §4e — "expand from a line": grow from a 1px horizontal hairline to
+        // full height. On-brand for the flat/sharp system. Reduced-motion users
+        // skip the reveal (the open class isn't applied), so the dialog just
+        // appears. The keyframe lives inline so it can't be tree-shaken away.
+        "data-[state=open]:motion-safe:animate-[dialog-line-expand_0.22s_ease-out]",
         className,
       )}
       {...props}
     >
+      <style>{"@keyframes dialog-line-expand{0%{clip-path:inset(50% 0 50% 0);opacity:0.6}60%{clip-path:inset(0 0 0 0)}100%{clip-path:inset(0 0 0 0);opacity:1}}"}</style>
       {children}
       <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
         <X className="h-4 w-4" />

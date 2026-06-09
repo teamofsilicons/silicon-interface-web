@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { UploadSimple } from "@phosphor-icons/react/dist/ssr";
+import { Check, UploadSimple } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
 import { authStore } from "@/lib/auth";
@@ -287,7 +287,16 @@ function OnboardingInner() {
           {/* Carbon ID picker */}
           {screen.pickCarbonId && typingDone && (
             <div key={`pick-${step}`} className={`space-y-2 ${fadeIn}`}>
-              <div className="flex items-center border border-input bg-transparent transition-colors focus-within:border-ring">
+              {/* §4f — when the ID becomes available the wrapper flashes a
+                  success border (cid-flash, keyed on cid so it re-fires per
+                  newly-available ID) and the check pops in (cid-pop). */}
+              <div
+                key={carbonIdReady ? `ok-${cid}` : "pending"}
+                className={
+                  "flex items-center border bg-transparent transition-colors focus-within:border-ring " +
+                  (carbonIdReady ? "cid-flash border-success" : "border-input")
+                }
+              >
                 <span className="pl-3 text-2xl text-muted-foreground">@</span>
                 <input
                   autoFocus
@@ -303,11 +312,19 @@ function OnboardingInner() {
                   placeholder="your-carbon-id"
                   className="h-14 w-full min-w-0 bg-transparent px-2 text-2xl font-medium tracking-tight outline-none placeholder:text-muted-foreground"
                 />
-                <span className="px-3 label-mono text-[10px]">
+                <span className="flex items-center gap-1 px-3 label-mono text-[10px]">
                   {formatValid
                     ? avail?.for === cid
                       ? avail.ok
-                        ? "available"
+                        ? (
+                          <>
+                            <Check
+                              weight="bold"
+                              className="cid-pop h-3 w-3 text-success"
+                            />
+                            available
+                          </>
+                        )
                         : (avail.reason || "taken")
                       : "checking…"
                     : carbonId
@@ -436,6 +453,41 @@ function OnboardingInner() {
           to {
             opacity: 1;
             transform: translateY(0);
+          }
+        }
+        /* §4f — available-ID success pop. The check snaps in (one-step scale)
+           and the field border flashes success-green then settles. */
+        @keyframes cid-pop {
+          0% {
+            transform: scale(0);
+            opacity: 0;
+          }
+          70% {
+            transform: scale(1.25);
+          }
+          100% {
+            transform: scale(1);
+            opacity: 1;
+          }
+        }
+        .cid-pop {
+          animation: cid-pop 0.28s ease-out both;
+        }
+        @keyframes cid-flash {
+          0% {
+            background-color: color-mix(in srgb, var(--success) 18%, transparent);
+          }
+          100% {
+            background-color: transparent;
+          }
+        }
+        .cid-flash {
+          animation: cid-flash 0.5s ease-out;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .cid-pop,
+          .cid-flash {
+            animation: none;
           }
         }
       `}</style>

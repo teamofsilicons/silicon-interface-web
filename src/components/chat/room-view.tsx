@@ -1185,7 +1185,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             <div className="text-sm text-muted-foreground">loading messages…</div>
           ) : filteredEvents.length === 0 ? (
             <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
-              {search ? "no matches in this chat" : "no messages yet. say hi."}
+              {search ? (
+                // §2c — render a search miss as a grep line.
+                <span className="font-mono">
+                  no events match{" "}
+                  <span className="text-foreground">&quot;{search}&quot;</span>
+                </span>
+              ) : (
+                "no messages yet. say hi."
+              )}
             </div>
           ) : (
             filteredEvents.map((e, i) => {

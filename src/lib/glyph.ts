@@ -205,6 +205,18 @@ export interface GlyphOptions {
   family?: Family;
 }
 
+// Delights §0b — render the *generated* MarkSystem mark as ASCII. Shares the
+// exact same grid as `glyphSvg`, so a user's two representations are visually
+// consistent: same identity, different render target. Cell types map to:
+//   0→space  1→full block  2/3/4/5→the four corner triangles ◤◥◢◣
+const ASCII_CELL: Record<CellType, string> = { 0: " ", 1: "█", 2: "◤", 3: "◥", 4: "◢", 5: "◣" };
+
+/** The MarkSystem mark for `text` as an ASCII grid (newline-separated rows). */
+export function glyphAscii(text: string, opts: { family?: Family } = {}): string {
+  const grid = buildGrid(text || "?", opts.family ?? "carbon");
+  return grid.map((row) => row.map((t) => ASCII_CELL[t]).join("")).join("\n");
+}
+
 export function glyphSvg(text: string, opts: GlyphOptions = {}): string {
   const family = opts.family ?? "carbon";
   const size = opts.size ?? 256;

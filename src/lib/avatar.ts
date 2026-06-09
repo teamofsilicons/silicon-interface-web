@@ -1,10 +1,15 @@
 import { api } from "./api";
-import { glyphSvg } from "./glyph";
+import { glyphSvg, glyphAscii } from "./glyph";
 
 export type MarkFamily = "carbon" | "silicon" | "team";
 
 export function identiconSvg(seed: string, size = 256, family: MarkFamily = "carbon"): string {
   return glyphSvg(seed || "?", { size, family });
+}
+
+/** Delights §0b — the MarkSystem mark as an ASCII grid. */
+export function identiconAscii(seed: string, family: MarkFamily = "carbon"): string {
+  return glyphAscii(seed || "?", { family });
 }
 
 /**

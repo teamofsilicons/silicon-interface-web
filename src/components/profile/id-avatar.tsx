@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { identiconSvg, type MarkFamily } from "@/lib/avatar";
+import { identiconSvg, identiconAscii, type MarkFamily } from "@/lib/avatar";
 import { cn } from "@/lib/utils";
 
 /** Square avatar: uploaded photo if present, else a deterministic MarkSystem glyph. */
@@ -12,6 +12,7 @@ export function IdAvatar({
   asciiSrc,
   size = 40,
   family = "carbon",
+  variant = "mark",
   className,
 }: {
   seed: string;
@@ -21,9 +22,15 @@ export function IdAvatar({
   asciiSrc?: string | null;
   size?: number;
   family?: MarkFamily;
+  /** §0b — "ascii" renders the glyph itself as monospace ASCII instead of SVG. */
+  variant?: "mark" | "ascii";
   className?: string;
 }) {
   const svg = React.useMemo(() => identiconSvg(seed || "?", size, family), [seed, size, family]);
+  const ascii = React.useMemo(
+    () => (variant === "ascii" ? identiconAscii(seed || "?", family) : ""),
+    [variant, seed, family],
+  );
   const style = { width: size, height: size };
   const effective = asciiSrc || src;
 
@@ -50,6 +57,20 @@ export function IdAvatar({
         className={cn("shrink-0 border object-cover", className)}
         onError={() => setFailed(true)}
       />
+    );
+  }
+  if (variant === "ascii") {
+    return (
+      <pre
+        aria-hidden
+        style={{ ...style, fontSize: size / 7, lineHeight: 1 }}
+        className={cn(
+          "m-0 grid shrink-0 place-items-center overflow-hidden border bg-background font-mono text-foreground",
+          className,
+        )}
+      >
+        {ascii}
+      </pre>
     );
   }
   return (

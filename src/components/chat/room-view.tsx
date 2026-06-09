@@ -8,6 +8,11 @@ import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent, playAckTick, vibrate } from "@/lib/sounds";
+import {
+  shouldPromptNotifications,
+  markNotificationsAsked,
+  requestBrowserNotifications,
+} from "@/lib/notifications";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
@@ -891,6 +896,21 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       // + the silicon-interface:sounds=off opt-out.
       playSent();
       vibrate(8); // §3c — feather-light haptic on send
+      // Prompt for notification access on the user's first send: an in-app ask
+      // first, then (on "enable") the real OS permission prompt. One-time.
+      if (shouldPromptNotifications()) {
+        markNotificationsAsked();
+        toast("get notified when a reply comes in?", {
+          description: "we'll ping you even when this tab isn't focused.",
+          duration: 10000,
+          action: {
+            label: "enable",
+            onClick: () => {
+              void requestBrowserNotifications();
+            },
+          },
+        });
+      }
     },
     [myUsername, room.room_id, showsProgressForReplies, requestBottomStick],
   );

@@ -170,6 +170,29 @@ export async function requestBrowserNotifications(): Promise<NotificationPermiss
   return window.Notification.requestPermission();
 }
 
+// We prompt for notification access the first time the user sends a message
+// (in-app priming → the real OS prompt). This flag makes that a one-time ask.
+const NOTIF_ASKED_KEY = "silicon-interface:notif-asked";
+
+/** True only when notifications are supported, not yet granted/denied, and we
+ *  haven't already prompted the user. */
+export function shouldPromptNotifications(): boolean {
+  if (browserNotificationPermission() !== "default") return false;
+  try {
+    return window.localStorage.getItem(NOTIF_ASKED_KEY) !== "1";
+  } catch {
+    return false;
+  }
+}
+
+export function markNotificationsAsked(): void {
+  try {
+    window.localStorage.setItem(NOTIF_ASKED_KEY, "1");
+  } catch {
+    /* private mode — we just may ask again next session */
+  }
+}
+
 export function showBrowserNotification(
   title: string,
   options: NotificationOptions & { roomId?: string } = {},

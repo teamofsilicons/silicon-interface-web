@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Bell, Check, Trash, X } from "@phosphor-icons/react/dist/ssr";
 
 import {
-  browserNotificationPermission,
   clearNotifications,
   loadNotifications,
   loadUnreadCount,
@@ -13,7 +12,6 @@ import {
   markNotificationRead,
   NOTIFICATION_EVENT,
   NOTIFICATION_NAVIGATE_EVENT,
-  requestBrowserNotifications,
   trimmedCount,
   type InterfaceNotification,
 } from "@/lib/notifications";
@@ -33,7 +31,6 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   // kept window. `trimmed` drives the "showing latest N" affordance.
   const [unread, setUnread] = React.useState(0);
   const [trimmed, setTrimmed] = React.useState(0);
-  const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">("unsupported");
   // §4a — one-step scale pop when the unread count *rises*. We bump a key so the
   // badge remounts its animation; the previous count is held in a ref so a
   // re-render that doesn't change `unread` never re-fires the pop.
@@ -51,10 +48,7 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   }, [ownerId]);
 
   React.useEffect(() => {
-    // Mount-time read of client-only browser state (Notification permission +
-    // localStorage-backed notifications).
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only hydration on mount
-    setPermission(browserNotificationPermission());
+    // Mount-time read of client-only, localStorage-backed notifications.
     reload();
     // §7f — this client component always mounts in the chat shell, so it's a
     // reliable place to print the devtools banner once (guarded module-side).
@@ -92,16 +86,6 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
     reload();
     setOpen(false);
     router.push(`/chat?room=${encodeURIComponent(item.roomId)}`);
-  };
-
-  // §6c — permission priming. Don't fire the cold OS prompt on the first click;
-  // surface a one-line mono explainer first so the browser dialog isn't a
-  // surprise (and grant rates lift). The second click actually requests.
-  const [priming, setPriming] = React.useState(false);
-  const enableBrowser = async () => {
-    const next = await requestBrowserNotifications();
-    setPriming(false);
-    setPermission(next);
   };
 
   return (
@@ -142,13 +126,7 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
           </button>
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-          <PermissionStatus
-            permission={permission}
-            priming={priming}
-            onPrime={() => setPriming(true)}
-            onEnable={enableBrowser}
-          />
+        <div className="flex items-center justify-end gap-2 border-b px-4 py-2">
           <div className="flex shrink-0 items-center gap-1">
             <Button
               size="icon"
@@ -235,48 +213,3 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   );
 }
 
-function PermissionStatus({
-  permission,
-  priming,
-  onPrime,
-  onEnable,
-}: {
-  permission: NotificationPermission | "unsupported";
-  priming: boolean;
-  onPrime: () => void;
-  onEnable: () => void;
-}) {
-  if (permission === "unsupported") {
-    return <span className="text-xs text-muted-foreground">browser notifications unavailable</span>;
-  }
-  if (permission === "granted") {
-    return <span className="text-xs text-muted-foreground">browser notifications on</span>;
-  }
-  if (permission === "denied") {
-    return <span className="text-xs text-muted-foreground">browser notifications blocked</span>;
-  }
-  // §6c — priming step: a one-line mono explainer before the cold OS prompt.
-  if (priming) {
-    return (
-      <span className="min-w-0 font-mono text-[11px] leading-snug text-muted-foreground">
-        <span className="block">&gt; we&apos;ll ping you when a silicon replies.</span>
-        <button
-          type="button"
-          onClick={onEnable}
-          className="mt-0.5 font-medium text-foreground underline-offset-4 hover:underline"
-        >
-          allow
-        </button>
-      </span>
-    );
-  }
-  return (
-    <button
-      type="button"
-      onClick={onPrime}
-      className="text-xs font-medium text-foreground underline-offset-4 hover:underline"
-    >
-      enable browser notifications
-    </button>
-  );
-}

@@ -175,7 +175,7 @@ export function ProfileEditor() {
         <div className="flex items-center gap-4">
           <div className="relative h-16 w-16 shrink-0">
             <div className={photoBusy ? "opacity-45" : ""}>
-              <IdAvatar seed={me.carbon_id} src={me.profile_photo_url} size={64} />
+              <IdAvatar seed={me.carbon_id} src={me.profile_photo_url} asciiSrc={me.profile_ascii_url} size={64} />
             </div>
             {photoBusy ? (
               <div className="absolute inset-0 grid place-items-center border border-border bg-background/55">

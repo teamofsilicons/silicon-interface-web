@@ -32,7 +32,7 @@ export function AppHeader(_: Props) {
               title="profile"
               className="transition-opacity hover:opacity-80"
             >
-              <IdAvatar seed={carbon.carbon_id} src={carbon.profile_photo_url} size={32} />
+              <IdAvatar seed={carbon.carbon_id} src={carbon.profile_photo_url} asciiSrc={carbon.profile_ascii_url} size={32} />
             </Link>
           </div>
         )}

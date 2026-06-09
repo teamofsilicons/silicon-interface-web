@@ -158,7 +158,7 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
                     isSelected ? "bg-secondary" : "hover:bg-accent",
                   )}
                 >
-                  <IdAvatar seed={d.handle} src={d.photoUrl} size={32} family={peerKind} />
+                  <IdAvatar seed={d.handle} src={d.photoUrl} asciiSrc={d.asciiUrl} size={32} family={peerKind} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">{d.name}</div>
                     <div className="truncate text-xs text-muted-foreground">

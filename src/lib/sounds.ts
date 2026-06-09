@@ -69,7 +69,14 @@ if (typeof window !== "undefined") {
 const MIN_INTERVAL_MS = 220;
 const _lastPlayed: Record<string, number> = {};
 
-function play(kind: string, start: number, end: number, durSec: number, vol: number) {
+function play(
+  kind: string,
+  start: number,
+  end: number,
+  durSec: number,
+  vol: number,
+  type: OscillatorType = "sine",
+) {
   if (!enabled()) return;
   const now = Date.now();
   if (now - (_lastPlayed[kind] ?? 0) < MIN_INTERVAL_MS) return;
@@ -81,17 +88,24 @@ function play(kind: string, start: number, end: number, durSec: number, vol: num
   // schedule the oscillator only after it resolves — otherwise this beep is
   // dropped. resume() is idempotent / a no-op when already running.
   if (ac.state === "suspended") {
-    ac.resume().then(() => emit(ac, start, end, durSec, vol)).catch(() => undefined);
+    ac.resume().then(() => emit(ac, start, end, durSec, vol, type)).catch(() => undefined);
   } else {
-    emit(ac, start, end, durSec, vol);
+    emit(ac, start, end, durSec, vol, type);
   }
 }
 
-function emit(ac: AudioContext, start: number, end: number, durSec: number, vol: number) {
+function emit(
+  ac: AudioContext,
+  start: number,
+  end: number,
+  durSec: number,
+  vol: number,
+  type: OscillatorType,
+) {
   const t0 = ac.currentTime;
   const osc = ac.createOscillator();
   const gain = ac.createGain();
-  osc.type = "sine";
+  osc.type = type;
   osc.frequency.setValueAtTime(start, t0);
   osc.frequency.exponentialRampToValueAtTime(end, t0 + durSec);
   gain.gain.setValueAtTime(0.0001, t0);
@@ -106,6 +120,19 @@ export function playSent() {
   play("sent", 820, 1320, 0.12, 0.07);
 }
 
+// Carbons reply with a warm sine tap…
 export function playReceived() {
-  play("received", 880, 620, 0.16, 0.06);
+  play("received", 880, 620, 0.16, 0.06, "sine");
+}
+
+// …and silicons with a subtly more *synthetic* timbre (triangle wave), so you
+// hear who's talking without looking. Delights §3a.
+export function playReceivedSilicon() {
+  play("received", 760, 540, 0.18, 0.05, "triangle");
+}
+
+// Delights §3b — the second half of "send → delivered": a tiny high confirm
+// tick when the server acks, so the send has a felt two-stage shape.
+export function playAckTick() {
+  play("ack", 1500, 1500, 0.05, 0.04, "sine");
 }

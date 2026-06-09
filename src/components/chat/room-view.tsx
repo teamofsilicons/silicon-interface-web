@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
-import { playSent } from "@/lib/sounds";
+import { playSent, playAckTick } from "@/lib/sounds";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
@@ -882,6 +882,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
     requestBottomStick("smooth");
+    playAckTick(); // §3b — the confirm half of "send → delivered"
     setEvents((prev) => {
       const optIdx = prev.findIndex((e) => e._clientId === clientId);
       const dupIdx = prev.findIndex(

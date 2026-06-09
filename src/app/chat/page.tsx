@@ -13,7 +13,7 @@ import {
   showBrowserNotification,
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
-import { playReceived } from "@/lib/sounds";
+import { playReceived, playReceivedSilicon } from "@/lib/sounds";
 import type { Contact, Event, Room, WsFrame } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
@@ -346,7 +346,11 @@ function ChatPageInner() {
       const ev = f.event;
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       // Received-message sound — global (any room), once per event.
-      if (!mine && isCountableEvent(ev)) playReceived();
+      // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
+      if (!mine && isCountableEvent(ev)) {
+        if (ev.sender_kind === "silicon") playReceivedSilicon();
+        else playReceived();
+      }
       const rid = f.room_id;
       const room = roomsRef.current.find((r) => r.room_id === rid);
       if (!room) {

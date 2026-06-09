@@ -510,6 +510,34 @@ function ChatPageInner() {
     return list;
   }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers]);
 
+  // §7c — vim-style room navigation: j/k move through the visible list (and
+  // open the room), when focus isn't in a text field. Enter is handled by the
+  // list/composer; this is the quick keyboard sweep.
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key !== "j" && e.key !== "k") return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable) return;
+      if (!filtered.length) return;
+      e.preventDefault();
+      const idx = filtered.findIndex((r) => r.room_id === selected);
+      const next =
+        idx < 0
+          ? 0
+          : e.key === "j"
+            ? Math.min(idx + 1, filtered.length - 1)
+            : Math.max(idx - 1, 0);
+      const target = filtered[next];
+      if (target && target.room_id !== selected) {
+        router.push(`/chat?room=${encodeURIComponent(target.room_id)}`);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [filtered, selected, router]);
+
   return (
     <>
       {/* §7b — Cmd+K jump menu (rooms / people / dev). */}

@@ -18,6 +18,7 @@ import {
   type InterfaceNotification,
 } from "@/lib/notifications";
 import { cn, relativeTime } from "@/lib/utils";
+import { printConsoleBanner } from "@/lib/console-banner";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -55,6 +56,9 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only hydration on mount
     setPermission(browserNotificationPermission());
     reload();
+    // §7f — this client component always mounts in the chat shell, so it's a
+    // reliable place to print the devtools banner once (guarded module-side).
+    printConsoleBanner();
   }, [reload]);
 
   React.useEffect(() => {

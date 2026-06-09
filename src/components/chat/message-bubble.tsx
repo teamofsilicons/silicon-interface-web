@@ -128,6 +128,14 @@ export function MessageBubble({
   onForward,
   onDelete,
 }: Props) {
+  // §4c — flash the bubble briefly when its text is copied. Declared before any
+  // early return so the Hook order is stable across render branches.
+  const [copyFlash, setCopyFlash] = React.useState(false);
+  const triggerCopyFlash = React.useCallback(() => {
+    setCopyFlash(false);
+    requestAnimationFrame(() => setCopyFlash(true));
+    window.setTimeout(() => setCopyFlash(false), 320);
+  }, []);
   if (event.type === "m.system") {
     return (
       <div className="my-2 flex justify-center">
@@ -166,13 +174,6 @@ export function MessageBubble({
   // types whose `is_final` happens to be false (e.g. a media event).
   const mightStream =
     (event.type === "m.text" || event.type === "m.tts") && !event.is_final;
-  // §4c — flash the bubble briefly when its text is copied.
-  const [copyFlash, setCopyFlash] = React.useState(false);
-  const triggerCopyFlash = React.useCallback(() => {
-    setCopyFlash(false);
-    requestAnimationFrame(() => setCopyFlash(true));
-    window.setTimeout(() => setCopyFlash(false), 320);
-  }, []);
   // Prefer the sender's handle (carbon username == carbon_id, or silicon name);
   // fall back to the kind only if we don't have it (e.g. system events).
   const senderLabel = senderDisplayName?.trim()

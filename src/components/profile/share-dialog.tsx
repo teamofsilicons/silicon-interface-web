@@ -299,7 +299,7 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   // deterministic grid that renders their avatar everywhere else, so the share
   // card carries their actual silicon identity, not just a generic QR. Drawn in
   // the left gutter, vertically centered on the QR.
-  drawAsciiMark(ctx, carbonId, { qrX, qrY, qrSize });
+  drawAsciiMark(ctx, carbonId, { qrX, qrY, qrSize }, FRAME_INSET);
 
   // ---- Divider: hairline with a brand glyph in the middle. The middle gap
   // is a subtle decorative beat that breaks the rule cleanly without needing
@@ -376,6 +376,7 @@ function drawAsciiMark(
   ctx: CanvasRenderingContext2D,
   carbonId: string,
   qr: { qrX: number; qrY: number; qrSize: number },
+  frameInset: number,
 ): void {
   const rows = glyphAscii(carbonId, { family: "carbon" }).split("\n");
   const cols = rows.reduce((m, r) => Math.max(m, [...r].length), 0);
@@ -383,7 +384,7 @@ function drawAsciiMark(
 
   // Fit the mark into the left gutter: the clear beige between the card frame
   // and the QR. Leave breathing room on both sides.
-  const gutterLeft = FRAME_INSET + 28;
+  const gutterLeft = frameInset + 28;
   const gutterRight = qr.qrX - 28;
   const gutterW = gutterRight - gutterLeft;
   if (gutterW <= 0) return;

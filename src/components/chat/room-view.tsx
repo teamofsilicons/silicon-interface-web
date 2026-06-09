@@ -410,6 +410,14 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         const state = (incoming.content.state as ProgressState) || "thinking";
         if (state === "done") {
           setActiveProgress(null);
+          // §1b — a finished task that carries a summary lands as an inline
+          // "Silicon finished" completion bubble (see message-bubble + the
+          // visibleEvents filter, which lets done-progress events through).
+          if (incoming.content.summary) {
+            setEvents((prev) =>
+              prev.some((e) => e.event_id === incoming.event_id) ? prev : [...prev, { ...incoming }],
+            );
+          }
         } else {
           setActiveProgress({
             roomId: room.room_id,
@@ -812,7 +820,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // Visible events drop reactions (they render as chips under the target) and
   // deleted/redacted messages (hidden entirely — no "message deleted" row).
   const visibleEvents = React.useMemo(
-    () => events.filter((e) => e.type !== "m.reaction" && e.type !== "m.progress" && !e.redacted_at),
+    // §1b — drop reactions and live (non-done) progress, but LET a done-progress
+    // event with a summary through so the completion bubble can render.
+    () =>
+      events.filter(
+        (e) =>
+          e.type !== "m.reaction" &&
+          (e.type !== "m.progress" || e.content.state === "done") &&
+          !e.redacted_at,
+      ),
     [events],
   );
 

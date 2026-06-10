@@ -123,6 +123,23 @@ export function ProfileEditor() {
     }
   };
 
+  // Clear the photo → the avatar falls back to the deterministic carbon glyph.
+  const removePhoto = async () => {
+    setBusy(true);
+    setPhotoBusy(true);
+    try {
+      const c = await api.patchMe({ profile_photo_key: "" });
+      setMe(c);
+      authStore.setCarbon(c);
+      toast.success("photo removed");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+      setPhotoBusy(false);
+    }
+  };
+
   const onUpload = async (file: File) => {
     // QA §7.5: validate size + real image MIME before presign; never relabel an
     // empty type as png.
@@ -175,7 +192,7 @@ export function ProfileEditor() {
         <div className="flex items-center gap-4">
           <div className="relative h-16 w-16 shrink-0">
             <div className={photoBusy ? "opacity-45" : ""}>
-              <IdAvatar seed={me.carbon_id} src={me.profile_photo_url} asciiSrc={me.profile_ascii_url} size={64} />
+              <IdAvatar seed={me.carbon_id} src={me.profile_photo_url} size={64} />
             </div>
             {photoBusy ? (
               <div className="absolute inset-0 grid place-items-center border border-border bg-background/55">
@@ -194,9 +211,22 @@ export function ProfileEditor() {
                 if (f) void onUpload(f);
               }}
             />
-            <Button variant="outline" size="sm" disabled={busy} onClick={() => fileRef.current?.click()}>
-              {photoBusy ? <CircleNotch className="animate-spin" /> : <UploadSimple />} change photo
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" disabled={busy} onClick={() => fileRef.current?.click()}>
+                {photoBusy ? <CircleNotch className="animate-spin" /> : <UploadSimple />} change photo
+              </Button>
+              {me.profile_photo_url ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void removePhoto()}
+                  className="text-muted-foreground"
+                >
+                  remove photo
+                </Button>
+              ) : null}
+            </div>
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               @{me.username} · {me.carbon_id}
             </p>

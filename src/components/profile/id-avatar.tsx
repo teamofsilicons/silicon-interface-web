@@ -35,7 +35,10 @@ export function IdAvatar({
     [variant, seed, family],
   );
   const style = { width: size, height: size };
-  const effective = asciiSrc || src;
+  // Show the uploaded photo as-is. (`asciiSrc` is accepted but no longer
+  // preferred — the ASCII-pfp treatment was reverted to normal photos.)
+  void asciiSrc;
+  const effective = src;
 
   // QA §7.6: presigned S3 photo URLs expire. Without an onError handler an
   // expired (or otherwise broken) URL renders the browser's broken-image icon

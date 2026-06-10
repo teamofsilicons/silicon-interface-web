@@ -641,7 +641,7 @@ function ChatPageInner() {
         </div>
         {(teams.length > 0 || hasOtherRooms) && (
           <div className="flex items-stretch border-b bg-background">
-            <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden py-6 pl-6 pr-3">
+            <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden p-3">
               {teams.map((team) => (
                 <button
                   key={team.slug}

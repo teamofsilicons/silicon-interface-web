@@ -1,5 +1,8 @@
 // Deterministic MarkSystem generator for Carbon, Silicon, and Team marks.
-// Ported from /Users/codanium/Downloads/MarkSystem (1).jsx.
+// Ported from /Users/codanium/Downloads/MarkSystem (2).jsx — v2 adds capped
+// complexity (BUDGET), a quality gate that demands real shape across up to 12
+// deterministic attempts, harder negative-space ring treatments, and a base-4
+// "seed register" strip engraved along the bottom edge.
 
 const BG = "#EAE6DD";
 const FG = "#111111";
@@ -81,18 +84,20 @@ const SPARSE = 3;
 const ALT = 4;
 const GAP = 5;
 
-function ringTreatment(next: () => number, ring: number): number {
+function ringTreatment(next: () => number, ring: number, maxRing: number): number {
   const r = next();
   if (ring <= 1) {
     if (r < 0.5) return SOLID;
     if (r < 0.85) return DIN;
     return DOUT;
   }
-  if (r < 0.26) return SOLID;
-  if (r < 0.44) return DIN;
-  if (r < 0.58) return DOUT;
-  if (r < 0.77) return SPARSE;
-  if (r < 0.9) return ALT;
+  // outer rings lean hard into negative space → marks stay minimal
+  const outer = ring / maxRing; // 0..1
+  if (r < 0.14 - outer * 0.08) return SOLID;
+  if (r < 0.3) return DIN;
+  if (r < 0.42) return DOUT;
+  if (r < 0.52) return SPARSE;
+  if (r < 0.58) return ALT;
   return GAP;
 }
 
@@ -146,33 +151,58 @@ const FAM = {
   domain: DomainCell[];
 }>;
 
-function buildGrid(text: string, fam: Family): CellType[][] {
-  const config = FAM[fam];
-  const grid: CellType[][] = Array.from({ length: config.n }, () => Array<CellType>(config.n).fill(0));
-  const source = (text || "?").slice(0, 28);
-  const chars = [...source];
-  if (chars.length === 0) return grid;
+function buildGrid(text: string, fam: Family, seedNum: number): CellType[][] {
+  const { n: N, group, domain } = FAM[fam];
+  const chars = [...(text || "")];
+  const empty = () => Array.from({ length: N }, () => Array<CellType>(N).fill(0));
+  if (chars.length === 0) return empty();
 
-  const seed = fnv(source);
-  const next = mulberry32(seed);
-  const fillBias = 0.42 + next() * 0.42;
-  const parity = next() < 0.5 ? 0 : 1;
-  const centerType: CellType = next() < 0.78 ? 1 : 0;
-  const maxRing = Math.round(Math.max(...config.domain.map((d) => d.rad)));
-  const ringTreatments = Array.from({ length: maxRing + 1 }, (_, ring) => ringTreatment(next, ring));
-  const count = Math.min(chars.length, config.domain.length);
+  const baseSeed = (fnv(text) ^ Math.imul(seedNum + 1, 0x9e3779b1)) >>> 0;
+  const maxRing = Math.round(Math.max(...domain.map((d) => d.rad)));
+  // Minimal by design — complexity is capped regardless of length.
+  const budget = Math.ceil(domain.length * 0.45);
+  const count = Math.min(chars.length, budget);
 
-  for (let i = 0; i < count; i += 1) {
-    const cell = config.domain[i];
-    const ring = Math.round(cell.rad);
-    const cellRng = mulberry32((seed ^ Math.imul(cell.r + 1, 73856093) ^ Math.imul(cell.c + 1, 19349663)) >>> 0);
-    const t = ring === 0 ? centerType : cellType(ringTreatments[ring], cell.r, cell.c, fillBias, parity, cellRng);
-    config.group.forEach(([fn, tt]) => {
-      const [r2, c2] = fn(cell.r, cell.c, config.n);
-      grid[r2][c2] = tt(t);
-    });
+  const compose = (attempt: number) => {
+    const g = empty();
+    const seed = (baseSeed ^ Math.imul(attempt, 0x85ebca6b)) >>> 0;
+    const next = mulberry32(seed);
+    const fillBias = 0.22 + next() * 0.2;
+    const parity = next() < 0.5 ? 0 : 1;
+    const centerType: CellType = next() < 0.78 ? 1 : 0;
+    const ringTreatments = Array.from({ length: maxRing + 1 }, (_, ring) => ringTreatment(next, ring, maxRing));
+
+    let outer = 0; // cells placed beyond the inner ring
+    let tris = 0; // angled (triangle) cells
+    for (let i = 0; i < count; i += 1) {
+      const cell = domain[i];
+      const ring = Math.round(cell.rad);
+      let t: CellType;
+      if (ring === 0) t = centerType;
+      else {
+        const cellRng = mulberry32((seed ^ Math.imul(cell.r + 1, 73856093) ^ Math.imul(cell.c + 1, 19349663)) >>> 0);
+        t = cellType(ringTreatments[ring], cell.r, cell.c, fillBias, parity, cellRng);
+      }
+      if (t && cell.rad > 1.6) outer += 1;
+      if (t >= 2 && t <= 5) tris += 1;
+      group.forEach(([fn, tt]) => {
+        const [r2, c2] = fn(cell.r, cell.c, N);
+        g[r2][c2] = tt(t);
+      });
+    }
+    return { g, outer, tris };
+  };
+
+  // Quality gate: a mark must have shape, not just a blob. Demand presence
+  // beyond the inner ring and at least one angled cell. Deterministic — the
+  // same text + seed always walks the same attempts.
+  const revealed = Math.max(0, count - 4);
+  const needOuter = Math.min(2, revealed);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const { g, outer, tris } = compose(attempt);
+    if (outer >= needOuter && (tris >= 1 || count <= 2)) return g;
   }
-  return grid;
+  return compose(0).g;
 }
 
 function cellMarkup(grid: CellType[][], n: number, fill: string): string {
@@ -200,6 +230,46 @@ function cellMarkup(grid: CellType[][], n: number, fill: string): string {
   return out;
 }
 
+// The seed is engraved into the mark as a base-4 strip of micro-glyphs along
+// the bottom edge (0 = square · 1 = diamond · 2 = hollow · 3 = triangle), so
+// two different seeds can never collide. The app's marks are deterministic per
+// identity, so we derive the seed from the text itself; the modulus keeps the
+// register strip short.
+function seedFor(text: string): number {
+  return fnv(text) % 4096;
+}
+
+function base4(n: number): number[] {
+  let v = Math.max(0, Math.floor(n));
+  if (v === 0) return [0];
+  const d: number[] = [];
+  while (v > 0) {
+    d.unshift(v % 4);
+    v = Math.floor(v / 4);
+  }
+  return d;
+}
+
+function seedStripMarkup(seed: number, paint: string): string {
+  const digits = base4(seed);
+  const u = 2.4; // glyph size
+  const gap = 1.5; // spacing
+  const w = digits.length * u + (digits.length - 1) * gap;
+  const x0 = (VB - w) / 2;
+  const cy = VB - 4.2;
+  let out = "";
+  digits.forEach((d, i) => {
+    const x = x0 + i * (u + gap);
+    const cx = x + u / 2;
+    const h = u / 2;
+    if (d === 0) out += `<rect x="${x}" y="${cy - h}" width="${u}" height="${u}" fill="${paint}"/>`;
+    else if (d === 1) out += `<polygon points="${cx},${cy - h} ${x + u},${cy} ${cx},${cy + h} ${x},${cy}" fill="${paint}"/>`;
+    else if (d === 2) out += `<rect x="${x + 0.35}" y="${cy - h + 0.35}" width="${u - 0.7}" height="${u - 0.7}" fill="none" stroke="${paint}" stroke-width="0.7"/>`;
+    else out += `<polygon points="${cx},${cy - h} ${x + u},${cy + h} ${x},${cy + h}" fill="${paint}"/>`;
+  });
+  return out;
+}
+
 export interface GlyphOptions {
   size?: number;
   family?: Family;
@@ -213,7 +283,8 @@ const ASCII_CELL: Record<CellType, string> = { 0: " ", 1: "█", 2: "◤", 3: "�
 
 /** The MarkSystem mark for `text` as an ASCII grid (newline-separated rows). */
 export function glyphAscii(text: string, opts: { family?: Family } = {}): string {
-  const grid = buildGrid(text || "?", opts.family ?? "carbon");
+  const src = text || "?";
+  const grid = buildGrid(src, opts.family ?? "carbon", seedFor(src));
   return grid.map((row) => row.map((t) => ASCII_CELL[t]).join("")).join("\n");
 }
 
@@ -221,8 +292,10 @@ export function glyphSvg(text: string, opts: GlyphOptions = {}): string {
   const family = opts.family ?? "carbon";
   const size = opts.size ?? 256;
   const config = FAM[family];
-  const grid = buildGrid(text || "?", family);
-  const id = `ms-${family}-${fnv(`${family}:${text || "?"}`).toString(36)}`;
+  const src = text || "?";
+  const seedNum = seedFor(src);
+  const grid = buildGrid(src, family, seedNum);
+  const id = `ms-${family}-${fnv(`${family}:${src}`).toString(36)}`;
 
   let body = "";
   if (config.theme === "split") {
@@ -231,12 +304,12 @@ export function glyphSvg(text: string, opts: GlyphOptions = {}): string {
       `<defs><clipPath id="${id}-lh"><rect x="0" y="0" width="${h}" height="${VB}"/></clipPath><clipPath id="${id}-rh"><rect x="${h}" y="0" width="${h}" height="${VB}"/></clipPath></defs>`,
       `<rect x="0" y="0" width="${h}" height="${VB}" fill="${BG}"/>`,
       `<rect x="${h}" y="0" width="${h}" height="${VB}" fill="${FG}"/>`,
-      `<g clip-path="url(#${id}-lh)">${cellMarkup(grid, config.n, FG)}</g>`,
-      `<g clip-path="url(#${id}-rh)">${cellMarkup(grid, config.n, BG)}</g>`,
+      `<g clip-path="url(#${id}-lh)">${cellMarkup(grid, config.n, FG)}${seedStripMarkup(seedNum, FG)}</g>`,
+      `<g clip-path="url(#${id}-rh)">${cellMarkup(grid, config.n, BG)}${seedStripMarkup(seedNum, BG)}</g>`,
     ].join("");
   } else {
     const dark = config.theme === "dark";
-    body = `<rect width="${VB}" height="${VB}" fill="${dark ? FG : BG}"/>${cellMarkup(grid, config.n, dark ? BG : FG)}`;
+    body = `<rect width="${VB}" height="${VB}" fill="${dark ? FG : BG}"/>${cellMarkup(grid, config.n, dark ? BG : FG)}${seedStripMarkup(seedNum, dark ? BG : FG)}`;
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VB} ${VB}" width="${size}" height="${size}" style="display:block;width:${size}px;height:${size}px">${body}</svg>`;

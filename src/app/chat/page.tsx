@@ -641,7 +641,7 @@ function ChatPageInner() {
         </div>
         {(teams.length > 0 || hasOtherRooms) && (
           <div className="flex items-stretch border-b bg-background">
-            <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden p-3">
+            <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden py-2 pl-6 pr-3">
               {teams.map((team) => (
                 <button
                   key={team.slug}
@@ -651,7 +651,7 @@ function ChatPageInner() {
                     if (viewedTeam) router.push(`/chat?team=${encodeURIComponent(team.slug)}`);
                   }}
                   className={cn(
-                    "inline-flex h-8 max-w-48 shrink-0 items-center gap-2 overflow-hidden truncate border p-0 pr-3 text-xs font-semibold leading-none transition-colors",
+                    "inline-flex max-w-48 shrink-0 items-center gap-2 overflow-hidden truncate border p-0 pr-3 text-xs font-semibold leading-none transition-colors",
                     activeTeamSlug === team.slug
                       ? "border-foreground bg-foreground text-background"
                       : "border-border bg-card text-muted-foreground hover:text-foreground",

@@ -10,20 +10,32 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [ok, setOk] = React.useState(false);
   React.useEffect(() => {
-    if (authStore.getAccess() || authStore.getSiliconKey()) {
-      setOk(true);
-      // P0-5: backfill the carbon profile when we hold a session token but have
-      // no cached profile — e.g. login navigated here before its own me()
-      // resolved. Without this the app would run with a null carbon.
-      if (authStore.getAccess() && !authStore.getCarbon()) {
-        api
-          .me()
-          .then((me) => authStore.setCarbon(me))
-          .catch(() => undefined);
-      }
-    } else {
+    let alive = true;
+    const hasAccess = authStore.getAccess();
+    if (!hasAccess && !authStore.getSiliconKey()) {
       router.replace("/auth/login");
+      return;
     }
+    // Render immediately when the carbon profile is already cached (or this is a
+    // silicon-key session with no carbon). Otherwise — a token but no cached/
+    // readable profile — fetch it FIRST and only then reveal the app, so children
+    // never flash the default "base" identity (null carbon → no name/photo) before
+    // the real one loads. (P0-5 used to render right away and backfill async,
+    // which caused that base→set flicker on every load with an empty cache.)
+    if (!hasAccess || authStore.getCarbon()) {
+      setOk(true);
+      return;
+    }
+    api
+      .me()
+      .then((me) => authStore.setCarbon(me))
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setOk(true);
+      });
+    return () => {
+      alive = false;
+    };
   }, [router]);
   if (!ok) {
     return <BootSequence />;

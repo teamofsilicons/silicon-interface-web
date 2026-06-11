@@ -5,6 +5,7 @@ import Link from "next/link";
 
 import { api } from "@/lib/api";
 
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -43,6 +44,7 @@ export default function DevPage() {
           <TabsTrigger value="voice">voice</TabsTrigger>
           <TabsTrigger value="media">media</TabsTrigger>
           <TabsTrigger value="orgs">teams</TabsTrigger>
+          <TabsTrigger value="announce">announce</TabsTrigger>
           <TabsTrigger value="cost">cost</TabsTrigger>
           <TabsTrigger value="ws">ws log</TabsTrigger>
         </TabsList>
@@ -79,6 +81,10 @@ export default function DevPage() {
           <OrgsTab />
         </TabsContent>
 
+        <TabsContent value="announce">
+          <AnnounceTab />
+        </TabsContent>
+
         <TabsContent value="cost">
           <CostTab />
         </TabsContent>
@@ -92,6 +98,50 @@ export default function DevPage() {
 }
 
 // ---- Tabs ----
+function AnnounceTab() {
+  const [title, setTitle] = React.useState("");
+  const [body, setBody] = React.useState("");
+  const [url, setUrl] = React.useState("");
+  const [kind, setKind] = React.useState<"announcement" | "update">("announcement");
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <EndpointCard
+        title="push announcement"
+        method="POST"
+        path="/api/v1/announcements"
+        description="Broadcasts to every client: the bell inbox, desktop notifications on the web, and system notifications on android. Staff only."
+        controls={
+          <div className="grid gap-2">
+            <Input placeholder="title" value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Input placeholder="body (optional)" value={body} onChange={(e) => setBody(e.target.value)} />
+            <Input placeholder="url (optional)" value={url} onChange={(e) => setUrl(e.target.value)} />
+            <div className="flex gap-2">
+              {(["announcement", "update"] as const).map((k) => (
+                <Button
+                  key={k}
+                  size="sm"
+                  variant={kind === k ? "default" : "outline"}
+                  onClick={() => setKind(k)}
+                >
+                  {k}
+                </Button>
+              ))}
+            </div>
+          </div>
+        }
+        run={() => api.pushAnnouncement({ title, body, url, kind })}
+      />
+      <EndpointCard
+        title="list announcements"
+        method="GET"
+        path="/api/v1/announcements"
+        controls={null}
+        run={() => api.announcements()}
+      />
+    </div>
+  );
+}
+
 function ProfileTab() {
   return (
     <div className="grid gap-4 lg:grid-cols-2">

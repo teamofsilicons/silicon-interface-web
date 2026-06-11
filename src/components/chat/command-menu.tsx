@@ -74,20 +74,8 @@ export function CommandMenu({ rooms, isStaff }: { rooms: Room[]; isStaff?: boole
         go: () => router.push(`/chat?room=${encodeURIComponent(r.room_id)}`),
       };
     });
-    if (isStaff) {
-      list.push({
-        id: "dev",
-        label: "dev console",
-        hint: "/dev",
-        seed: "dev",
-        photoUrl: null,
-        asciiUrl: null,
-        family: "team",
-        go: () => router.push("/dev"),
-      });
-    }
     return list;
-  }, [rooms, isStaff, router]);
+  }, [rooms, router]);
 
   const filtered = React.useMemo(
     () => entries.filter((e) => fuzzy(q, `${e.label} ${e.hint}`)).slice(0, 50),
@@ -138,7 +126,7 @@ export function CommandMenu({ rooms, isStaff }: { rooms: Room[]; isStaff?: boole
                 setOpen(false);
               }
             }}
-            placeholder="jump to a room, person, or dev…"
+            placeholder="jump to a room or person…"
             className="h-11 w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
           <kbd className="label-mono shrink-0 border px-1.5 py-0.5 text-[10px]">esc</kbd>

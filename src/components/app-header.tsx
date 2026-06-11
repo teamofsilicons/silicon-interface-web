@@ -11,8 +11,8 @@ import { IdAvatar } from "@/components/profile/id-avatar";
 
 interface Props {
   // Retained for layout call-site compatibility; the navbar no longer hosts the
-  // chat/dev/settings tabs, so this is intentionally unused.
-  active?: "chat" | "dev" | "settings";
+  // chat/settings tabs, so this is intentionally unused.
+  active?: "chat" | "settings";
 }
 
 export function AppHeader(_: Props) {

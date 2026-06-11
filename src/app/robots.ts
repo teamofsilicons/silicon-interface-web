@@ -7,7 +7,7 @@ export default function robots(): MetadataRoute.Robots {
   return {
     rules: {
       userAgent: "*",
-      disallow: ["/dev", "/dev/", "/chat", "/auth", "/onboarding", "/settings"],
+      disallow: ["/chat", "/auth", "/onboarding", "/settings"],
     },
   };
 }

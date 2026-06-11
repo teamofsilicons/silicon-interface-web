@@ -468,8 +468,6 @@ export const api = {
 
   // -------- announcements --------
   announcements: () => call<Announcement[]>("GET", "/api/v1/announcements"),
-  pushAnnouncement: (data: { title: string; body?: string; url?: string; kind?: "announcement" | "update" }) =>
-    call<Announcement>("POST", "/api/v1/announcements", data),
 
   // -------- cost (staff) --------
   costSummary: () =>

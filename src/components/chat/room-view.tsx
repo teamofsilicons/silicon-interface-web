@@ -5,6 +5,7 @@ import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { dayLabel } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent, playAckTick, vibrate } from "@/lib/sounds";
@@ -418,15 +419,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       if (incoming.type === "m.progress") {
         const state = (incoming.content.state as ProgressState) || "thinking";
         if (state === "done") {
+          // Done just clears the live ProgressLine — no timeline row. The
+          // silicon's own follow-up message carries the outcome.
           setActiveProgress(null);
-          // §1b — a finished task that carries a summary lands as an inline
-          // "Silicon finished" completion bubble (see message-bubble + the
-          // visibleEvents filter, which lets done-progress events through).
-          if (incoming.content.summary) {
-            setEvents((prev) =>
-              prev.some((e) => e.event_id === incoming.event_id) ? prev : [...prev, { ...incoming }],
-            );
-          }
         } else {
           setActiveProgress({
             roomId: room.room_id,
@@ -829,14 +824,14 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // Visible events drop reactions (they render as chips under the target) and
   // deleted/redacted messages (hidden entirely — no "message deleted" row).
   const visibleEvents = React.useMemo(
-    // §1b — drop reactions and live (non-done) progress, but LET a done-progress
-    // event with a summary through so the completion bubble can render.
+    // ALL progress events stay out of the timeline (live ones render as the
+    // transient ProgressLine instead). Letting done-progress through used to
+    // render a "Silicon finished" row — and, worse, it sat between two of a
+    // silicon's messages and broke the (sender, minute) run, so avatars showed
+    // on some of its messages and not others.
     () =>
       events.filter(
-        (e) =>
-          e.type !== "m.reaction" &&
-          (e.type !== "m.progress" || e.content.state === "done") &&
-          !e.redacted_at,
+        (e) => e.type !== "m.reaction" && e.type !== "m.progress" && !e.redacted_at,
       ),
     [events],
   );
@@ -1270,9 +1265,22 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                 a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
               const showSender = !sameAs(prev);
               const showTime = !sameAs(next);
+              // Day boundary uses real Dates (not an ISO slice) so the band
+              // lands on the LOCAL calendar day, not the UTC one.
+              const localDay = (iso: string) => {
+                const d = new Date(iso);
+                return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+              };
+              const newDay =
+                !prev || localDay(prev.created_at) !== localDay(e.created_at);
               return (
+                <React.Fragment key={e._clientId ?? e.event_id}>
+                {newDay && (
+                  <div className="py-1 text-center text-[10px] text-muted-foreground">
+                    {dayLabel(e.created_at)}
+                  </div>
+                )}
                 <MessageBubble
-                  key={e._clientId ?? e.event_id}
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
                   myHandle={myUsername}
@@ -1295,6 +1303,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   onForward={readOnly ? undefined : onForward}
                   onDelete={readOnly ? undefined : onSelfDelete}
                 />
+                </React.Fragment>
               );
             })
           )}

@@ -21,7 +21,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 
 import { downloadAsset } from "./media-previewer";
@@ -155,20 +155,6 @@ export function MessageBubble({
       </div>
     );
   }
-  if (event.type === "m.progress" && event.content.state === "done") {
-    return (
-      <div className="my-2 flex items-start gap-2">
-        <Sparkle className="mt-1 h-4 w-4 text-primary" />
-        <div className="text-sm">
-          <div className="font-medium">Silicon finished</div>
-          {event.content.summary ? (
-            <div className="text-muted-foreground">{String(event.content.summary)}</div>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-
   const redacted = event.redacted_at !== null;
   // §1.3 — only text/tts can stream; never show the pill for non-streamable
   // types whose `is_final` happens to be false (e.g. a media event).
@@ -603,7 +589,8 @@ function StreamingPill({ body }: { body: string }) {
   return <span className="text-primary">streaming…</span>;
 }
 
-// §4b — hovering a relative time ("2m") reveals the absolute local time inline.
+// §4b — hovering the timestamp ("5 mins ago" / "2:07 PM") reveals the full
+// absolute date+time inline.
 function HoverTime({ iso }: { iso: string }) {
   const [hover, setHover] = React.useState(false);
   const absolute = React.useMemo(() => {
@@ -623,7 +610,7 @@ function HoverTime({ iso }: { iso: string }) {
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      {hover && absolute ? absolute : relativeTime(iso)}
+      {hover && absolute ? absolute : messageTime(iso)}
     </span>
   );
 }

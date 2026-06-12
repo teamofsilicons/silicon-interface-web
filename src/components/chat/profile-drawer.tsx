@@ -79,11 +79,18 @@ export function ProfileDrawer({
   }, [focusSender, events, currentUsername, room.peers]);
 
   const [profile, setProfile] = React.useState<CarbonPublic | SiliconPublic | null>(null);
+  const [profileLoading, setProfileLoading] = React.useState(false);
   const [tab, setTab] = React.useState<TabId>("all");
 
   React.useEffect(() => {
     if (!open || !counterpart) return;
     let alive = true;
+    // Drop the previous profile up front: keeping it while the new fetch is in
+    // flight flashed the *last viewed* person's photo, and rendering the
+    // seed-glyph placeholder flashed a wrong-looking mark before the real
+    // photo arrived. Show an explicit loading state instead of either.
+    setProfile(null);
+    setProfileLoading(true);
     (async () => {
       try {
         const p =
@@ -93,6 +100,8 @@ export function ProfileDrawer({
         if (alive) setProfile(p);
       } catch {
         /* ignore — drawer falls back to handle-only display */
+      } finally {
+        if (alive) setProfileLoading(false);
       }
     })();
     return () => {
@@ -170,7 +179,20 @@ export function ProfileDrawer({
             border. Stacking another bordered card around it was the "two
             bounding boxes" the user noticed. Single box now. */}
         <div className="flex flex-col items-center gap-3">
-          <IdAvatar seed={handle || "?"} src={photoUrl} asciiSrc={asciiUrl} size={132} family={counterpart?.kind ?? "carbon"} />
+          {profileLoading && !contact?.photo_url ? (
+            // While the profile (and its photo URL) is in flight, say so —
+            // don't render the seed glyph only to swap it for the photo.
+            <div
+              style={{ width: 132, height: 132 }}
+              className="grid shrink-0 animate-pulse place-items-center border bg-muted"
+              role="status"
+              aria-label="loading profile"
+            >
+              <span className="label-mono text-[10px] text-muted-foreground">loading…</span>
+            </div>
+          ) : (
+            <IdAvatar seed={handle || "?"} src={photoUrl} asciiSrc={asciiUrl} size={132} family={counterpart?.kind ?? "carbon"} />
+          )}
           <div className="text-center">
             <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
             {profile && (

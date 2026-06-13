@@ -283,42 +283,25 @@ function RoomRow({
     (g) => g.roomIds.includes(r.room_id),
   );
 
-  // Double-tap opens the chat's options menu (group actions). A single tap
-  // still opens the chat — we disambiguate with a short timer so the first of
-  // the two taps doesn't navigate away before the double-tap registers.
+  // A right-click / two-finger tap (the native `contextmenu` gesture) opens the
+  // chat's options menu (group actions). A normal tap still just opens the chat.
   const [menuOpen, setMenuOpen] = React.useState(false);
-  const clickTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  React.useEffect(
-    () => () => {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-    },
-    [],
-  );
-  const handleClick = () => {
-    if (!groupControls) {
-      onSelect(r.room_id);
-      return;
-    }
-    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-    clickTimerRef.current = setTimeout(() => {
-      onSelect(r.room_id);
-      clickTimerRef.current = null;
-    }, 220);
-  };
-  const handleDoubleClick = () => {
-    if (clickTimerRef.current) {
-      clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
-    }
-    setMenuOpen(true);
-  };
 
   return (
-    <li className="relative">
+    <li
+      className="relative"
+      onContextMenu={
+        groupControls
+          ? (e) => {
+              e.preventDefault();
+              setMenuOpen(true);
+            }
+          : undefined
+      }
+    >
       <button
         type="button"
-        onClick={handleClick}
-        onDoubleClick={groupControls ? handleDoubleClick : undefined}
+        onClick={() => onSelect(r.room_id)}
         onDragEnter={(e) => {
           // Only the file-drag case matters — text/link drags from
           // within the page would otherwise also fire this.
@@ -435,9 +418,9 @@ function RoomRow({
           </div>
         </div>
       </button>
-      {/* Chat options — opened by double-tapping the row (no hover affordance).
-          The trigger is an invisible anchor at the row's bottom edge so the
-          menu drops below the row; open state is driven by handleDoubleClick. */}
+      {/* Chat options — opened by right-click / two-finger tap (contextmenu),
+          no hover affordance. The trigger is an invisible anchor at the row's
+          bottom edge so the menu drops below the row; open state is controlled. */}
       {groupControls ? (
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>

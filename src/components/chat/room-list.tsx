@@ -266,9 +266,12 @@ function GroupRow({
       <button
         type="button"
         onClick={() => controls.onOpenGroup(group.id)}
-        className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 py-4 pl-6 pr-4 text-left transition-colors hover:bg-secondary/60"
+        className="grid w-full grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 py-4 pl-6 pr-4 text-left transition-colors hover:bg-secondary/60"
       >
-        <FolderSimple className="h-5 w-5 shrink-0 text-muted-foreground" weight="fill" />
+        {/* 36px tile mirrors the chat-row avatar footprint so names line up. */}
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center border border-border bg-secondary">
+          <FolderSimple className="h-5 w-5 text-muted-foreground" weight="fill" />
+        </span>
         <span className="min-w-0">
           <span className="block truncate text-[15px] font-semibold">{group.name}</span>
           <span className="block truncate text-xs text-muted-foreground">

@@ -2,12 +2,11 @@
 
 import * as React from "react";
 import {
-  CaretDown,
-  CaretRight,
+  CaretLeft,
   Check,
   Checks,
-  DotsThree,
   Eye,
+  FolderSimple,
   FolderSimplePlus,
   Microphone,
   PencilSimple,
@@ -42,9 +41,14 @@ export interface GroupSection {
 /** Callbacks for editing personal chat groups; only supplied when grouping is
  *  active (a team tab is selected). */
 export interface GroupControls {
-  /** all groups for the active team — drives the per-row "Move to group" menu */
+  /** all groups for the active team — drives the per-row "Add to group" menu */
   groups: ChatGroup[];
-  onToggleCollapse: (groupId: string) => void;
+  /** the group currently drilled into (its chats fill the list), or null */
+  openGroupId: string | null;
+  /** drill into a group's chats */
+  onOpenGroup: (groupId: string) => void;
+  /** leave the drilled-in group, back to the group list */
+  onCloseGroup: () => void;
   onRename: (groupId: string) => void;
   onDelete: (groupId: string) => void;
   /** move a room into a group, or out of every group when groupId is null */
@@ -96,14 +100,22 @@ export function RoomList({
   groupControls,
 }: Props) {
   const grouped = !!groupControls && !!groupSections;
-  const visibleCount = grouped
-    ? groupSections!.reduce((n, s) => n + s.rooms.length, 0) + (ungroupedRooms?.length ?? 0)
-    : rooms.length;
+  // The group currently drilled into (nested view of just its chats), if any.
+  const openSection =
+    grouped && groupControls!.openGroupId
+      ? groupSections!.find((s) => s.group.id === groupControls!.openGroupId) ?? null
+      : null;
 
   // Empty state lives outside the ScrollArea so it can flex-center within
   // the remaining sidebar height instead of sitting at the top with manual
-  // py-16 padding.
-  if (!loading && visibleCount === 0 && (!grouped || groupSections!.length === 0)) {
+  // py-16 padding. Only the top level (no groups + no chats) shows it — a
+  // drilled-in empty group keeps its back header.
+  const topLevelEmpty = grouped
+    ? !openSection &&
+      groupSections!.length === 0 &&
+      (ungroupedRooms?.length ?? 0) === 0
+    : rooms.length === 0;
+  if (!loading && topLevelEmpty) {
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
         <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-28 text-center">
@@ -130,43 +142,49 @@ export function RoomList({
     <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
       <ScrollArea className="flex-1">
         {grouped ? (
-          <div>
-            {groupSections!.map(({ group, rooms: groupRooms }) => (
-              <section key={group.id}>
-                <GroupHeader
-                  group={group}
-                  count={groupRooms.length}
-                  controls={groupControls!}
-                />
-                {!group.collapsed && (
-                  // 2px bottom border marks where the group ends, distinct from
-                  // the 1px dividers between individual chats.
-                  <div className="border-b-2 border-foreground/15">
-                    <ul className="divide-y">
-                      {groupRooms.map((r) => (
-                        <RoomRow key={r.room_id} room={r} {...rowProps} />
-                      ))}
-                      {groupRooms.length === 0 && (
-                        <li className="px-6 py-2 text-xs text-muted-foreground">
-                          No chats in this group yet.
-                        </li>
-                      )}
-                    </ul>
-                  </div>
+          openSection ? (
+            // Nested view: just the chats of the drilled-in group, with a
+            // back header to return to the group list.
+            <div>
+              <GroupBackHeader group={openSection.group} controls={groupControls!} />
+              <ul className="divide-y">
+                {openSection.rooms.map((r) => (
+                  <RoomRow key={r.room_id} room={r} {...rowProps} />
+                ))}
+                {openSection.rooms.length === 0 && (
+                  <li className="px-6 py-3 text-xs text-muted-foreground">
+                    No chats in this group yet. Right-click a chat to add one.
+                  </li>
                 )}
-              </section>
-            ))}
-            <ul className="divide-y">
-              {loading && (
-                <li>
-                  <GlyphSkeleton />
-                </li>
+              </ul>
+            </div>
+          ) : (
+            // Top level: group rows (open into their own view) then ungrouped chats.
+            <div>
+              {groupSections!.length > 0 && (
+                <ul className="divide-y border-b">
+                  {groupSections!.map(({ group, rooms: groupRooms }) => (
+                    <GroupRow
+                      key={group.id}
+                      group={group}
+                      rooms={groupRooms}
+                      controls={groupControls!}
+                    />
+                  ))}
+                </ul>
               )}
-              {(ungroupedRooms ?? []).map((r) => (
-                <RoomRow key={r.room_id} room={r} {...rowProps} />
-              ))}
-            </ul>
-          </div>
+              <ul className="divide-y">
+                {loading && (
+                  <li>
+                    <GlyphSkeleton />
+                  </li>
+                )}
+                {(ungroupedRooms ?? []).map((r) => (
+                  <RoomRow key={r.room_id} room={r} {...rowProps} />
+                ))}
+              </ul>
+            </div>
+          )
         ) : (
           <ul className="divide-y">
             {loading && (
@@ -184,51 +202,134 @@ export function RoomList({
   );
 }
 
-function GroupHeader({
+/** Right-click rename/delete menu for a group, anchored at the click point. */
+function GroupOptionsMenu({
   group,
-  count,
+  controls,
+  open,
+  onOpenChange,
+  anchor,
+}: {
+  group: ChatGroup;
+  controls: GroupControls;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  anchor: { x: number; y: number };
+}) {
+  return (
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
+      <DropdownMenuTrigger asChild>
+        <span
+          aria-hidden
+          className="pointer-events-none fixed h-0 w-0"
+          style={{ left: anchor.x, top: anchor.y }}
+        />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="right" align="start" sideOffset={2}>
+        <DropdownMenuItem onSelect={() => controls.onRename(group.id)}>
+          <PencilSimple className="mr-2 h-4 w-4" /> Rename group
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => controls.onDelete(group.id)}
+          className="text-destructive hover:text-destructive focus:text-destructive"
+        >
+          <Trash className="mr-2 h-4 w-4" /> Delete group
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** A group entry in the top-level list — a taller row that opens the group's
+ *  own chat view on click, with an unread badge pinned to the right. */
+function GroupRow({
+  group,
+  rooms,
   controls,
 }: {
   group: ChatGroup;
-  count: number;
+  rooms: Room[];
   controls: GroupControls;
 }) {
+  const unread = rooms.reduce((n, r) => n + (r.unread_count ?? (r.unread ? 1 : 0)), 0);
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
   return (
-    <div className="flex items-stretch border-b bg-secondary/40">
+    <li
+      className="relative"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setAnchor({ x: e.clientX, y: e.clientY });
+        setMenuOpen(true);
+      }}
+    >
       <button
         type="button"
-        onClick={() => controls.onToggleCollapse(group.id)}
-        className="flex min-w-0 flex-1 items-center gap-2 py-2 pl-4 pr-2 text-left transition-colors hover:bg-secondary/70"
+        onClick={() => controls.onOpenGroup(group.id)}
+        className="grid w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-3 py-4 pl-6 pr-4 text-left transition-colors hover:bg-secondary/60"
       >
-        {group.collapsed ? (
-          <CaretRight className="h-3.5 w-3.5 shrink-0 opacity-60" />
-        ) : (
-          <CaretDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
-        )}
-        <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-wide">
-          {group.name}
+        <FolderSimple className="h-5 w-5 shrink-0 text-muted-foreground" weight="fill" />
+        <span className="min-w-0">
+          <span className="block truncate text-[15px] font-semibold">{group.name}</span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {rooms.length} chat{rooms.length === 1 ? "" : "s"}
+          </span>
         </span>
-        <span className="shrink-0 text-[10px] text-muted-foreground">{count}</span>
-      </button>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          aria-label={`${group.name} group options`}
-          className="grid w-9 shrink-0 place-items-center text-muted-foreground outline-none transition-colors hover:bg-secondary/70 hover:text-foreground"
-        >
-          <DotsThree className="h-4 w-4" weight="bold" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => controls.onRename(group.id)}>
-            <PencilSimple className="mr-2 h-4 w-4" /> Rename group
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => controls.onDelete(group.id)}
-            className="text-destructive hover:text-destructive focus:text-destructive"
+        {/* Rightmost: unread badge (only when the group has unread chats). */}
+        {unread > 0 ? (
+          <span
+            className="inline-flex h-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-none text-primary-foreground"
+            aria-label={`${unread} unread message${unread === 1 ? "" : "s"}`}
           >
-            <Trash className="mr-2 h-4 w-4" /> Delete group
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+            {unread > 99 ? "99+" : unread}
+          </span>
+        ) : (
+          <span />
+        )}
+      </button>
+      <GroupOptionsMenu
+        group={group}
+        controls={controls}
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+        anchor={anchor}
+      />
+    </li>
+  );
+}
+
+/** Header shown atop a drilled-in group's chats; clicking it goes back. */
+function GroupBackHeader({ group, controls }: { group: ChatGroup; controls: GroupControls }) {
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
+  return (
+    <div
+      className="relative border-b bg-secondary/40"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setAnchor({ x: e.clientX, y: e.clientY });
+        setMenuOpen(true);
+      }}
+    >
+      <button
+        type="button"
+        onClick={controls.onCloseGroup}
+        className="flex w-full items-center gap-2 py-3 pl-4 pr-4 text-left transition-colors hover:bg-secondary/70"
+      >
+        <CaretLeft className="h-4 w-4 shrink-0" />
+        <FolderSimple className="h-4 w-4 shrink-0 text-muted-foreground" weight="fill" />
+        <span className="min-w-0 truncate text-sm font-semibold">{group.name}</span>
+        <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+          back
+        </span>
+      </button>
+      <GroupOptionsMenu
+        group={group}
+        controls={controls}
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+        anchor={anchor}
+      />
     </div>
   );
 }

@@ -26,7 +26,6 @@ import {
   loadGroups,
   renameGroup,
   saveGroups,
-  setGroupCollapsed,
   type ChatGroup,
 } from "@/lib/chat-groups";
 import { cn } from "@/lib/utils";
@@ -177,6 +176,8 @@ function ChatPageInner() {
   // Personal, per-user chat groups ("folders" within a team). Stored locally
   // keyed by carbon_id; never shared. Loaded/persisted like the rooms cache.
   const [groups, setGroups] = React.useState<ChatGroup[]>([]);
+  // Which group is drilled into (nested view of just its chats), or null.
+  const [openGroupId, setOpenGroupId] = React.useState<string | null>(null);
   // Pending create/rename prompt: { mode, groupId?, seedRoomId? }.
   const [groupPrompt, setGroupPrompt] = React.useState<
     | { mode: "create"; seedRoomId?: string }
@@ -630,21 +631,28 @@ function ChatPageInner() {
     if (!groupingActive || !activeTeamSlug) return undefined;
     return {
       groups: teamGroups,
-      onToggleCollapse: (groupId: string) =>
-        setGroups((prev) =>
-          setGroupCollapsed(prev, groupId, !prev.find((g) => g.id === groupId)?.collapsed),
-        ),
+      openGroupId,
+      onOpenGroup: (groupId: string) => setOpenGroupId(groupId),
+      onCloseGroup: () => setOpenGroupId(null),
       onRename: (groupId: string) => {
         const g = groups.find((x) => x.id === groupId);
         if (g) setGroupPrompt({ mode: "rename", groupId, current: g.name });
       },
-      onDelete: (groupId: string) => setGroups((prev) => deleteGroup(prev, groupId)),
+      onDelete: (groupId: string) => {
+        setGroups((prev) => deleteGroup(prev, groupId));
+        setOpenGroupId((cur) => (cur === groupId ? null : cur));
+      },
       onMoveRoom: (roomId: string, groupId: string | null) =>
         setGroups((prev) => assignRoomToGroup(prev, activeTeamSlug, roomId, groupId)),
       onCreateGroupWithRoom: (roomId: string) =>
         setGroupPrompt({ mode: "create", seedRoomId: roomId }),
     };
-  }, [groupingActive, activeTeamSlug, teamGroups, groups]);
+  }, [groupingActive, activeTeamSlug, teamGroups, groups, openGroupId]);
+
+  // Leaving a team (or its grouping context) closes any drilled-in group.
+  React.useEffect(() => {
+    setOpenGroupId(null);
+  }, [activeTeamSlug]);
 
   const confirmGroupPrompt = React.useCallback(
     (name: string) => {

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { FolderSimplePlus, GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -19,6 +19,16 @@ import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
 import { loadCachedRooms, saveCachedRooms } from "@/lib/sidebar-cache";
+import {
+  assignRoomToGroup,
+  createGroup,
+  deleteGroup,
+  loadGroups,
+  renameGroup,
+  saveGroups,
+  setGroupCollapsed,
+  type ChatGroup,
+} from "@/lib/chat-groups";
 import { cn } from "@/lib/utils";
 
 // Message types that count toward the unread badge + drive the sidebar
@@ -85,7 +95,8 @@ function notificationDisplay(room: Room, contacts: Map<string, Contact>) {
   };
 }
 
-import { RoomList } from "@/components/chat/room-list";
+import { RoomList, type GroupSection } from "@/components/chat/room-list";
+import { GroupNameDialog } from "@/components/chat/group-name-dialog";
 import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
 import { CommandMenu } from "@/components/chat/command-menu";
@@ -163,6 +174,15 @@ function ChatPageInner() {
   // Hover-to-switch while dragging a file over a sidebar row.
   const [hoverRoomId, setHoverRoomId] = React.useState<string | null>(null);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Personal, per-user chat groups ("folders" within a team). Stored locally
+  // keyed by carbon_id; never shared. Loaded/persisted like the rooms cache.
+  const [groups, setGroups] = React.useState<ChatGroup[]>([]);
+  // Pending create/rename prompt: { mode, groupId?, seedRoomId? }.
+  const [groupPrompt, setGroupPrompt] = React.useState<
+    | { mode: "create"; seedRoomId?: string }
+    | { mode: "rename"; groupId: string; current: string }
+    | null
+  >(null);
 
   // ---- WS frame fan-out (QA §2.1) ----
   // Every consumer — this page's sidebar / sound / notification logic AND the
@@ -236,6 +256,9 @@ function ChatPageInner() {
     selectedRef.current = selected;
   }, [selected]);
   const roomsCacheOwnerRef = React.useRef<string | null>(null);
+  // Guards group persistence so the initial load for a new owner doesn't echo
+  // back an empty array before the stored groups are read in.
+  const groupsOwnerRef = React.useRef<string | null>(null);
 
   const clearHover = React.useCallback(() => {
     if (hoverTimerRef.current) {
@@ -344,6 +367,21 @@ function ChatPageInner() {
     if (!ownerId || roomsCacheOwnerRef.current !== ownerId) return;
     saveCachedRooms(ownerId, rooms);
   }, [ownerId, rooms]);
+
+  // Load this user's personal chat groups; persist on every change (but only
+  // once the current owner's groups have been read, mirroring the rooms cache).
+  React.useEffect(() => {
+    groupsOwnerRef.current = null;
+    setGroups(ownerId ? loadGroups(ownerId) : []);
+    queueMicrotask(() => {
+      groupsOwnerRef.current = ownerId;
+    });
+  }, [ownerId]);
+
+  React.useEffect(() => {
+    if (!ownerId || groupsOwnerRef.current !== ownerId) return;
+    saveGroups(ownerId, groups);
+  }, [ownerId, groups]);
 
   // Tick every 15s so the sidebar's relative timestamps keep advancing
   // ("just now" → "1m" → "2m") without a network fetch — purely a re-render.
@@ -566,6 +604,70 @@ function ChatPageInner() {
     return list;
   }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers]);
 
+  // Personal grouping applies only inside a real team tab and only when not
+  // searching — the Others tab and any search fall back to the flat list.
+  const groupingActive = !!activeTeamSlug && sidebarQuery.trim() === "";
+
+  const { groupSections, ungroupedRooms, teamGroups } = React.useMemo(() => {
+    if (!groupingActive || !activeTeamSlug) {
+      return { groupSections: undefined, ungroupedRooms: undefined, teamGroups: [] as ChatGroup[] };
+    }
+    const mine = groups
+      .filter((g) => g.teamSlug === activeTeamSlug)
+      .sort((a, b) => a.order - b.order);
+    const claimed = new Set<string>();
+    const sections: GroupSection[] = mine.map((group) => {
+      const set = new Set(group.roomIds);
+      const roomsIn = filtered.filter((r) => set.has(r.room_id));
+      roomsIn.forEach((r) => claimed.add(r.room_id));
+      return { group, rooms: roomsIn };
+    });
+    const ungrouped = filtered.filter((r) => !claimed.has(r.room_id));
+    return { groupSections: sections, ungroupedRooms: ungrouped, teamGroups: mine };
+  }, [groupingActive, activeTeamSlug, groups, filtered]);
+
+  const groupControls = React.useMemo(() => {
+    if (!groupingActive || !activeTeamSlug) return undefined;
+    return {
+      groups: teamGroups,
+      onToggleCollapse: (groupId: string) =>
+        setGroups((prev) =>
+          setGroupCollapsed(prev, groupId, !prev.find((g) => g.id === groupId)?.collapsed),
+        ),
+      onRename: (groupId: string) => {
+        const g = groups.find((x) => x.id === groupId);
+        if (g) setGroupPrompt({ mode: "rename", groupId, current: g.name });
+      },
+      onDelete: (groupId: string) => setGroups((prev) => deleteGroup(prev, groupId)),
+      onMoveRoom: (roomId: string, groupId: string | null) =>
+        setGroups((prev) => assignRoomToGroup(prev, activeTeamSlug, roomId, groupId)),
+      onCreateGroupWithRoom: (roomId: string) =>
+        setGroupPrompt({ mode: "create", seedRoomId: roomId }),
+    };
+  }, [groupingActive, activeTeamSlug, teamGroups, groups]);
+
+  const confirmGroupPrompt = React.useCallback(
+    (name: string) => {
+      if (!groupPrompt) return;
+      if (groupPrompt.mode === "rename") {
+        setGroups((prev) => renameGroup(prev, groupPrompt.groupId, name));
+        return;
+      }
+      // create — only valid inside a team; seed the new group with a room when
+      // the prompt was opened from a row's "New group…".
+      if (!activeTeamSlug) return;
+      const seedRoomId = groupPrompt.seedRoomId;
+      setGroups((prev) => {
+        const withGroup = createGroup(prev, activeTeamSlug, name);
+        const created = withGroup[withGroup.length - 1];
+        return seedRoomId
+          ? assignRoomToGroup(withGroup, activeTeamSlug, seedRoomId, created.id)
+          : withGroup;
+      });
+    },
+    [groupPrompt, activeTeamSlug],
+  );
+
   // §7c — vim-style room navigation: j/k move through the visible list (and
   // open the room), when focus isn't in a text field. Enter is handled by the
   // list/composer; this is the quick keyboard sweep.
@@ -698,18 +800,29 @@ function ChatPageInner() {
               )}
             </div>
             {activeTeam ? (
-              <button
-                type="button"
-                aria-label={`${activeTeam.name} team workspace`}
-                title={`${activeTeam.name} team workspace`}
-                onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
-                className={cn(
-                  "grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent",
-                  viewedTeam?.slug === activeTeam.slug && "bg-secondary",
-                )}
-              >
-                <GearSix className="h-4 w-4" />
-              </button>
+              <>
+                <button
+                  type="button"
+                  aria-label="new chat group"
+                  title="new chat group"
+                  onClick={() => setGroupPrompt({ mode: "create" })}
+                  className="grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent"
+                >
+                  <FolderSimplePlus className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`${activeTeam.name} team workspace`}
+                  title={`${activeTeam.name} team workspace`}
+                  onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
+                  className={cn(
+                    "grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent",
+                    viewedTeam?.slug === activeTeam.slug && "bg-secondary",
+                  )}
+                >
+                  <GearSix className="h-4 w-4" />
+                </button>
+              </>
             ) : null}
           </div>
         )}
@@ -729,6 +842,9 @@ function ChatPageInner() {
           workingRoomIds={workingRoomIds}
           onRoomDragEnter={onRoomDragEnter}
           onRoomDragLeave={onRoomDragLeave}
+          groupSections={groupSections}
+          ungroupedRooms={ungroupedRooms}
+          groupControls={groupControls}
         />
       </aside>
 
@@ -762,6 +878,17 @@ function ChatPageInner() {
           setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
           router.push(`/chat?room=${room.room_id}`);
         }}
+      />
+
+      <GroupNameDialog
+        open={!!groupPrompt}
+        title={groupPrompt?.mode === "rename" ? "Rename group" : "New group"}
+        initialValue={groupPrompt?.mode === "rename" ? groupPrompt.current : ""}
+        confirmLabel={groupPrompt?.mode === "rename" ? "Rename" : "Create"}
+        onOpenChange={(open) => {
+          if (!open) setGroupPrompt(null);
+        }}
+        onConfirm={confirmGroupPrompt}
       />
     </>
   );

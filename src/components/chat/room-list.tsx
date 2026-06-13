@@ -286,15 +286,26 @@ function GroupRow({
         onClick={() => controls.onOpenGroup(group.id)}
         className="grid w-full grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 py-4 pl-6 pr-4 text-left transition-colors hover:bg-secondary/60"
       >
-        {/* 36px tile mirrors the chat-row avatar footprint so names line up. */}
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center border border-border bg-secondary">
-          <FolderSimple className="h-5 w-5 text-muted-foreground" weight="fill" />
+        {/* Dark container block — echoes the silicon logo squares and the
+            terminal "inverted block" motif, distinct from the light chat
+            avatars while keeping the 36px footprint so names line up. */}
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center bg-foreground text-background">
+          <FolderSimple className="h-[18px] w-[18px]" weight="fill" />
         </span>
         <span className="min-w-0">
-          <span className="block truncate text-[15px] font-semibold">{group.name}</span>
-          <span className="block truncate text-xs text-muted-foreground">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[15px] font-semibold">{group.name}</span>
+            {group.source === "team" ? (
+              <span
+                className="label-mono shrink-0 border border-border px-1 leading-[1.5]"
+                style={{ fontSize: "9px", letterSpacing: "0.14em" }}
+              >
+                team
+              </span>
+            ) : null}
+          </span>
+          <span className="label-mono mt-0.5 block truncate" style={{ fontSize: "10px" }}>
             {rooms.length} chat{rooms.length === 1 ? "" : "s"}
-            {group.source === "team" ? " · team" : ""}
           </span>
         </span>
         {/* Rightmost: unread badge (only when the group has unread chats). */}
@@ -343,12 +354,14 @@ function GroupBackHeader({ group, controls }: { group: DisplayFolder; controls: 
       <button
         type="button"
         onClick={controls.onCloseGroup}
-        className="flex w-full items-center gap-2 py-3 pl-4 pr-4 text-left transition-colors hover:bg-secondary/70"
+        className="flex w-full items-center gap-2.5 py-3 pl-4 pr-4 text-left transition-colors hover:bg-secondary/70"
       >
         <CaretLeft className="h-4 w-4 shrink-0" />
-        <FolderSimple className="h-4 w-4 shrink-0 text-muted-foreground" weight="fill" />
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center bg-foreground text-background">
+          <FolderSimple className="h-3.5 w-3.5" weight="fill" />
+        </span>
         <span className="min-w-0 truncate text-sm font-semibold">{group.name}</span>
-        <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span className="label-mono ml-auto shrink-0" style={{ fontSize: "10px" }}>
           {group.source === "team" ? "team · back" : "back"}
         </span>
       </button>

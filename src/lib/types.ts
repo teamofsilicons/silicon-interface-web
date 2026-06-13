@@ -188,6 +188,12 @@ export interface Team {
   trust_chart: Record<string, unknown>;
   tags: unknown[];
   notes: string;
+  /** Team-defined silicon folders authored in Glass: named folders + which
+   *  silicon (by silicon_id) is in which. Drives the sidebar's default grouping. */
+  silicon_folders?: {
+    folders: { id: string; name: string }[];
+    assignments: Record<string, string>;
+  };
   created_at: string;
   updated_at: string;
 }

@@ -13,7 +13,6 @@ import {
   Trash,
 } from "@phosphor-icons/react/dist/ssr";
 
-import type { ChatGroup } from "@/lib/chat-groups";
 import type { Contact, Room } from "@/lib/types";
 import { roomDisplay } from "@/lib/peers";
 import { contactKey } from "@/lib/use-contacts";
@@ -32,28 +31,41 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-/** One group plus the rooms (already filtered + sorted) that belong to it. */
+/** A folder shown in the sidebar — either authored in Glass ("team") or created
+ *  personally by this user ("personal"). Only personal folders can be renamed
+ *  or deleted from the interface. */
+export interface DisplayFolder {
+  id: string;
+  name: string;
+  source: "team" | "personal";
+}
+
+/** One folder plus the rooms (already filtered + sorted) that belong to it. */
 export interface GroupSection {
-  group: ChatGroup;
+  group: DisplayFolder;
   rooms: Room[];
 }
 
-/** Callbacks for editing personal chat groups; only supplied when grouping is
+/** Callbacks for the sidebar's folder grouping; only supplied when grouping is
  *  active (a team tab is selected). */
 export interface GroupControls {
-  /** all groups for the active team — drives the per-row "Add to group" menu */
-  groups: ChatGroup[];
-  /** the group currently drilled into (its chats fill the list), or null */
+  /** all folders for the active team (team + personal) — drives the per-row menu */
+  groups: DisplayFolder[];
+  /** resolved folder id per room (override wins, else team default) */
+  assignmentByRoom: Record<string, string>;
+  /** the folder currently drilled into (its chats fill the list), or null */
   openGroupId: string | null;
-  /** drill into a group's chats */
+  /** drill into a folder's chats */
   onOpenGroup: (groupId: string) => void;
-  /** leave the drilled-in group, back to the group list */
+  /** leave the drilled-in folder, back to the folder list */
   onCloseGroup: () => void;
+  /** rename a personal folder (no-op for team folders) */
   onRename: (groupId: string) => void;
+  /** delete a personal folder (no-op for team folders) */
   onDelete: (groupId: string) => void;
-  /** move a room into a group, or out of every group when groupId is null */
+  /** move a room into a folder, or out of every folder when folderId is null */
   onMoveRoom: (roomId: string, groupId: string | null) => void;
-  /** create a brand-new group seeded with this room */
+  /** create a brand-new personal folder seeded with this room */
   onCreateGroupWithRoom: (roomId: string) => void;
 }
 
@@ -202,7 +214,7 @@ export function RoomList({
   );
 }
 
-/** Right-click rename/delete menu for a group, anchored at the click point. */
+/** Right-click rename/delete menu for a personal folder, at the click point. */
 function GroupOptionsMenu({
   group,
   controls,
@@ -210,7 +222,7 @@ function GroupOptionsMenu({
   onOpenChange,
   anchor,
 }: {
-  group: ChatGroup;
+  group: DisplayFolder;
   controls: GroupControls;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -247,21 +259,27 @@ function GroupRow({
   rooms,
   controls,
 }: {
-  group: ChatGroup;
+  group: DisplayFolder;
   rooms: Room[];
   controls: GroupControls;
 }) {
   const unread = rooms.reduce((n, r) => n + (r.unread_count ?? (r.unread ? 1 : 0)), 0);
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
+  // Only personal folders can be renamed/deleted; team folders are read-only.
+  const editable = group.source === "personal";
   return (
     <li
       className="relative"
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setAnchor({ x: e.clientX, y: e.clientY });
-        setMenuOpen(true);
-      }}
+      onContextMenu={
+        editable
+          ? (e) => {
+              e.preventDefault();
+              setAnchor({ x: e.clientX, y: e.clientY });
+              setMenuOpen(true);
+            }
+          : undefined
+      }
     >
       <button
         type="button"
@@ -276,6 +294,7 @@ function GroupRow({
           <span className="block truncate text-[15px] font-semibold">{group.name}</span>
           <span className="block truncate text-xs text-muted-foreground">
             {rooms.length} chat{rooms.length === 1 ? "" : "s"}
+            {group.source === "team" ? " · team" : ""}
           </span>
         </span>
         {/* Rightmost: unread badge (only when the group has unread chats). */}
@@ -290,29 +309,36 @@ function GroupRow({
           <span />
         )}
       </button>
-      <GroupOptionsMenu
-        group={group}
-        controls={controls}
-        open={menuOpen}
-        onOpenChange={setMenuOpen}
-        anchor={anchor}
-      />
+      {editable ? (
+        <GroupOptionsMenu
+          group={group}
+          controls={controls}
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          anchor={anchor}
+        />
+      ) : null}
     </li>
   );
 }
 
-/** Header shown atop a drilled-in group's chats; clicking it goes back. */
-function GroupBackHeader({ group, controls }: { group: ChatGroup; controls: GroupControls }) {
+/** Header shown atop a drilled-in folder's chats; clicking it goes back. */
+function GroupBackHeader({ group, controls }: { group: DisplayFolder; controls: GroupControls }) {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
+  const editable = group.source === "personal";
   return (
     <div
       className="relative border-b bg-secondary/40"
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setAnchor({ x: e.clientX, y: e.clientY });
-        setMenuOpen(true);
-      }}
+      onContextMenu={
+        editable
+          ? (e) => {
+              e.preventDefault();
+              setAnchor({ x: e.clientX, y: e.clientY });
+              setMenuOpen(true);
+            }
+          : undefined
+      }
     >
       <button
         type="button"
@@ -323,16 +349,18 @@ function GroupBackHeader({ group, controls }: { group: ChatGroup; controls: Grou
         <FolderSimple className="h-4 w-4 shrink-0 text-muted-foreground" weight="fill" />
         <span className="min-w-0 truncate text-sm font-semibold">{group.name}</span>
         <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-          back
+          {group.source === "team" ? "team · back" : "back"}
         </span>
       </button>
-      <GroupOptionsMenu
-        group={group}
-        controls={controls}
-        open={menuOpen}
-        onOpenChange={setMenuOpen}
-        anchor={anchor}
-      />
+      {editable ? (
+        <GroupOptionsMenu
+          group={group}
+          controls={controls}
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          anchor={anchor}
+        />
+      ) : null}
     </div>
   );
 }
@@ -383,9 +411,10 @@ function RoomRow({
     unread > 0 ? "font-semibold" : "font-medium",
   );
   const preview = roomPreview(r, d.subtitle);
-  const currentGroup = groupControls?.groups.find(
-    (g) => g.roomIds.includes(r.room_id),
-  );
+  const currentGroupId = groupControls?.assignmentByRoom[r.room_id];
+  const currentGroup = currentGroupId
+    ? groupControls?.groups.find((g) => g.id === currentGroupId)
+    : undefined;
 
   // A right-click / two-finger tap (the native `contextmenu` gesture) opens the
   // chat's options menu (group actions) at the pointer. A normal tap still just

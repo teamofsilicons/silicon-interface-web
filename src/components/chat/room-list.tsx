@@ -293,17 +293,7 @@ function GroupRow({
           <FolderSimple className="h-[18px] w-[18px]" weight="fill" />
         </span>
         <span className="min-w-0">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-[15px] font-semibold">{group.name}</span>
-            {group.source === "team" ? (
-              <span
-                className="label-mono shrink-0 border border-border px-1 leading-[1.5]"
-                style={{ fontSize: "9px", letterSpacing: "0.14em" }}
-              >
-                team
-              </span>
-            ) : null}
-          </span>
+          <span className="block truncate text-[15px] font-semibold">{group.name}</span>
           <span className="label-mono mt-0.5 block truncate" style={{ fontSize: "10px" }}>
             {rooms.length} chat{rooms.length === 1 ? "" : "s"}
           </span>
@@ -362,7 +352,7 @@ function GroupBackHeader({ group, controls }: { group: DisplayFolder; controls: 
         </span>
         <span className="min-w-0 truncate text-sm font-semibold">{group.name}</span>
         <span className="label-mono ml-auto shrink-0" style={{ fontSize: "10px" }}>
-          {group.source === "team" ? "team · back" : "back"}
+          back
         </span>
       </button>
       {editable ? (

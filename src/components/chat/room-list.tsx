@@ -284,8 +284,11 @@ function RoomRow({
   );
 
   // A right-click / two-finger tap (the native `contextmenu` gesture) opens the
-  // chat's options menu (group actions). A normal tap still just opens the chat.
+  // chat's options menu (group actions) at the pointer. A normal tap still just
+  // opens the chat. We pin an invisible anchor to the click point and let Radix
+  // flip the menu left/up when it would overflow the viewport.
   const [menuOpen, setMenuOpen] = React.useState(false);
+  const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
 
   return (
     <li
@@ -294,6 +297,7 @@ function RoomRow({
         groupControls
           ? (e) => {
               e.preventDefault();
+              setAnchor({ x: e.clientX, y: e.clientY });
               setMenuOpen(true);
             }
           : undefined
@@ -419,14 +423,19 @@ function RoomRow({
         </div>
       </button>
       {/* Chat options — opened by right-click / two-finger tap (contextmenu),
-          no hover affordance. The trigger is an invisible anchor at the row's
-          bottom edge so the menu drops below the row; open state is controlled. */}
+          no hover affordance. The trigger is an invisible anchor pinned to the
+          click point (fixed → viewport coords); Radix positions the menu there
+          and flips it left/up via avoidCollisions when near an edge. */}
       {groupControls ? (
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
-            <span aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-0" />
+            <span
+              aria-hidden
+              className="pointer-events-none fixed h-0 w-0"
+              style={{ left: anchor.x, top: anchor.y }}
+            />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-[12rem]">
+          <DropdownMenuContent side="right" align="start" sideOffset={2} className="min-w-[12rem]">
             <DropdownMenuLabel>Add to group</DropdownMenuLabel>
             {groupControls.groups.map((g) => (
               <DropdownMenuItem

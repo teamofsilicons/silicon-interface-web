@@ -139,16 +139,20 @@ export function RoomList({
                   controls={groupControls!}
                 />
                 {!group.collapsed && (
-                  <ul className="divide-y border-b">
-                    {groupRooms.map((r) => (
-                      <RoomRow key={r.room_id} room={r} {...rowProps} />
-                    ))}
-                    {groupRooms.length === 0 && (
-                      <li className="px-6 py-2 text-xs text-muted-foreground">
-                        No chats in this group yet.
-                      </li>
-                    )}
-                  </ul>
+                  // 2px bottom border marks where the group ends, distinct from
+                  // the 1px dividers between individual chats.
+                  <div className="border-b-2 border-foreground/15">
+                    <ul className="divide-y">
+                      {groupRooms.map((r) => (
+                        <RoomRow key={r.room_id} room={r} {...rowProps} />
+                      ))}
+                      {groupRooms.length === 0 && (
+                        <li className="px-6 py-2 text-xs text-muted-foreground">
+                          No chats in this group yet.
+                        </li>
+                      )}
+                    </ul>
+                  </div>
                 )}
               </section>
             ))}
@@ -279,11 +283,42 @@ function RoomRow({
     (g) => g.roomIds.includes(r.room_id),
   );
 
+  // Double-tap opens the chat's options menu (group actions). A single tap
+  // still opens the chat — we disambiguate with a short timer so the first of
+  // the two taps doesn't navigate away before the double-tap registers.
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const clickTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    },
+    [],
+  );
+  const handleClick = () => {
+    if (!groupControls) {
+      onSelect(r.room_id);
+      return;
+    }
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    clickTimerRef.current = setTimeout(() => {
+      onSelect(r.room_id);
+      clickTimerRef.current = null;
+    }, 220);
+  };
+  const handleDoubleClick = () => {
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+    setMenuOpen(true);
+  };
+
   return (
-    <li className="group/row relative">
+    <li className="relative">
       <button
         type="button"
-        onClick={() => onSelect(r.room_id)}
+        onClick={handleClick}
+        onDoubleClick={groupControls ? handleDoubleClick : undefined}
         onDragEnter={(e) => {
           // Only the file-drag case matters — text/link drags from
           // within the page would otherwise also fire this.
@@ -400,19 +435,16 @@ function RoomRow({
           </div>
         </div>
       </button>
-      {/* Per-room "move to group" overflow — only inside a team tab. Sits over
-          the timestamp corner and reveals on row hover / keyboard focus. */}
+      {/* Chat options — opened by double-tapping the row (no hover affordance).
+          The trigger is an invisible anchor at the row's bottom edge so the
+          menu drops below the row; open state is driven by handleDoubleClick. */}
       {groupControls ? (
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            aria-label="organize chat"
-            title="organize chat"
-            className="absolute right-2 top-2 grid h-6 w-6 place-items-center rounded border bg-background text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100"
-          >
-            <DotsThree className="h-4 w-4" weight="bold" />
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <span aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-0" />
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Move to group</DropdownMenuLabel>
+          <DropdownMenuContent align="start" className="min-w-[12rem]">
+            <DropdownMenuLabel>Add to group</DropdownMenuLabel>
             {groupControls.groups.map((g) => (
               <DropdownMenuItem
                 key={g.id}

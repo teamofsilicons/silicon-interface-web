@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FolderSimplePlus, GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -800,29 +800,18 @@ function ChatPageInner() {
               )}
             </div>
             {activeTeam ? (
-              <>
-                <button
-                  type="button"
-                  aria-label="new chat group"
-                  title="new chat group"
-                  onClick={() => setGroupPrompt({ mode: "create" })}
-                  className="grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent"
-                >
-                  <FolderSimplePlus className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`${activeTeam.name} team workspace`}
-                  title={`${activeTeam.name} team workspace`}
-                  onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
-                  className={cn(
-                    "grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent",
-                    viewedTeam?.slug === activeTeam.slug && "bg-secondary",
-                  )}
-                >
-                  <GearSix className="h-4 w-4" />
-                </button>
-              </>
+              <button
+                type="button"
+                aria-label={`${activeTeam.name} team workspace`}
+                title={`${activeTeam.name} team workspace`}
+                onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
+                className={cn(
+                  "grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent",
+                  viewedTeam?.slug === activeTeam.slug && "bg-secondary",
+                )}
+              >
+                <GearSix className="h-4 w-4" />
+              </button>
             ) : null}
           </div>
         )}

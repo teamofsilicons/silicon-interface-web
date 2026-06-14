@@ -408,9 +408,6 @@ export function Composer({
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
   const [queuedTextCount, setQueuedTextCount] = React.useState(0);
-  // True once the draft wraps past one line — toggles the attach icon's top
-  // border (icons stay fixed-size; only the border appears).
-  const [isMultiline, setIsMultiline] = React.useState(false);
   // When the held message has entered its final countdown, this is the wall
   // time it will auto-send at (null otherwise). Drives the "will send in {N}s".
   const [emptyHoldEndsAt, setEmptyHoldEndsAt] = React.useState<number | null>(null);
@@ -670,17 +667,11 @@ export function Composer({
       parseFloat(getComputedStyle(el).paddingBottom);
     const minH = lineH * MIN_ROWS + padding;
     const maxH = lineH * MAX_ROWS + padding;
-    // Zero the CSS min-height while measuring, otherwise min-h-11 inflates
-    // scrollHeight and a single line reads as multiline.
-    el.style.minHeight = "0px";
     el.style.height = "0px";
     const contentH = el.scrollHeight;
-    el.style.minHeight = "";
     const next = Math.min(Math.max(contentH, minH), maxH);
     el.style.height = `${next}px`;
     el.style.overflowY = contentH > maxH ? "auto" : "hidden";
-    // Multiline once the content is taller than a single line (+1px epsilon).
-    setIsMultiline(contentH > minH + 1);
   }, [text]);
 
   const reset = () => {
@@ -1221,7 +1212,7 @@ export function Composer({
           multiline drafts grow the text area. */}
       <div
         ref={barRef}
-        className="relative flex items-end border border-input transition-colors focus-within:border-ring"
+        className="relative flex items-end gap-2"
       >
         <input
           type="file"
@@ -1241,15 +1232,11 @@ export function Composer({
           title="attach file"
           aria-label="attach file"
           disabled={busy}
-          className={cn(
-            // Top border appears only once the draft wraps to a second line.
-            "flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50",
-            isMultiline && "border-t",
-          )}
+          className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
         </button>
-        <div className="relative flex min-w-0 flex-1 flex-col">
+        <div className="relative flex min-w-0 flex-1 flex-col border border-input transition-colors focus-within:border-ring">
           <textarea
             ref={taRef}
             autoFocus
@@ -1375,7 +1362,7 @@ export function Composer({
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"
-            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >
             <Microphone />
           </button>
@@ -1385,7 +1372,7 @@ export function Composer({
             onClick={send}
             disabled={busy || (!!file && uploadStatus !== "ready")}
             aria-label="send"
-            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {busy || (!!file && uploadStatus === "uploading") ? (
               <CircleNotch className="animate-spin" />

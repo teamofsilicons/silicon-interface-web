@@ -1083,7 +1083,7 @@ export function Composer({
       {queuePaused && queuedTextCount > 0 && (
         <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
           <span className="min-w-0">
-            holding this while you finish typing. Send anyway when ready.
+            Seems like you are still thinking and continuing the message, we will hold the message until then.
           </span>
           <button
             type="button"

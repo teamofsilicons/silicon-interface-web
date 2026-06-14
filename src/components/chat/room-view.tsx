@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { Check, Checks, Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -69,6 +69,9 @@ interface ProgressEntry {
   /** §1.6 — public handle of whoever is actually working, so the progress
    *  avatar isn't a "most recent silicon sender" guess. */
   handle?: string | null;
+  /** Receipt phase shown right after sending, before real work progress:
+   *  "sent" → "read" → (after a moment) the actual silicon progress. */
+  receipt?: "sent" | "read";
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
@@ -117,6 +120,9 @@ const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
   thinking: SILICON_PROGRESS_COPY,
 };
 const MIN_PROGRESS_STATUS_MS = 1000;
+// How long a "message sent / read" receipt shows before switching to the
+// actual silicon work progress.
+const RECEIPT_HOLD_MS = 3000;
 // §1.1 — progress staleness thresholds. After SOFT with no update we degrade
 // the playful line to an honest "still working, no update for Ns"; after HARD
 // we offer a way to dismiss/refresh in case the silicon died with no `done`.
@@ -154,6 +160,41 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // we never clear unread for messages that are only in the localStorage cache.
   const [hydrated, setHydrated] = React.useState(false);
   const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
+  // Drives the "sent → read → (after a moment) real progress" sequence.
+  const receiptTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearReceiptTimer = React.useCallback(() => {
+    if (receiptTimerRef.current) {
+      clearTimeout(receiptTimerRef.current);
+      receiptTimerRef.current = null;
+    }
+  }, []);
+  // Show a "message sent"/"message read" receipt line, then after a beat fall
+  // through to the actual silicon work progress.
+  const showReceipt = React.useCallback(
+    (kind: "sent" | "read") => {
+      setActiveProgress({
+        roomId: room.room_id,
+        groupId: `receipt:${room.room_id}`,
+        state: "thinking",
+        note: "",
+        updatedAt: Date.now(),
+        source: "local",
+        receipt: kind,
+      });
+      clearReceiptTimer();
+      receiptTimerRef.current = setTimeout(() => {
+        receiptTimerRef.current = null;
+        // Drop the receipt → start the real progress (unless a server progress
+        // frame or the silicon's reply already replaced it).
+        setActiveProgress((prev) =>
+          prev && prev.receipt
+            ? { ...prev, receipt: undefined, state: "thinking", updatedAt: Date.now() }
+            : prev,
+        );
+      }, RECEIPT_HOLD_MS);
+    },
+    [room.room_id, clearReceiptTimer],
+  );
   // True while the composer is holding a silicon text (not yet sent) — shows
   // "holding the message until you finish typing." in place of silicon progress.
   const [holdingMessage, setHoldingMessage] = React.useState(false);
@@ -344,6 +385,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     setHydrated(false);
     setEvents(cachedEvents ?? []);
     setActiveProgress(null);
+    clearReceiptTimer();
     setActivities({});
     setReplyTo(null);
     setFocusSender(null);
@@ -370,8 +412,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       });
     return () => {
       mounted = false;
+      clearReceiptTimer();
     };
-  }, [room.room_id, myUsername]);
+  }, [room.room_id, myUsername, clearReceiptTimer]);
 
   React.useEffect(() => {
     if (loading) return;
@@ -424,6 +467,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       const mine = incoming.sender_handle && incoming.sender_handle === myUsername;
       if (incoming.type === "m.progress") {
         const state = (incoming.content.state as ProgressState) || "thinking";
+        clearReceiptTimer(); // real progress takes over from any receipt line
         if (state === "done") {
           // Done just clears the live ProgressLine — no timeline row. The
           // silicon's own follow-up message carries the outcome.
@@ -442,7 +486,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         }
         return;
       }
-      if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) setActiveProgress(null);
+      if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) {
+        clearReceiptTimer();
+        setActiveProgress(null);
+      }
       // §1.9 — a new message from someone else while scrolled up: surface a pill.
       if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type) && !stickToBottomRef.current) {
         setUnseenBelow(true);
@@ -544,6 +591,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     } else if (f.type === "read_receipt") {
       // §2.6 — mark by POSITION, not string `<=`. String ordering is only valid
       // for fixed-width Crockford ULIDs; forwarded/UUID-fallback ids break it.
+      let didRead = false;
       setEvents((prev) => {
         const cutoffIdx = prev.findIndex((e) => e.event_id === f.event_id);
         if (cutoffIdx < 0) return prev; // cutoff outside our window — don't guess
@@ -555,8 +603,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           }
           return e;
         });
+        if (changed) didRead = true;
         return changed ? updated : prev;
       });
+      // My just-sent message got read → upgrade the receipt line ("read"),
+      // which restarts the brief hold before the real progress shows.
+      if (didRead && activeProgress?.receipt) showReceipt("read");
     } else if (f.type === "take_back") {
       setEvents((prev) =>
         prev.map((e) =>
@@ -567,6 +619,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       );
     } else if (f.type === "progress") {
       if (f.state && f.progress_group_id) {
+        clearReceiptTimer(); // real progress takes over from any receipt line
         if (f.state === "done") {
           setActiveProgress(null);
         } else {
@@ -892,16 +945,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         return [...prev, placeholder];
       });
       requestBottomStick("smooth");
-      if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(payload.type)) {
-        setActiveProgress({
-          roomId: room.room_id,
-          groupId: `local:${clientId}`,
-          state: "thinking",
-          note: "",
-          updatedAt: Date.now(),
-          source: "local",
-        });
-      }
+      // No progress yet — we don't show anything until the message is actually
+      // sent (see onAck → showReceipt).
       // Audible "sent" tone — small ascending chirp. Respects reduced-motion
       // + the silicon-interface:sounds=off opt-out.
       playSent();
@@ -956,7 +1001,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       }
       return prev;
     });
-  }, [requestBottomStick]);
+    // Message is now actually sent → begin the receipt sequence ("sent" → …).
+    if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(real.type)) {
+      showReceipt("sent");
+    }
+  }, [requestBottomStick, showsProgressForReplies, showReceipt]);
 
   const onOptimisticUpdate = React.useCallback(
     (clientId: string, payload: OptimisticPayload) => {
@@ -1463,6 +1512,26 @@ function ProgressLine({
   staleMs?: number;
   onDismiss?: () => void;
 }) {
+  // Receipt phase: a plain "message sent" / "message read" line before the
+  // actual work progress kicks in.
+  if (entry.receipt) {
+    const read = entry.receipt === "read";
+    return (
+      <div className="my-2 flex w-full items-center gap-2">
+        <div className="w-7 shrink-0">
+          <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "silicon"} />
+        </div>
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          {read ? (
+            <Checks weight="bold" className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <Check weight="bold" className="h-3.5 w-3.5 shrink-0" />
+          )}
+          {read ? "message read" : "message sent"}
+        </span>
+      </div>
+    );
+  }
   // §1.1 — once the line stops advancing, stop pretending it's lively. After a
   // soft threshold show an honest "still working" line; after a hard one offer
   // a way out in case the silicon died without a `done` frame.

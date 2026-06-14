@@ -1307,9 +1307,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               );
             })
           )}
-          {/* Per-request progress indicator ([----] 0% "thinking" / "manager
-              spawning" line) removed by product decision. Progress state is
-              still tracked internally but never rendered. */}
+          {/* Activity line (avatar + working copy) shows; the determinate
+              [####----] % bar itself is stripped out inside ProgressLine. */}
+          {shouldShowActiveProgress ? (
+            <ProgressLine
+              entry={activeProgress}
+              avatarSeed={progressAvatarHandle || headerSeed}
+              avatarSrc={progressAvatarSrc}
+              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
+              staleMs={progressStaleMs}
+              onDismiss={() => setActiveProgress(null)}
+            />
+          ) : null}
           <div ref={endRef} />
         </div>
       </ScrollArea>
@@ -1414,7 +1423,6 @@ function ProgressLine({
           <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "carbon"} />
         </div>
         <div className="min-w-0 max-w-[70%] space-y-1">
-          <ProgressBar pct={entry.pct} />
           <span className="block text-sm text-muted-foreground">
             {dead ? "still working — no update for a while." : `still working — no update for ${secs}s.`}
           </span>
@@ -1432,18 +1440,6 @@ function ProgressLine({
     );
   }
   return <ProgressLineLive entry={entry} avatarSeed={avatarSeed} avatarSrc={avatarSrc} avatarFamily={avatarFamily} />;
-}
-
-/** §1.2 — determinate "compile bar" `[####------] 42%` when a pct is known. */
-function ProgressBar({ pct }: { pct?: number | null }) {
-  if (pct == null) return null;
-  const filled = Math.round((pct / 100) * 10);
-  const bar = "#".repeat(filled) + "-".repeat(Math.max(0, 10 - filled));
-  return (
-    <span className="block font-mono text-xs tabular-nums text-muted-foreground">
-      [{bar}] {Math.round(pct)}%
-    </span>
-  );
 }
 
 function ProgressLineLive({
@@ -1570,8 +1566,6 @@ function ProgressLineLive({
         <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "carbon"} />
       </div>
       <div className="min-w-0 max-w-[70%]">
-        {/* \u00a71.2 \u2014 determinate bar above the playful line when pct is reported. */}
-        <ProgressBar pct={entry.pct} />
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
           <span className="inline-flex min-w-0 max-w-full items-center gap-3 overflow-hidden">
             <span className="silicon-activity-copy">

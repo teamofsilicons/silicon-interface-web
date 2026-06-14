@@ -758,13 +758,19 @@ export function Composer({
       delayedTextQueueRef.current = [item];
       setQueuedTextCount(1);
       setQueuePaused(false);
-      onHoldStateChange?.(true);
       onOptimisticAdd(clientId, buildQueuedPayload([item]));
       clearDelayTimer();
       delayTimerRef.current = setTimeout(() => {
         delayTimerRef.current = null;
-        if (hasContinuingDraft()) setQueuePaused(true);
-        else void flushDelayedTextQueue();
+        // Only once the 5s merge window ends and you're still typing do we flip
+        // to the "holding…" state. Before that, the normal silicon progress
+        // (the random copy) shows.
+        if (hasContinuingDraft()) {
+          setQueuePaused(true);
+          onHoldStateChange?.(true);
+        } else {
+          void flushDelayedTextQueue();
+        }
       }, SILICON_TEXT_SEND_DELAY_MS);
       onClearReply?.();
     },

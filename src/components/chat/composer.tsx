@@ -395,6 +395,9 @@ export function Composer({
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
   const [queuedTextCount, setQueuedTextCount] = React.useState(0);
+  // True once the draft wraps past a single line — drives the attach button's
+  // top border so it lines up with the grown text area.
+  const [isMultiline, setIsMultiline] = React.useState(false);
 
   React.useEffect(() => {
     textRef.current = text;
@@ -629,9 +632,12 @@ export function Composer({
     const minH = lineH * MIN_ROWS + padding;
     const maxH = lineH * MAX_ROWS + padding;
     el.style.height = "0px";
-    const next = Math.min(Math.max(el.scrollHeight, minH), maxH);
+    const contentH = el.scrollHeight;
+    const next = Math.min(Math.max(contentH, minH), maxH);
     el.style.height = `${next}px`;
-    el.style.overflowY = el.scrollHeight > maxH ? "auto" : "hidden";
+    el.style.overflowY = contentH > maxH ? "auto" : "hidden";
+    // +1px epsilon so a single line (contentH ≈ minH) doesn't read as multiline.
+    setIsMultiline(contentH > minH + 1);
   }, [text]);
 
   const reset = () => {
@@ -1109,7 +1115,12 @@ export function Composer({
           title="attach file"
           aria-label="attach file"
           disabled={busy}
-          className="flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+          className={cn(
+            // border-t is always reserved (transparent) so toggling its color
+            // when the draft goes multiline never changes the button's height.
+            "flex h-11 w-11 shrink-0 items-center justify-center border-r border-t border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50",
+            !isMultiline && "border-t-transparent",
+          )}
         >
           <Paperclip />
         </button>

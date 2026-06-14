@@ -112,8 +112,7 @@ const MAX_ROWS = 12;
 
 // Emoji quick-picker is a fixed grid so keyboard nav is true 2-D: ←/→ move one
 // cell, ↑/↓ move a whole row (EMOJI_COLS cells).
-const EMOJI_COLS = 8;
-const EMOJI_LIMIT = EMOJI_COLS * 4; // 4 rows
+const EMOJI_COLS = 8; // minimum / fallback column count; actual count tracks bar width
 const SILICON_TEXT_SEND_DELAY_MS = 5000;
 // Once a held silicon message is paused (you kept typing past the 5s mark),
 // emptying the input must NOT fire the send instantly — wait at least this long
@@ -238,18 +237,22 @@ function StagedAttachment({
 function EmojiQuickPicker({
   query,
   selectedIndex,
+  cols,
+  limit,
   onPick,
 }: {
   query: string;
   selectedIndex: number;
+  cols: number;
+  limit: number;
   onPick: (emoji: string) => void;
 }) {
-  const results = React.useMemo(() => searchEmoji(query, EMOJI_LIMIT), [query]);
+  const results = React.useMemo(() => searchEmoji(query, limit), [query, limit]);
   if (results.length === 0) return null;
   return (
     <div
-      className="absolute bottom-full left-0 z-50 mb-2 grid w-max gap-1 border bg-card p-2 shadow-md"
-      style={{ gridTemplateColumns: `repeat(${EMOJI_COLS}, minmax(0, 1fr))` }}
+      className="absolute bottom-full inset-x-0 z-50 mb-2 grid gap-1 border bg-card p-2 shadow-md"
+      style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
     >
       {results.map((r, i) => (
         <button
@@ -257,7 +260,7 @@ function EmojiQuickPicker({
           type="button"
           onClick={() => onPick(r.emoji)}
           className={cn(
-            "inline-flex h-8 w-8 items-center justify-center border transition-colors hover:bg-accent",
+            "inline-flex h-9 w-full items-center justify-center border transition-colors hover:bg-accent",
             i === selectedIndex
               ? "border-foreground bg-accent"
               : "border-transparent",
@@ -483,6 +486,24 @@ export function Composer({
   // popover anchored to the textarea.
   const [emojiQuery, setEmojiQuery] = React.useState<string | null>(null);
   const [emojiIdx, setEmojiIdx] = React.useState(0);
+  // The emoji picker spans the full chat bar; its column count is derived from
+  // the bar's width so it fills the row instead of sitting in a narrow box.
+  const barRef = React.useRef<HTMLDivElement>(null);
+  const [emojiCols, setEmojiCols] = React.useState(EMOJI_COLS);
+  React.useEffect(() => {
+    const el = barRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      // ~44px per cell (button + gap); clamp so it's never absurdly sparse/dense.
+      const cols = Math.max(EMOJI_COLS, Math.min(40, Math.floor((el.clientWidth - 16) / 44)));
+      setEmojiCols(cols);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const emojiLimit = emojiCols * 3;
 
   // Pull dropped files in from RoomView. We only treat it as a hint — the
   // parent clears its own state via `onDroppedFileConsumed` once we've taken
@@ -1194,7 +1215,10 @@ export function Composer({
       )}
       {/* One bordered field. Controls stay fixed-height at the bottom while
           multiline drafts grow the text area. */}
-      <div className="flex items-end border border-input transition-colors focus-within:border-ring">
+      <div
+        ref={barRef}
+        className="relative flex items-end border border-input transition-colors focus-within:border-ring"
+      >
         <input
           type="file"
           ref={fileInputRef}
@@ -1268,7 +1292,7 @@ export function Composer({
               // Emoji picker keyboard navigation — true 2-D grid: ←/→ move one
               // cell, ↑/↓ move a whole row.
               if (emojiQuery !== null) {
-                const results = searchEmoji(emojiQuery, EMOJI_LIMIT);
+                const results = searchEmoji(emojiQuery, emojiLimit);
                 const n = results.length;
                 if (n > 0 && e.key === "ArrowRight") {
                   e.preventDefault();
@@ -1282,12 +1306,12 @@ export function Composer({
                 }
                 if (n > 0 && e.key === "ArrowDown") {
                   e.preventDefault();
-                  setEmojiIdx((i) => Math.min(i + EMOJI_COLS, n - 1));
+                  setEmojiIdx((i) => Math.min(i + emojiCols, n - 1));
                   return;
                 }
                 if (n > 0 && e.key === "ArrowUp") {
                   e.preventDefault();
-                  setEmojiIdx((i) => Math.max(0, i - EMOJI_COLS));
+                  setEmojiIdx((i) => Math.max(0, i - emojiCols));
                   return;
                 }
                 if (e.key === "Tab" || (e.key === "Enter" && results.length > 0)) {
@@ -1337,22 +1361,6 @@ export function Composer({
               }
             }}
           />
-          {emojiQuery !== null && (
-            <EmojiQuickPicker
-              query={emojiQuery}
-              selectedIndex={emojiIdx}
-              onPick={(em) => {
-                const caret = taRef.current?.selectionStart ?? text.length;
-                const before = text.slice(0, caret);
-                const after = text.slice(caret);
-                const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, em);
-                setText(replaced + after);
-                persistDraft(replaced + after);
-                setEmojiQuery(null);
-                queueMicrotask(() => taRef.current?.focus());
-              }}
-            />
-          )}
         </div>
         {!text.trim() && !file ? (
           <button
@@ -1382,6 +1390,24 @@ export function Composer({
               <PaperPlaneRight />
             )}
           </button>
+        )}
+        {emojiQuery !== null && (
+          <EmojiQuickPicker
+            query={emojiQuery}
+            selectedIndex={emojiIdx}
+            cols={emojiCols}
+            limit={emojiLimit}
+            onPick={(em) => {
+              const caret = taRef.current?.selectionStart ?? text.length;
+              const before = text.slice(0, caret);
+              const after = text.slice(caret);
+              const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, em);
+              setText(replaced + after);
+              persistDraft(replaced + after);
+              setEmojiQuery(null);
+              queueMicrotask(() => taRef.current?.focus());
+            }}
+          />
         )}
       </div>
 

@@ -713,8 +713,12 @@ function Body({ event }: { event: Event }) {
       // §2.8 — a silicon can emit an empty/whitespace m.text; don't render a
       // blank padded bubble. Show a quiet placeholder only once it's final and
       // there's nothing else to show (no link preview, not mid-stream).
-      const body = String(c.body ?? "");
-      const blank = !body.trim() && !event.link_preview;
+      // Trim leading/trailing blank lines and trailing spaces so a short
+      // message like "hi" (or one carrying stray newlines from the composer /
+      // queued-merge) renders a snug bubble instead of one padded out by
+      // whitespace-pre-wrap. Internal blank lines are preserved.
+      const body = String(c.body ?? "").replace(/^\s+|\s+$/g, "");
+      const blank = !body && !event.link_preview;
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
       }

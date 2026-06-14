@@ -14,7 +14,8 @@ import {
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
 import { playReceived, playReceivedSilicon } from "@/lib/sounds";
-import type { Contact, Event, Room, WsFrame } from "@/lib/types";
+import type { Contact, Event, ProgressState, Room, WsFrame } from "@/lib/types";
+import { clearRoomProgress, setRoomProgress } from "@/lib/progress-cache";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
@@ -110,6 +111,10 @@ const SB_MIN = 240;
 const SB_MAX = 560;
 const SB_STORAGE = "silicon-interface:sidebar-width";
 const OTHERS_TAB = "__others__";
+// Inter-silicon chats I only observe get their own tab, pulled out of the team
+// tabs so the silicon-to-silicon traffic is easy to find and doesn't clutter my
+// own conversations.
+const OBSERVING_TAB = "__observing__";
 
 function loadSidebarWidth(): number {
   if (typeof window === "undefined") return SB_DEFAULT;
@@ -215,11 +220,15 @@ function ChatPageInner() {
   const contacts = useContacts(ownerId);
   const myUsername = carbon?.username ?? null;
   const selectedRoom = rooms.find((r) => r.room_id === selected);
-  const hasOtherRooms = rooms.some((r) => !r.team_slug);
+  const hasObservedRooms = rooms.some((r) => r.observed);
+  // A non-observed room with no team is an "Other"; observed rooms are routed to
+  // their own tab regardless of team.
+  const hasOtherRooms = rooms.some((r) => !r.team_slug && !r.observed);
   const activeTeamSlug = teams.some((t) => t.slug === activeTeamTab)
     ? activeTeamTab
     : null;
   const showingOthers = activeTeamTab === OTHERS_TAB && hasOtherRooms;
+  const showingObserving = activeTeamTab === OBSERVING_TAB && hasObservedRooms;
   const activeTeam = activeTeamSlug ? teams.find((t) => t.slug === activeTeamSlug) : null;
   const viewedTeam = teamViewSlug ? teams.find((t) => t.slug === teamViewSlug) : null;
 
@@ -231,6 +240,10 @@ function ChatPageInner() {
 
   React.useEffect(() => {
     if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) return;
+    if (selectedRoom?.observed) {
+      if (activeTeamTab !== OBSERVING_TAB) setActiveTeamTab(OBSERVING_TAB);
+      return;
+    }
     if (selectedRoom?.team_slug && teams.some((t) => t.slug === selectedRoom.team_slug)) {
       if (activeTeamTab !== selectedRoom.team_slug) setActiveTeamTab(selectedRoom.team_slug);
       return;
@@ -241,11 +254,14 @@ function ChatPageInner() {
     }
     const activeValid =
       teams.some((t) => t.slug === activeTeamTab) ||
-      (activeTeamTab === OTHERS_TAB && hasOtherRooms);
+      (activeTeamTab === OTHERS_TAB && hasOtherRooms) ||
+      (activeTeamTab === OBSERVING_TAB && hasObservedRooms);
     if (!activeValid) {
-      setActiveTeamTab(teams[0]?.slug ?? (hasOtherRooms ? OTHERS_TAB : ""));
+      setActiveTeamTab(
+        teams[0]?.slug ?? (hasOtherRooms ? OTHERS_TAB : hasObservedRooms ? OBSERVING_TAB : ""),
+      );
     }
-  }, [teamViewSlug, teams, selectedRoom, hasOtherRooms, activeTeamTab]);
+  }, [teamViewSlug, teams, selectedRoom, hasOtherRooms, hasObservedRooms, activeTeamTab]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -421,6 +437,35 @@ function ChatPageInner() {
     if (f.type === "event") {
       const ev = f.event;
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
+      // Record silicon work per room so reopening a closed chat can restore its
+      // progress line — the room view is unmounted while closed and misses
+      // these frames. Progress frames never touch the sidebar, so we stop here.
+      if (ev.type === "m.progress") {
+        if (f.room_id) {
+          const state = (ev.content.state as ProgressState) || "thinking";
+          if (state === "done") {
+            clearRoomProgress(f.room_id);
+          } else {
+            setRoomProgress(f.room_id, {
+              roomId: f.room_id,
+              groupId: String(ev.content.progress_group_id || ev.event_id),
+              state,
+              note: String(ev.content.note || ""),
+              updatedAt: Date.now(),
+              source: "server",
+              pct:
+                typeof ev.content.progress_pct === "number"
+                  ? ev.content.progress_pct
+                  : null,
+              handle: ev.sender_handle,
+            });
+          }
+        }
+        return;
+      }
+      // A real message means the work produced output (or the conversation moved
+      // on) — drop any cached progress so a reopen doesn't resurrect it.
+      if (f.room_id && !mine && isCountableEvent(ev)) clearRoomProgress(f.room_id);
       // Received-message sound — global (any room), once per event.
       // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
       if (!mine && isCountableEvent(ev)) {
@@ -436,7 +481,11 @@ function ChatPageInner() {
       const isOpen = selectedRef.current === rid;
       const preview = eventPreview(ev);
       const countableIncoming = isCountableEvent(ev) && !mine && !isOpen;
-      if (countableIncoming && ownerId) {
+      // Observer rooms (inter-silicon chats I only watch) never raise a
+      // notification, browser alert, or toast — read-only visibility shouldn't
+      // ping me. The unread indicator below still updates so the Observing tab
+      // can show there's new activity.
+      if (countableIncoming && ownerId && !room.observed) {
         const body = notificationBody(ev);
         const display = notificationDisplay(room, contacts.byPeer);
         addNotification(ownerId, {
@@ -575,8 +624,15 @@ function ChatPageInner() {
     const q = sidebarQuery.trim().toLowerCase();
     const list = rooms.filter((r) => {
       // #8 — Unread filter hides any room that has nothing new for me.
-      if (activeTeamSlug && r.team_slug !== activeTeamSlug) return false;
-      if (showingOthers && r.team_slug) return false;
+      // Observed (inter-silicon) rooms live only in the Observing tab; every
+      // other tab excludes them, and the Observing tab excludes everything else.
+      if (showingObserving) {
+        if (!r.observed) return false;
+      } else {
+        if (r.observed) return false;
+        if (activeTeamSlug && r.team_slug !== activeTeamSlug) return false;
+        if (showingOthers && r.team_slug) return false;
+      }
       if (filters.unread && !r.unread) return false;
       if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
       if (q) {
@@ -604,7 +660,7 @@ function ChatPageInner() {
       return tb.localeCompare(ta);
     });
     return list;
-  }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers]);
+  }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers, showingObserving]);
 
   // Personal grouping applies only inside a real team tab and only when not
   // searching — the Others tab and any search fall back to the flat list.
@@ -795,7 +851,7 @@ function ChatPageInner() {
             <Plus />
           </button>
         </div>
-        {(teams.length > 0 || hasOtherRooms) && (
+        {(teams.length > 0 || hasOtherRooms || hasObservedRooms) && (
           <div className="flex items-stretch border-b bg-background">
             <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden py-2 pl-6 pr-3">
               {teams.map((team) => (
@@ -841,6 +897,23 @@ function ChatPageInner() {
                   )}
                 >
                   Others
+                </button>
+              )}
+              {hasObservedRooms && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTeamTab(OBSERVING_TAB);
+                    if (viewedTeam) router.push("/chat");
+                  }}
+                  className={cn(
+                    "max-w-40 shrink-0 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
+                    showingObserving
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-card text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  Observing
                 </button>
               )}
             </div>

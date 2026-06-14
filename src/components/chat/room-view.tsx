@@ -15,6 +15,7 @@ import {
   requestBrowserNotifications,
 } from "@/lib/notifications";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
+import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -351,7 +352,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     setLoading(false);
     setHydrated(false);
     setEvents(cachedEvents ?? []);
-    setActiveProgress(null);
+    // Restore an in-flight silicon progress line captured at the page level
+    // while this room was closed, so reopening a chat where work is still
+    // running shows progress immediately instead of waiting for the next frame.
+    setActiveProgress(getRoomProgress(roomId));
     clearReceiptTimer();
     setActivities({});
     setReplyTo(null);
@@ -1383,7 +1387,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               avatarSrc={progressAvatarSrc}
               avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
               staleMs={progressStaleMs}
-              onDismiss={() => setActiveProgress(null)}
+              onDismiss={() => {
+                clearRoomProgress(room.room_id);
+                setActiveProgress(null);
+              }}
             />
           ) : null}
           <div ref={endRef} />
@@ -1479,18 +1486,31 @@ function ProgressLine({
   staleMs?: number;
   onDismiss?: () => void;
 }) {
-  // Receipt phase: a plain "message sent" / "message read" line before the
-  // actual work progress kicks in.
+  // Receipt phase: "message sent" / "message read" before the actual work
+  // progress kicks in. Rendered with the same activity-line markup as the live
+  // progress line (mono uppercase copy + the pixel core) so it shares the
+  // "WORKING" styling and transitions seamlessly into real progress.
   if (entry.receipt) {
     const read = entry.receipt === "read";
     return (
-      <div className="my-2 flex w-full items-center gap-2">
+      <div className="my-2 flex w-full items-center justify-start gap-2">
         <div className="w-7 shrink-0">
           <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "silicon"} />
         </div>
-        <span className="text-sm text-muted-foreground">
-          {read ? "message read" : "message sent"}
-        </span>
+        <div className="min-w-0 max-w-[70%]">
+          <span className="silicon-activity-line flex min-h-7 items-center text-sm">
+            <span className="inline-flex min-w-0 max-w-full items-center gap-3 overflow-hidden">
+              <span className="silicon-activity-copy">
+                {read ? "message read" : "message sent"}
+              </span>
+              <span className="silicon-activity-core" aria-hidden="true">
+                {Array.from({ length: 16 }, (_, i) => (
+                  <span key={i} />
+                ))}
+              </span>
+            </span>
+          </span>
+        </div>
       </div>
     );
   }

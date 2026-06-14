@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Check, Checks, Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -86,39 +86,6 @@ const PROGRESS_MESSAGE_TYPES = new Set([
   "m.tts",
   "m.remote_browser",
 ]);
-const SILICON_PROGRESS_COPY = [
-  "Polishing the logic wafer",
-  "Asking the semicolons to behave",
-  "Counting electrons with suspicious confidence",
-  "Making the bits stand in a straight line",
-  "Convincing the cache it remembers this",
-  "Warming up the tiny decision engine",
-  "Sorting nonsense into useful nonsense",
-  "Consulting the motherboard council",
-];
-const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
-  reading_file: [
-    "Reading the file like it owes rent",
-    "Dusting fingerprints off the data",
-    "Turning document fog into clues",
-  ],
-  writing_file: [
-    "Negotiating with the blank file",
-    "Typing with ceremonial seriousness",
-    "Putting pixels where pixels belong",
-  ],
-  executing: [
-    "Pressing the serious-looking buttons",
-    "Letting the command line have opinions",
-    "Running the tiny factory floor",
-  ],
-  searching_web: [
-    "Checking the outside universe",
-    "Borrowing facts from the internet shelf",
-    "Peeking over the network fence",
-  ],
-  thinking: SILICON_PROGRESS_COPY,
-};
 const MIN_PROGRESS_STATUS_MS = 1000;
 // How long a "message sent / read" receipt shows before switching to the
 // actual silicon work progress.
@@ -1521,12 +1488,7 @@ function ProgressLine({
         <div className="w-7 shrink-0">
           <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "silicon"} />
         </div>
-        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          {read ? (
-            <Checks weight="bold" className="h-3.5 w-3.5 shrink-0" />
-          ) : (
-            <Check weight="bold" className="h-3.5 w-3.5 shrink-0" />
-          )}
+        <span className="text-sm text-muted-foreground">
           {read ? "message read" : "message sent"}
         </span>
       </div>
@@ -1655,9 +1617,8 @@ function ProgressLineLive({
           }
           return;
         }
-        if (entry.source === "server") return;
-        holdMsRef.current = 5000 + Math.floor(Math.random() * 5001);
-        setPhase("holding");
+        // Type the actual state/note once and hold — no random cycling.
+        return;
       }
     } else if (phase === "holding") {
       timeoutId = window.setTimeout(() => setPhase("erasing"), holdMsRef.current);
@@ -1706,10 +1667,10 @@ function ProgressLineLive({
 }
 
 function progressLineOptions(entry: ProgressEntry): string[] {
+  // The actual flow: the silicon's note if it sent one, else the real state.
   const note = meaningfulProgressNote(entry.note, entry.state);
   if (note) return [sentenceCase(note)];
-  if (entry.source === "server") return [progressStateLabel(entry.state)];
-  return PROGRESS_STATE_COPY[entry.state] ?? SILICON_PROGRESS_COPY;
+  return [progressStateLabel(entry.state)];
 }
 
 function randomProgressTick(length: number, previous: number): number {
@@ -1795,7 +1756,7 @@ function collapsePathMentions(value: string): string {
 
 function sentenceCase(value: string): string {
   const text = value.trim();
-  if (!text) return SILICON_PROGRESS_COPY[0];
+  if (!text) return "Working";
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 

@@ -984,6 +984,25 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     toast.error(err instanceof ApiError ? err.message : String(err));
   }, []);
 
+  // Empty-room "Say Hi" — sends a plain "hi" using the optimistic send flow.
+  const [sayingHi, setSayingHi] = React.useState(false);
+  const sayHi = React.useCallback(async () => {
+    if (sayingHi) return;
+    setSayingHi(true);
+    const clientId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `c_${Date.now()}`;
+    const payload: OptimisticPayload = { type: "m.text", content: { body: "hi" } };
+    onOptimisticAdd(clientId, payload);
+    try {
+      const real = await api.sendEvent(room.room_id, payload, clientId);
+      onAck(clientId, real);
+    } catch (e) {
+      onFail(clientId, e);
+    } finally {
+      setSayingHi(false);
+    }
+  }, [sayingHi, onOptimisticAdd, onAck, onFail, room.room_id]);
+
   // ----- Drag-and-drop a file onto the chat surface -----
   const onDragEnter = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes("Files")) return;
@@ -1253,15 +1272,16 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   no events match{" "}
                   <span className="text-foreground">&quot;{search}&quot;</span>
                 </span>
-              ) : peer ? (
-                // §2b — first-contact welcome: the two marks facing each other.
-                <span className="flex items-center justify-center gap-4 py-2">
-                  <IdAvatar seed={myUsername || "me"} src={myPhotoUrl} asciiSrc={myAscii} size={44} family="carbon" />
-                  <span className="font-mono text-xs text-muted-foreground">say hi →</span>
-                  <IdAvatar seed={peer.id} src={headerPhoto} asciiSrc={headerAscii} size={44} family={peer.kind} />
-                </span>
               ) : (
-                "no messages yet. say hi."
+                // §2b — first-contact: a simple prompt with a one-click Say Hi.
+                <div className="flex flex-col items-center gap-3 py-2 text-center">
+                  <span>no messages yet — say hi.</span>
+                  {!readOnly ? (
+                    <Button size="sm" onClick={sayHi} disabled={sayingHi}>
+                      {sayingHi ? "saying hi…" : "Say Hi"}
+                    </Button>
+                  ) : null}
+                </div>
               )}
             </div>
           ) : (

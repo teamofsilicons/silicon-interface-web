@@ -1307,16 +1307,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               );
             })
           )}
-          {shouldShowActiveProgress ? (
-            <ProgressLine
-              entry={activeProgress}
-              avatarSeed={progressAvatarHandle || headerSeed}
-              avatarSrc={progressAvatarSrc}
-              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
-              staleMs={progressStaleMs}
-              onDismiss={() => setActiveProgress(null)}
-            />
-          ) : null}
+          {/* Per-request progress indicator ([----] 0% "thinking" / "manager
+              spawning" line) removed by product decision. Progress state is
+              still tracked internally but never rendered. */}
           <div ref={endRef} />
         </div>
       </ScrollArea>

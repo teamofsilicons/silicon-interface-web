@@ -109,6 +109,11 @@ const MAX_ROWS = 12;
 const EMOJI_COLS = 8;
 const EMOJI_LIMIT = EMOJI_COLS * 4; // 4 rows
 const SILICON_TEXT_SEND_DELAY_MS = 5000;
+// Once a held silicon message is paused (you kept typing past the 5s mark),
+// emptying the input must NOT fire the send instantly — wait at least this long
+// after the box goes empty, so a quick clear/send of a follow-up doesn't
+// prematurely flush the held message.
+const SILICON_EMPTY_HOLD_MS = 10_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 
 // §6.6 — Up-front file validation, before we even ask for a presigned URL.
@@ -383,6 +388,9 @@ export function Composer({
   const textRef = React.useRef(text);
   const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
   const delayTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Timer for the post-empty hold: after a paused queue's input goes empty, we
+  // wait SILICON_EMPTY_HOLD_MS before sending instead of flushing immediately.
+  const emptyHoldTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [typingActive, setTypingActiveState] = React.useState(false);
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
@@ -637,6 +645,10 @@ export function Composer({
       clearTimeout(delayTimerRef.current);
       delayTimerRef.current = null;
     }
+    if (emptyHoldTimerRef.current) {
+      clearTimeout(emptyHoldTimerRef.current);
+      emptyHoldTimerRef.current = null;
+    }
   }, []);
 
   const hasContinuingDraft = React.useCallback(
@@ -727,8 +739,31 @@ export function Composer({
   );
 
   React.useEffect(() => {
-    if (!queuePaused || queuedTextCount === 0) return;
-    if (!hasContinuingDraft()) void flushDelayedTextQueue();
+    // Not paused → no post-empty countdown should be pending.
+    if (!queuePaused || queuedTextCount === 0) {
+      if (emptyHoldTimerRef.current) {
+        clearTimeout(emptyHoldTimerRef.current);
+        emptyHoldTimerRef.current = null;
+      }
+      return;
+    }
+    // Still typing a follow-up → keep holding; cancel any empty-hold countdown.
+    if (hasContinuingDraft()) {
+      if (emptyHoldTimerRef.current) {
+        clearTimeout(emptyHoldTimerRef.current);
+        emptyHoldTimerRef.current = null;
+      }
+      return;
+    }
+    // Input is empty while paused: wait at least SILICON_EMPTY_HOLD_MS before
+    // sending (NOT instantly). Don't restart an already-running countdown.
+    if (emptyHoldTimerRef.current) return;
+    emptyHoldTimerRef.current = setTimeout(() => {
+      emptyHoldTimerRef.current = null;
+      // Re-check: if they resumed typing in the meantime, this effect will have
+      // cancelled us; only send if the box is still empty.
+      if (!hasContinuingDraft()) void flushDelayedTextQueue();
+    }, SILICON_EMPTY_HOLD_MS);
   }, [flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
 
   React.useEffect(

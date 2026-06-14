@@ -218,7 +218,7 @@ export function MessageBubble({
             <button
               type="button"
               onClick={handleAvatarClick}
-              aria-label={senderDisplayName || senderHandle ? `${senderDisplayName || senderHandle} — profile` : "profile"}
+              aria-label={senderDisplayName || senderHandle ? `${senderDisplayName || senderHandle} - profile` : "profile"}
               className="block transition-opacity hover:opacity-80"
             >
               <IdAvatar

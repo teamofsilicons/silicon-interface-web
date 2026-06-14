@@ -112,12 +112,12 @@ export function PaymentBanner() {
             <div className="min-w-0 flex-1">
               {paused ? (
                 <span>
-                  <strong>{r.name}</strong> — <strong>services paused.</strong> {amount} is overdue
+                  <strong>{r.name}</strong> - <strong>services paused.</strong> {amount} is overdue
                   {due ? ` (due ${due})` : ""}. Pay now to resume.
                 </span>
               ) : grace ? (
                 <span>
-                  <strong>{r.name}</strong> — payment overdue. Your services will{" "}
+                  <strong>{r.name}</strong> - payment overdue. Your services will{" "}
                   <strong>
                     {daysToPause !== null
                       ? `pause in ${daysToPause} day${plural(daysToPause)}`
@@ -127,7 +127,7 @@ export function PaymentBanner() {
                 </span>
               ) : (
                 <span>
-                  <strong>{r.name}</strong> — payment of {amount}{" "}
+                  <strong>{r.name}</strong> - payment of {amount}{" "}
                   <strong>
                     {daysToDue !== null
                       ? `due in ${daysToDue} day${plural(daysToDue)}`

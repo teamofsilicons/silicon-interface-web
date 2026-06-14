@@ -97,7 +97,7 @@ export function PreferencesSection() {
           setPush(true);
           toast.success("push notifications on");
         } else if (result === "denied") {
-          toast.error("notifications are blocked for this site — allow them in the browser");
+          toast.error("notifications are blocked for this site - allow them in the browser");
         } else if (result === "unconfigured") {
           toast.error("push isn't configured on this server yet");
         } else {

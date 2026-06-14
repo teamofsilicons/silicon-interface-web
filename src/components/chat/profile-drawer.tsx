@@ -165,7 +165,7 @@ export function ProfileDrawer({
   // QA §7.1: only toast success on a real copy (insecure-context safe).
   const copy = async (label: string, value: string) => {
     if (await copyText(value)) toast.success(`${label} copied`);
-    else toast.error("couldn't copy — copy it manually");
+    else toast.error("couldn't copy - copy it manually");
   };
 
   return (
@@ -246,7 +246,7 @@ export function ProfileDrawer({
               )}
             </div>
             <p className="whitespace-pre-wrap text-sm text-foreground/90">
-              {contact.note || <span className="text-muted-foreground">—</span>}
+              {contact.note || <span className="text-muted-foreground">-</span>}
             </p>
           </div>
         )}

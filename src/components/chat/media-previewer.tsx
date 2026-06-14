@@ -83,7 +83,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
           )}
           {!isImage && !isVideo && !isAudio && !isPdf && (
             <p className="p-12 text-sm text-muted-foreground">
-              no inline preview available — use the download button.
+              no inline preview available - use the download button.
             </p>
           )}
         </div>

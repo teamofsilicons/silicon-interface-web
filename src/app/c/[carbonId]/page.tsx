@@ -28,7 +28,7 @@ export default function CarbonDeepLink() {
         // QA medium: a stale QR / deleted Carbon used to bounce silently to
         // /chat, leaving the user at a dead end with no idea why. Explain it.
         if (alive) {
-          toast.error(`couldn't find “${handle}” — that link may be expired`);
+          toast.error(`couldn't find “${handle}” - that link may be expired`);
           router.replace("/chat");
         }
       }

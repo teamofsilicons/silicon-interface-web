@@ -63,7 +63,7 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
         <DialogHeader>
           <DialogTitle>new direct conversation</DialogTitle>
           <DialogDescription>
-            Start a direct conversation — reach a person by their username, email, or
+            Start a direct conversation - reach a person by their username, email, or
             phone, or a silicon by its name.
           </DialogDescription>
         </DialogHeader>

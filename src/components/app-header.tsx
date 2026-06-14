@@ -20,7 +20,7 @@ export function AppHeader(_: Props) {
   return (
     <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
       <div className="flex w-full items-center justify-between px-6 py-3">
-        <Link href="/" className="flex items-center" aria-label="Silicon Interface — home">
+        <Link href="/" className="flex items-center" aria-label="Silicon Interface - home">
           <Logo size={26} withWordmark />
         </Link>
         {carbon && (
@@ -28,7 +28,7 @@ export function AppHeader(_: Props) {
             <NotificationCenter ownerId={carbon.carbon_id} />
             <Link
               href="/settings"
-              aria-label={`@${carbon.username} — profile`}
+              aria-label={`@${carbon.username} - profile`}
               title="profile"
               className="transition-opacity hover:opacity-80"
             >

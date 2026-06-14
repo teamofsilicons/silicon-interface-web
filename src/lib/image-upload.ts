@@ -38,7 +38,7 @@ export function validateImageFile(file: File): ImageValidation {
   }
   if (file.size > MAX_IMAGE_BYTES) {
     const mb = Math.round(MAX_IMAGE_BYTES / (1024 * 1024));
-    return { ok: false, error: `image is too large — keep it under ${mb} MB` };
+    return { ok: false, error: `image is too large - keep it under ${mb} MB` };
   }
   // Reject an empty/unknown type rather than guessing "image/png": an empty
   // type usually means a format we can't render (e.g. HEIC), and guessing PNG

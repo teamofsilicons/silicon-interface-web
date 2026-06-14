@@ -408,9 +408,6 @@ export function Composer({
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
   const [queuedTextCount, setQueuedTextCount] = React.useState(0);
-  // True once the draft wraps past a single line — drives the attach button's
-  // top border so it lines up with the grown text area.
-  const [isMultiline, setIsMultiline] = React.useState(false);
   // When the held message has entered its final countdown, this is the wall
   // time it will auto-send at (null otherwise). Drives the "will send in {N}s".
   const [emptyHoldEndsAt, setEmptyHoldEndsAt] = React.useState<number | null>(null);
@@ -450,7 +447,7 @@ export function Composer({
       // §6.7 — One file at a time. If something is already staged/uploading,
       // surface a clear message instead of silently aborting the first.
       if (fileRef.current) {
-        toast.error("one file at a time — send or remove the current attachment first.");
+        toast.error("one file at a time - send or remove the current attachment first.");
         return;
       }
       const err = validateFile(next);
@@ -475,7 +472,7 @@ export function Composer({
       const files = list ? Array.from(list) : [];
       if (files.length === 0) return;
       if (files.length > 1) {
-        toast.message(`attaching the first of ${files.length} files — one at a time.`);
+        toast.message(`attaching the first of ${files.length} files - one at a time.`);
       }
       attachFile(files[0] ?? null);
     },
@@ -675,8 +672,6 @@ export function Composer({
     const next = Math.min(Math.max(contentH, minH), maxH);
     el.style.height = `${next}px`;
     el.style.overflowY = contentH > maxH ? "auto" : "hidden";
-    // +1px epsilon so a single line (contentH ≈ minH) doesn't read as multiline.
-    setIsMultiline(contentH > minH + 1);
   }, [text]);
 
   const reset = () => {
@@ -1043,7 +1038,7 @@ export function Composer({
         setPendingVoice(null);
       } else {
         setPendingVoice({ blob, durationMs });
-        toast.error("voice note failed to send — tap retry to try again.");
+        toast.error("voice note failed to send - tap retry to try again.");
       }
     } finally {
       setBusy(false);
@@ -1217,7 +1212,7 @@ export function Composer({
           multiline drafts grow the text area. */}
       <div
         ref={barRef}
-        className="relative flex items-end border border-input transition-colors focus-within:border-ring"
+        className="relative flex items-stretch border border-input transition-colors focus-within:border-ring"
       >
         <input
           type="file"
@@ -1237,12 +1232,9 @@ export function Composer({
           title="attach file"
           aria-label="attach file"
           disabled={busy}
-          className={cn(
-            // Top border only once the draft wraps to a second line. With
-            // border-box the button stays 44px tall whether it's present or not.
-            "flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50",
-            isMultiline && "border-t",
-          )}
+          // Full-height cell (items-stretch) so the divider runs the whole bar
+          // and the icon stays centered as the textarea grows — no floating box.
+          className="flex w-11 min-h-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
         </button>
@@ -1372,7 +1364,7 @@ export function Composer({
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"
-            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            className="flex w-11 min-h-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >
             <Microphone />
           </button>
@@ -1382,7 +1374,7 @@ export function Composer({
             onClick={send}
             disabled={busy || (!!file && uploadStatus !== "ready")}
             aria-label="send"
-            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="flex w-11 min-h-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {busy || (!!file && uploadStatus === "uploading") ? (
               <CircleNotch className="animate-spin" />

@@ -103,7 +103,7 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
         const reason = first.reason;
         const detail = reason instanceof ApiError ? reason.message : "forward failed";
         toast.error(
-          `couldn't forward to ${failures.length} ${failures.length === 1 ? "chat" : "chats"} — ${detail}`,
+          `couldn't forward to ${failures.length} ${failures.length === 1 ? "chat" : "chats"} - ${detail}`,
         );
       }
 

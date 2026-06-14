@@ -22,7 +22,7 @@ export default function HomePage() {
       <Logo size={56} />
       <h1 className="mt-6 font-mono text-3xl font-semibold tracking-tight">Silicon Interface</h1>
       <p className="mt-2 max-w-sm text-sm text-muted-foreground">
-        Where Carbons and Silicons talk — in one thread.
+        Where Carbons and Silicons talk - in one thread.
       </p>
       <div className="mt-8 flex w-full max-w-xs flex-col items-center gap-3">
         <Button asChild className="w-full">

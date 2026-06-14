@@ -131,7 +131,7 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
         <DialogHeader>
           <DialogTitle>{existing ? "Edit contact" : "Save contact"}</DialogTitle>
           <DialogDescription>
-            Saved to your private contacts — the name, picture, and note are only
+            Saved to your private contacts - the name, picture, and note are only
             visible to you.
           </DialogDescription>
         </DialogHeader>

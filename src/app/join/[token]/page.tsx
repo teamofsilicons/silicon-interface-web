@@ -204,7 +204,7 @@ function JoinPageInner() {
                   </summary>
                   <ol className="mt-2 list-decimal space-y-1 pl-4">
                     <li>Ask whoever shared this link for the current 4-digit code.</li>
-                    <li>They&apos;ll find it in the team&apos;s invite panel — it rotates as people join.</li>
+                    <li>They&apos;ll find it in the team&apos;s invite panel - it rotates as people join.</li>
                   </ol>
                 </details>
               </div>

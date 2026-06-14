@@ -7,7 +7,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
     <main className="bg-dots flex min-h-screen flex-col">
       <header className="px-6 pt-6">
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between">
-          <Link href="/" className="flex items-center" aria-label="Silicon Interface — home">
+          <Link href="/" className="flex items-center" aria-label="Silicon Interface - home">
             <Logo size={26} withWordmark />
           </Link>
         </div>

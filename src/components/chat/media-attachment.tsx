@@ -187,7 +187,7 @@ export function MediaAttachment({
     return (
       <div className="inline-flex items-center gap-2 border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
         <ShieldWarning className="h-4 w-4 shrink-0" weight="fill" />
-        <span>attachment blocked — failed a safety scan</span>
+        <span>attachment blocked - failed a safety scan</span>
       </div>
     );
   }

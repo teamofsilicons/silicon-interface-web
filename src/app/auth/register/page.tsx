@@ -131,7 +131,7 @@ function RegisterPageInner() {
       const r = await api.registerEmailStart(email.trim(), flowId || undefined);
       if (r.existing) {
         setNudge(false);
-        toast.message("You already have an account — taking you to log in.");
+        toast.message("You already have an account - taking you to log in.");
         goLogin(email.trim());
         return;
       }
@@ -169,7 +169,7 @@ function RegisterPageInner() {
     wrap(async () => {
       const r = await api.registerPhoneStart(phoneE164, flowId || undefined);
       if (r.existing) {
-        toast.message("You already have an account — taking you to log in.");
+        toast.message("You already have an account - taking you to log in.");
         goLogin(phoneE164);
         return;
       }
@@ -327,7 +327,7 @@ function RegisterPageInner() {
             <DialogTitle>Use a personal email?</DialogTitle>
             <DialogDescription>
               <span className="font-medium text-foreground">{email}</span>
-              {" "}looks like a work address. Use a personal email so you always have access to the interface — we&apos;ll ask for a work email when you join your team&apos;s Silicon.
+              {" "}looks like a work address. Use a personal email so you always have access to the interface - we&apos;ll ask for a work email when you join your team&apos;s Silicon.
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col items-center gap-4">

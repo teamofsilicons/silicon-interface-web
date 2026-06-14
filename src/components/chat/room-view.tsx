@@ -1275,7 +1275,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               ) : (
                 // §2b — first-contact: a simple prompt with a one-click Say Hi.
                 <div className="flex flex-col items-center gap-3 py-2 text-center">
-                  <span>no messages yet — say hi.</span>
+                  <span>no messages yet - say hi.</span>
                   {!readOnly ? (
                     <Button size="sm" onClick={sayHi} disabled={sayingHi}>
                       {sayingHi ? "saying hi…" : "Say Hi"}
@@ -1393,7 +1393,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         <div className="flex items-center justify-center gap-2 border-t bg-muted/40 px-6 py-4 text-xs text-muted-foreground">
           <Eye className="h-3.5 w-3.5" />
           You&rsquo;re observing this silicon-to-silicon conversation. It&rsquo;s
-          read-only — you can&rsquo;t send messages here.
+          read-only - you can&rsquo;t send messages here.
         </div>
       ) : (
         <Composer
@@ -1477,7 +1477,7 @@ function ProgressLine({
         </div>
         <div className="min-w-0 max-w-[70%] space-y-1">
           <span className="block text-sm text-muted-foreground">
-            {dead ? "still working — no update for a while." : `still working — no update for ${secs}s.`}
+            {dead ? "still working - no update for a while." : `still working - no update for ${secs}s.`}
           </span>
           {dead && onDismiss ? (
             <button

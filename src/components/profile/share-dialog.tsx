@@ -65,17 +65,17 @@ export function ShareDialog({
   // success on a real copy; otherwise tell the user it failed.
   const copyLink = async () => {
     if (await copyText(link)) toast.success("link copied");
-    else toast.error("couldn't copy — copy it manually");
+    else toast.error("couldn't copy - copy it manually");
   };
   const copyId = async () => {
     if (await copyText(carbonId)) toast.success("Carbon ID copied");
-    else toast.error("couldn't copy — copy it manually");
+    else toast.error("couldn't copy - copy it manually");
   };
 
   const download = async () => {
     const qr = qrRef.current;
     if (!qr) {
-      toast.error("share card not ready yet — try again in a moment");
+      toast.error("share card not ready yet - try again in a moment");
       return;
     }
     try {
@@ -355,7 +355,7 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
     dataUrl = canvas.toDataURL("image/png");
   } catch {
     throw new Error(
-      "couldn't export the share card — the logo is blocking it. Try the copy-link button instead.",
+      "couldn't export the share card - the logo is blocking it. Try the copy-link button instead.",
     );
   }
   const a = document.createElement("a");

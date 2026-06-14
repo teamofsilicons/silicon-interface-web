@@ -1236,7 +1236,7 @@ export function Composer({
         >
           <Paperclip />
         </button>
-        <div className="relative flex min-w-0 flex-1 flex-col border border-input transition-colors focus-within:border-ring">
+        <div className="relative flex min-h-11 min-w-0 flex-1 items-center border border-input transition-colors focus-within:border-ring">
           <textarea
             ref={taRef}
             autoFocus
@@ -1263,7 +1263,7 @@ export function Composer({
             }}
             placeholder="message…"
             rows={MIN_ROWS}
-            className="min-h-11 resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
+            className="w-full resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
             onPaste={(e) => {
               // Paste a screenshot (or any file) to attach it. We only consume
               // the event when the clipboard actually carries a file — a normal

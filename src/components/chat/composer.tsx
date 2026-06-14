@@ -411,6 +411,9 @@ export function Composer({
   // When the held message has entered its final countdown, this is the wall
   // time it will auto-send at (null otherwise). Drives the "will send in {N}s".
   const [emptyHoldEndsAt, setEmptyHoldEndsAt] = React.useState<number | null>(null);
+  // True once "wait 1 more minute" has extended the hold — flips the flush
+  // button label from "send anyways" to "send now".
+  const [waitExtended, setWaitExtended] = React.useState(false);
   // Bumped on an interval while the countdown runs so the banner re-renders.
   const [, setHoldTick] = React.useState(0);
 
@@ -692,6 +695,7 @@ export function Composer({
     setQueuedTextCount(0);
     setQueuePaused(false);
     setEmptyHoldEndsAt(null);
+    setWaitExtended(false);
     clearDelayTimer();
     onHoldStateChange?.(false);
   }, [clearDelayTimer, onHoldStateChange]);
@@ -808,6 +812,7 @@ export function Composer({
     // Input is empty while paused: wait at least SILICON_EMPTY_HOLD_MS before
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
+    setWaitExtended(false);
     setEmptyHoldEndsAt(Date.now() + SILICON_EMPTY_HOLD_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
@@ -829,6 +834,7 @@ export function Composer({
   // "wait 1 more minute" — push the auto-send out by SILICON_WAIT_MORE_MS.
   const waitOneMoreMinute = React.useCallback(() => {
     if (emptyHoldTimerRef.current) clearTimeout(emptyHoldTimerRef.current);
+    setWaitExtended(true);
     setEmptyHoldEndsAt(Date.now() + SILICON_WAIT_MORE_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
@@ -1167,7 +1173,7 @@ export function Composer({
                   onClick={() => void flushDelayedTextQueue()}
                   className="text-xs font-medium text-foreground underline-offset-2 hover:underline"
                 >
-                  send anyways
+                  {waitExtended ? "send now" : "send anyways"}
                 </button>
               </div>
             </>

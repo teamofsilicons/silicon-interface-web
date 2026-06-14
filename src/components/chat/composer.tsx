@@ -1238,10 +1238,10 @@ export function Composer({
           aria-label="attach file"
           disabled={busy}
           className={cn(
-            // border-t is always reserved (transparent) so toggling its color
-            // when the draft goes multiline never changes the button's height.
-            "flex h-11 w-11 shrink-0 items-center justify-center border-r border-t border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50",
-            !isMultiline && "border-t-transparent",
+            // Top border only once the draft wraps to a second line. With
+            // border-box the button stays 44px tall whether it's present or not.
+            "flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50",
+            isMultiline && "border-t",
           )}
         >
           <Paperclip />

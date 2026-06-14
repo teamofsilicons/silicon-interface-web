@@ -97,6 +97,12 @@ interface Props {
   onClearReply?: () => void;
   /** Delay text sends in direct silicon chats so nearby follow-ups can merge. */
   delayTextForSilicon?: boolean;
+  /** Fires when a silicon text enters / leaves the held state, so the parent
+   *  can reflect "holding the message…" on the progress line. */
+  onHoldStateChange?: (holding: boolean) => void;
+  /** The parent stashes our `cancelQueued(clientId)` here so deleting a held
+   *  message's bubble can drop it from the queue (never sends it). */
+  cancelQueuedRef?: React.MutableRefObject<((clientId: string) => void) | null>;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -333,6 +339,8 @@ export function Composer({
   replyTo,
   onClearReply,
   delayTextForSilicon = false,
+  onHoldStateChange,
+  cancelQueuedRef,
 }: Props) {
   const [text, setText] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
@@ -685,7 +693,25 @@ export function Composer({
     setQueuePaused(false);
     setEmptyHoldEndsAt(null);
     clearDelayTimer();
-  }, [clearDelayTimer]);
+    onHoldStateChange?.(false);
+  }, [clearDelayTimer, onHoldStateChange]);
+
+  // Drop a held message from the queue when its bubble is deleted — never send.
+  const cancelQueued = React.useCallback(
+    (clientId: string) => {
+      if (delayedTextQueueRef.current.some((it) => it.clientId === clientId)) {
+        clearDelayedQueue();
+      }
+    },
+    [clearDelayedQueue],
+  );
+  React.useEffect(() => {
+    if (!cancelQueuedRef) return;
+    cancelQueuedRef.current = cancelQueued;
+    return () => {
+      cancelQueuedRef.current = null;
+    };
+  }, [cancelQueuedRef, cancelQueued]);
 
   const flushDelayedTextQueue = React.useCallback(
     async (extra?: QueuedTextSend, optimistic = true) => {
@@ -732,6 +758,7 @@ export function Composer({
       delayedTextQueueRef.current = [item];
       setQueuedTextCount(1);
       setQueuePaused(false);
+      onHoldStateChange?.(true);
       onOptimisticAdd(clientId, buildQueuedPayload([item]));
       clearDelayTimer();
       delayTimerRef.current = setTimeout(() => {
@@ -747,6 +774,7 @@ export function Composer({
       flushDelayedTextQueue,
       hasContinuingDraft,
       onClearReply,
+      onHoldStateChange,
       onOptimisticAdd,
       replyTo,
     ],

@@ -154,6 +154,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // we never clear unread for messages that are only in the localStorage cache.
   const [hydrated, setHydrated] = React.useState(false);
   const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
+  // True while the composer is holding a silicon text (not yet sent) — shows
+  // "holding the message until you finish typing." in place of silicon progress.
+  const [holdingMessage, setHoldingMessage] = React.useState(false);
+  // The composer publishes its cancelQueued(clientId) here so deleting a held
+  // message's bubble drops it from the send queue.
+  const cancelQueuedRef = React.useRef<((clientId: string) => void) | null>(null);
   // §1.1 — a monotonically-advancing tick used to detect a progress line that
   // has gone stale (silicon crashed / backend restarted with no `done` frame).
   const [progressNow, setProgressNow] = React.useState(() => Date.now());
@@ -698,6 +704,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // actually performs the redaction.
   const [pendingDelete, setPendingDelete] = React.useState<Event | null>(null);
   const onSelfDelete = (ev: Event) => {
+    // A held/optimistic message that never reached the server: cancel the
+    // queued send and drop the bubble — nothing to redact, no confirm needed.
+    const clientId = (ev as LocalEvent)._clientId;
+    if (ev.event_id.startsWith("temp-") && clientId) {
+      cancelQueuedRef.current?.(clientId);
+      setHoldingMessage(false);
+      setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
+      return;
+    }
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
     setPendingDelete(ev);
   };
@@ -1307,9 +1322,25 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               );
             })
           )}
-          {/* Activity line (avatar + working copy) shows; the determinate
-              [####----] % bar itself is stripped out inside ProgressLine. */}
-          {shouldShowActiveProgress ? (
+          {/* While a silicon text is held (not yet sent), say so instead of
+              showing silicon progress — the silicon hasn't received it yet. */}
+          {holdingMessage ? (
+            <div className="my-2 flex w-full items-center justify-start gap-2">
+              <div className="w-7 shrink-0">
+                <IdAvatar
+                  seed={progressAvatarHandle || headerSeed}
+                  src={progressAvatarSrc}
+                  size={28}
+                  family={peer?.kind === "silicon" ? "silicon" : "carbon"}
+                />
+              </div>
+              <span className="text-sm text-muted-foreground">
+                holding the message until you finish typing.
+              </span>
+            </div>
+          ) : shouldShowActiveProgress ? (
+            // Activity line (avatar + working copy); the [####----] % bar is
+            // stripped out inside ProgressLine.
             <ProgressLine
               entry={activeProgress}
               avatarSeed={progressAvatarHandle || headerSeed}
@@ -1356,6 +1387,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           replyTo={replyTo}
           onClearReply={() => setReplyTo(null)}
           delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
+          onHoldStateChange={setHoldingMessage}
+          cancelQueuedRef={cancelQueuedRef}
         />
       )}
 

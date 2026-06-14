@@ -114,6 +114,8 @@ const SILICON_TEXT_SEND_DELAY_MS = 5000;
 // after the box goes empty, so a quick clear/send of a follow-up doesn't
 // prematurely flush the held message.
 const SILICON_EMPTY_HOLD_MS = 10_000;
+// "wait 1 more minute" extends the post-empty hold by this much.
+const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 
 // §6.6 — Up-front file validation, before we even ask for a presigned URL.
@@ -398,6 +400,11 @@ export function Composer({
   // True once the draft wraps past a single line — drives the attach button's
   // top border so it lines up with the grown text area.
   const [isMultiline, setIsMultiline] = React.useState(false);
+  // When the held message has entered its final countdown, this is the wall
+  // time it will auto-send at (null otherwise). Drives the "will send in {N}s".
+  const [emptyHoldEndsAt, setEmptyHoldEndsAt] = React.useState<number | null>(null);
+  // Bumped on an interval while the countdown runs so the banner re-renders.
+  const [, setHoldTick] = React.useState(0);
 
   React.useEffect(() => {
     textRef.current = text;
@@ -676,6 +683,7 @@ export function Composer({
     delayedTextQueueRef.current = [];
     setQueuedTextCount(0);
     setQueuePaused(false);
+    setEmptyHoldEndsAt(null);
     clearDelayTimer();
   }, [clearDelayTimer]);
 
@@ -750,6 +758,7 @@ export function Composer({
       if (emptyHoldTimerRef.current) {
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
+        setEmptyHoldEndsAt(null);
       }
       return;
     }
@@ -758,19 +767,41 @@ export function Composer({
       if (emptyHoldTimerRef.current) {
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
+        setEmptyHoldEndsAt(null);
       }
       return;
     }
     // Input is empty while paused: wait at least SILICON_EMPTY_HOLD_MS before
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
+    setEmptyHoldEndsAt(Date.now() + SILICON_EMPTY_HOLD_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
+      setEmptyHoldEndsAt(null);
       // Re-check: if they resumed typing in the meantime, this effect will have
       // cancelled us; only send if the box is still empty.
       if (!hasContinuingDraft()) void flushDelayedTextQueue();
     }, SILICON_EMPTY_HOLD_MS);
   }, [flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
+
+  // Re-render once a second while the countdown is live so "will send in {N}s"
+  // ticks down.
+  React.useEffect(() => {
+    if (emptyHoldEndsAt == null) return;
+    const id = window.setInterval(() => setHoldTick((t) => t + 1), 250);
+    return () => window.clearInterval(id);
+  }, [emptyHoldEndsAt]);
+
+  // "wait 1 more minute" — push the auto-send out by SILICON_WAIT_MORE_MS.
+  const waitOneMoreMinute = React.useCallback(() => {
+    if (emptyHoldTimerRef.current) clearTimeout(emptyHoldTimerRef.current);
+    setEmptyHoldEndsAt(Date.now() + SILICON_WAIT_MORE_MS);
+    emptyHoldTimerRef.current = setTimeout(() => {
+      emptyHoldTimerRef.current = null;
+      setEmptyHoldEndsAt(null);
+      if (!hasContinuingDraft()) void flushDelayedTextQueue();
+    }, SILICON_WAIT_MORE_MS);
+  }, [flushDelayedTextQueue, hasContinuingDraft]);
 
   React.useEffect(
     () => () => {
@@ -1082,16 +1113,43 @@ export function Composer({
       )}
       {queuePaused && queuedTextCount > 0 && (
         <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
-          <span className="min-w-0">
-            Seems like you are still thinking and continuing the message, we will hold the message until then.
-          </span>
-          <button
-            type="button"
-            onClick={() => void flushDelayedTextQueue()}
-            className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
-          >
-            Send anyway
-          </button>
+          {emptyHoldEndsAt != null ? (
+            // Final countdown — auto-send is imminent.
+            <>
+              <span className="min-w-0">
+                will send in {Math.max(0, Math.ceil((emptyHoldEndsAt - Date.now()) / 1000))} second
+                {Math.max(0, Math.ceil((emptyHoldEndsAt - Date.now()) / 1000)) === 1 ? "" : "s"}.
+              </span>
+              <div className="flex shrink-0 items-center gap-4">
+                <button
+                  type="button"
+                  onClick={waitOneMoreMinute}
+                  className="text-xs font-medium text-foreground underline-offset-2 hover:underline"
+                >
+                  wait 1 more minute
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void flushDelayedTextQueue()}
+                  className="text-xs font-medium text-foreground underline-offset-2 hover:underline"
+                >
+                  send anyways
+                </button>
+              </div>
+            </>
+          ) : (
+            // Still typing — hold open-endedly until they finish.
+            <>
+              <span className="min-w-0">holding the message until you finish typing.</span>
+              <button
+                type="button"
+                onClick={() => void flushDelayedTextQueue()}
+                className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
+              >
+                Send anyway
+              </button>
+            </>
+          )}
         </div>
       )}
       {/* One bordered field. Controls stay fixed-height at the bottom while

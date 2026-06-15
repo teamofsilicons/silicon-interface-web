@@ -5,19 +5,20 @@ import { CircleNotch } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
-import type { Room } from "@/lib/types";
+import { useAuth } from "@/lib/auth";
+import { useTeams } from "@/lib/use-teams";
+import type { Room, TeamMembership } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { IdAvatar } from "@/components/profile/id-avatar";
 
 interface Props {
   open: boolean;
@@ -25,35 +26,96 @@ interface Props {
   onCreated: (room: Room) => void;
 }
 
+interface Person {
+  kind: "carbon" | "silicon";
+  handle: string;
+  photoUrl: string | null;
+}
+
+// Flatten the members of every team I'm in into a single de-duplicated people
+// list. A person can appear in more than one team; key by kind+handle so they
+// show once.
+function peopleFromMembers(rows: TeamMembership[], me: string | null): Person[] {
+  const seen = new Map<string, Person>();
+  for (const m of rows) {
+    if (m.member_kind !== "carbon" && m.member_kind !== "silicon") continue;
+    if (!m.member_handle) continue;
+    if (me && m.member_handle === me) continue;
+    const key = `${m.member_kind}:${m.member_handle}`;
+    if (!seen.has(key)) {
+      seen.set(key, {
+        kind: m.member_kind,
+        handle: m.member_handle,
+        photoUrl: m.member_photo_url,
+      });
+    }
+  }
+  return [...seen.values()].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "carbon" ? -1 : 1;
+    return a.handle.localeCompare(b.handle);
+  });
+}
+
 export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
-  const [kind, setKind] = React.useState<"carbon" | "silicon">("carbon");
-  const [handle, setHandle] = React.useState("");
-  const [loading, setLoading] = React.useState(false);
-  const closeRef = React.useRef<HTMLButtonElement>(null);
+  const { teams } = useTeams();
+  const { carbon } = useAuth();
+  const myUsername = carbon?.username ?? null;
 
-  // QA medium: a whitespace-only handle was treated as valid and sent to the
-  // API. Validate against the trimmed value everywhere.
-  const trimmedHandle = handle.trim();
+  const [people, setPeople] = React.useState<Person[]>([]);
+  const [loadingPeople, setLoadingPeople] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+  // Manual fallback for reaching someone not in any of my teams (by username,
+  // email, or phone for a carbon; by name for a silicon).
+  const [manualKind, setManualKind] = React.useState<"carbon" | "silicon">("carbon");
+  const [opening, setOpening] = React.useState<string | null>(null);
 
-  const start = async () => {
-    if (!trimmedHandle) return;
-    setLoading(true);
+  // Load every team's members once the dialog opens.
+  React.useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setLoadingPeople(true);
+    Promise.all(teams.map((t) => api.teamMembers(t.slug).catch(() => [] as TeamMembership[])))
+      .then((lists) => {
+        if (!alive) return;
+        setPeople(peopleFromMembers(lists.flat(), myUsername));
+      })
+      .finally(() => {
+        if (alive) setLoadingPeople(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, teams, myUsername]);
+
+  // Reset transient state on close.
+  React.useEffect(() => {
+    if (!open) {
+      setQuery("");
+      setOpening(null);
+    }
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q ? people.filter((p) => p.handle.toLowerCase().includes(q)) : people;
+
+  const openWith = async (kind: "carbon" | "silicon", handle: string, busyKey: string) => {
+    const trimmed = handle.trim();
+    if (!trimmed) return;
+    setOpening(busyKey);
     try {
       const target =
         kind === "carbon"
-          ? await api.carbonByHandle(trimmedHandle)
-          : await api.siliconByHandle(trimmedHandle);
+          ? await api.carbonByHandle(trimmed)
+          : await api.siliconByHandle(trimmed);
       const id = "carbon_id" in target ? target.carbon_id : target.silicon_id;
       const room = await api.directRoom(kind, id);
       onCreated(room);
       onOpenChange(false);
-      setHandle("");
-      toast.success(`opened room with @${trimmedHandle}`);
+      toast.success(`opened room with @${trimmed}`);
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : String(e);
-      toast.error(msg);
+      toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
-      setLoading(false);
+      setOpening(null);
     }
   };
 
@@ -61,53 +123,96 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>new direct conversation</DialogTitle>
+          <DialogTitle>new conversation</DialogTitle>
           <DialogDescription>
-            Start a direct conversation - reach a person by their username, email, or
-            phone, or a silicon by its name.
+            Pick someone from your teams, or reach a person by username, email, or phone.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          <div className="flex gap-2">
-            <Button
-              variant={kind === "carbon" ? "default" : "outline"}
-              onClick={() => setKind("carbon")}
-              type="button"
-            >
-              carbon
-            </Button>
-            <Button
-              variant={kind === "silicon" ? "default" : "outline"}
-              onClick={() => setKind("silicon")}
-              type="button"
-            >
-              silicon
-            </Button>
+        <div className="space-y-3">
+          <Input
+            autoFocus
+            placeholder="search people…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+
+          <div className="max-h-72 overflow-y-auto border">
+            {loadingPeople ? (
+              <div className="flex items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+                <CircleNotch className="animate-spin" /> loading people…
+              </div>
+            ) : filtered.length === 0 ? (
+              <p className="p-6 text-center text-sm text-muted-foreground">
+                {people.length === 0 ? "No team members found." : "No match."}
+              </p>
+            ) : (
+              <ul className="divide-y">
+                {filtered.map((p) => {
+                  const busyKey = `${p.kind}:${p.handle}`;
+                  return (
+                    <li key={busyKey}>
+                      <button
+                        type="button"
+                        disabled={opening !== null}
+                        onClick={() => openWith(p.kind, p.handle, busyKey)}
+                        className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent disabled:opacity-50"
+                      >
+                        <IdAvatar
+                          seed={`${p.kind}:${p.handle}`}
+                          src={p.photoUrl}
+                          size={32}
+                          family={p.kind === "silicon" ? "silicon" : "carbon"}
+                        />
+                        <span className="min-w-0 flex-1 truncate">@{p.handle}</span>
+                        <span className="label-mono shrink-0 text-[10px] text-muted-foreground">
+                          {p.kind}
+                        </span>
+                        {opening === busyKey && <CircleNotch className="animate-spin shrink-0" />}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="handle">handle</Label>
-            <Input
-              id="handle"
-              autoFocus
-              placeholder={kind === "carbon" ? "alice / +14155551212 / alice@..." : "Ada"}
-              value={handle}
-              onChange={(e) => setHandle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && trimmedHandle && !loading) start();
-              }}
-            />
-          </div>
-          <div className="flex justify-end gap-2">
-            <DialogClose ref={closeRef} asChild>
-              <Button variant="ghost" type="button">
-                cancel
-              </Button>
-            </DialogClose>
-            <Button onClick={start} disabled={!trimmedHandle || loading}>
-              {loading && <CircleNotch className="animate-spin" />}
-              open
-            </Button>
-          </div>
+
+          {/* Manual fallback — reach someone who isn't in any of my teams. */}
+          {q && filtered.length === 0 && (
+            <div className="space-y-2 border-t pt-3">
+              <p className="text-xs text-muted-foreground">
+                Reach “{query.trim()}” directly:
+              </p>
+              <div className="flex gap-2">
+                <div className="flex gap-1">
+                  <Button
+                    variant={manualKind === "carbon" ? "default" : "outline"}
+                    size="sm"
+                    type="button"
+                    onClick={() => setManualKind("carbon")}
+                  >
+                    carbon
+                  </Button>
+                  <Button
+                    variant={manualKind === "silicon" ? "default" : "outline"}
+                    size="sm"
+                    type="button"
+                    onClick={() => setManualKind("silicon")}
+                  >
+                    silicon
+                  </Button>
+                </div>
+                <Button
+                  size="sm"
+                  className="ml-auto"
+                  disabled={opening !== null}
+                  onClick={() => openWith(manualKind, query, "manual")}
+                >
+                  {opening === "manual" && <CircleNotch className="animate-spin" />}
+                  open
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

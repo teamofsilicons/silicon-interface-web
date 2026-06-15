@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
+import { IdAvatar } from "@/components/profile/id-avatar";
 
 /** Upload to a presigned URL via XHR (fetch can't report upload progress).
  *  Reports 0–100% and supports abort; rejects with an AbortError when the
@@ -103,6 +104,8 @@ interface Props {
   /** The parent stashes our `cancelQueued(clientId)` here so deleting a held
    *  message's bubble can drop it from the queue (never sends it). */
   cancelQueuedRef?: React.MutableRefObject<((clientId: string) => void) | null>;
+  /** People in this room offered by the `@` mention autocomplete. */
+  mentionCandidates?: MentionCandidate[];
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -274,6 +277,70 @@ function EmojiQuickPicker({
   );
 }
 
+/** A person that can be @-mentioned from the composer (a room participant). */
+export interface MentionCandidate {
+  kind: "carbon" | "silicon";
+  handle: string;
+  name: string;
+  photoUrl?: string | null;
+  asciiUrl?: string | null;
+}
+
+// `@token` immediately before the caret. The lookbehind stops it firing inside
+// an email ("alice@…") or any word — `@` must follow whitespace / line start.
+const MENTION_RE = /(?<![\w@])@([a-z0-9_.\-]*)$/i;
+
+function filterMentions(candidates: MentionCandidate[], query: string): MentionCandidate[] {
+  const q = query.toLowerCase();
+  return candidates
+    .filter((c) => !q || c.handle.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+    .slice(0, 8);
+}
+
+/**
+ * Inline @-mention picker rendered above the textarea when the user types `@`.
+ * Up/down navigates, Tab/Enter inserts. Mouse click inserts.
+ */
+function MentionQuickPicker({
+  results,
+  selectedIndex,
+  onPick,
+}: {
+  results: MentionCandidate[];
+  selectedIndex: number;
+  onPick: (c: MentionCandidate) => void;
+}) {
+  if (results.length === 0) return null;
+  return (
+    <div className="absolute bottom-full inset-x-0 z-50 mb-2 max-h-64 overflow-y-auto border bg-card p-1 shadow-md">
+      {results.map((c, i) => (
+        <button
+          key={`${c.kind}:${c.handle}`}
+          type="button"
+          onClick={() => onPick(c)}
+          className={cn(
+            "flex w-full items-center gap-2 border border-transparent px-2 py-1.5 text-left transition-colors hover:bg-accent",
+            i === selectedIndex && "border-foreground bg-accent",
+          )}
+        >
+          <IdAvatar
+            seed={`${c.kind}:${c.handle}`}
+            src={c.photoUrl}
+            asciiSrc={c.asciiUrl}
+            size={24}
+            family={c.kind === "silicon" ? "silicon" : "carbon"}
+          />
+          <span className="min-w-0 flex-1 truncate text-sm">
+            <span className="font-medium">{c.name}</span>{" "}
+            <span className="text-muted-foreground">@{c.handle}</span>
+          </span>
+          <span className="label-mono shrink-0 text-[10px] text-muted-foreground">{c.kind}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Quick one-line label of an event for the reply preview chip. */
 function previewOf(ev: Event): string {
   const c = ev.content as Record<string, unknown>;
@@ -344,6 +411,7 @@ export function Composer({
   delayTextForSilicon = false,
   onHoldStateChange,
   cancelQueuedRef,
+  mentionCandidates = [],
 }: Props) {
   const [text, setText] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
@@ -483,6 +551,34 @@ export function Composer({
   // popover anchored to the textarea.
   const [emojiQuery, setEmojiQuery] = React.useState<string | null>(null);
   const [emojiIdx, setEmojiIdx] = React.useState(0);
+  // @-mention picker — null when inactive; otherwise the partial handle typed.
+  const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
+  const [mentionIdx, setMentionIdx] = React.useState(0);
+  const mentionResults = React.useMemo(
+    () => (mentionQuery === null ? [] : filterMentions(mentionCandidates, mentionQuery)),
+    [mentionQuery, mentionCandidates],
+  );
+  // Replace the `@token` immediately before the caret with `@handle ` and drop
+  // the picker. Shared by keyboard (Tab/Enter) and mouse selection. Plain
+  // function so it can reference `persistDraft` (declared below) lazily.
+  const insertMention = (cand: MentionCandidate) => {
+    const el = taRef.current;
+    const caret = el?.selectionStart ?? text.length;
+    const before = text.slice(0, caret);
+    const after = text.slice(caret);
+    const replaced = before.replace(MENTION_RE, `@${cand.handle} `);
+    const nextText = replaced + after;
+    setText(nextText);
+    persistDraft(nextText);
+    setMentionQuery(null);
+    queueMicrotask(() => {
+      const ta = taRef.current;
+      if (!ta) return;
+      ta.focus();
+      const pos = replaced.length;
+      ta.selectionStart = ta.selectionEnd = pos;
+    });
+  };
   // The emoji picker spans the full chat bar; its column count is derived from
   // the bar's width so it fills the row instead of sitting in a narrow box.
   const barRef = React.useRef<HTMLDivElement>(null);
@@ -1260,6 +1356,14 @@ export function Composer({
               } else {
                 setEmojiQuery(null);
               }
+              // `@handle` autocomplete for the people in this room.
+              const at = upTo.match(MENTION_RE);
+              if (at && mentionCandidates.length > 0) {
+                setMentionQuery(at[1] ?? "");
+                setMentionIdx(0);
+              } else {
+                setMentionQuery(null);
+              }
             }}
             placeholder="message…"
             rows={MIN_ROWS}
@@ -1279,6 +1383,31 @@ export function Composer({
               // IME is composing so a composition-commit Enter doesn't pick an
               // emoji or send.
               if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              // @-mention picker — a vertical list: ↑/↓ move, Tab/Enter insert,
+              // Esc dismisses. Takes the keys before the emoji/send handling.
+              if (mentionQuery !== null && mentionResults.length > 0) {
+                const n = mentionResults.length;
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setMentionIdx((i) => Math.min(i + 1, n - 1));
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setMentionIdx((i) => Math.max(0, i - 1));
+                  return;
+                }
+                if (e.key === "Tab" || e.key === "Enter") {
+                  e.preventDefault();
+                  insertMention(mentionResults[mentionIdx] ?? mentionResults[0]);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setMentionQuery(null);
+                  return;
+                }
+              }
               // Emoji picker keyboard navigation — true 2-D grid: ←/→ move one
               // cell, ↑/↓ move a whole row.
               if (emojiQuery !== null) {
@@ -1397,6 +1526,13 @@ export function Composer({
               setEmojiQuery(null);
               queueMicrotask(() => taRef.current?.focus());
             }}
+          />
+        )}
+        {mentionQuery !== null && (
+          <MentionQuickPicker
+            results={mentionResults}
+            selectedIndex={mentionIdx}
+            onPick={insertMention}
           />
         )}
       </div>

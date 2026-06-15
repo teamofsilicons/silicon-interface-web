@@ -27,7 +27,11 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
-import { Composer, type OptimisticPayload } from "@/components/chat/composer";
+import {
+  Composer,
+  type MentionCandidate,
+  type OptimisticPayload,
+} from "@/components/chat/composer";
 import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
@@ -286,6 +290,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     for (const p of room.peers) m.set(p.handle, p);
     return m;
   }, [room.peers]);
+  // People in this room offered by the composer's `@` autocomplete.
+  const mentionCandidates = React.useMemo<MentionCandidate[]>(
+    () =>
+      room.peers.map((p) => ({
+        kind: p.kind,
+        handle: p.handle,
+        name: p.name,
+        photoUrl: p.profile_photo_url,
+        asciiUrl: p.profile_ascii_url,
+      })),
+    [room.peers],
+  );
   const contactForSender = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
@@ -1440,6 +1456,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
           onHoldStateChange={setHoldingMessage}
           cancelQueuedRef={cancelQueuedRef}
+          mentionCandidates={mentionCandidates}
         />
       )}
 

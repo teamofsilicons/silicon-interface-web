@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import {
   CircleNotch,
   Copy,
@@ -326,7 +327,10 @@ function MembersPreview({
                     <span className="label-mono">{m.member_kind}</span>
                   </span>
                 </span>
-                <span className="label-mono shrink-0">{m.role}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="label-mono">{m.role}</span>
+                  <MessageMemberButton member={m} />
+                </span>
               </li>
             );
           })}
@@ -384,7 +388,10 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
                     <span className="label-mono">{m.member_kind}</span>
                   </span>
                 </span>
-                <span className="label-mono shrink-0">{m.role}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="label-mono">{m.role}</span>
+                  <MessageMemberButton member={m} />
+                </span>
               </li>
             );
           })}
@@ -403,6 +410,41 @@ function memberAvatarFamily(m: TeamMembership): "carbon" | "silicon" {
 function teamMemberHandle(m: TeamMembership): string {
   const handle = m.member_handle || "";
   return handle ? `@${handle}` : `${m.member_kind} #${m.member_id}`;
+}
+
+// Opens (or reuses) a direct room with a team member and jumps to it. The
+// member's public id isn't in the membership row, so we resolve it by handle —
+// the same path the new-conversation dialog uses.
+function MessageMemberButton({ member }: { member: TeamMembership }) {
+  const router = useRouter();
+  const [busy, setBusy] = React.useState(false);
+  const handle = member.member_handle;
+  const kind = member.member_kind === "silicon" ? "silicon" : "carbon";
+  const open = async () => {
+    if (!handle) {
+      toast.error("This member has no handle to message.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const target =
+        kind === "carbon"
+          ? await api.carbonByHandle(handle)
+          : await api.siliconByHandle(handle);
+      const id = "carbon_id" in target ? target.carbon_id : target.silicon_id;
+      const room = await api.directRoom(kind, id);
+      router.push(`/chat?room=${encodeURIComponent(room.room_id)}`);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button variant="outline" size="sm" onClick={open} disabled={busy}>
+      {busy ? <Spinner className="h-3.5 w-3.5" /> : "message"}
+    </Button>
+  );
 }
 
 function MemberTab({

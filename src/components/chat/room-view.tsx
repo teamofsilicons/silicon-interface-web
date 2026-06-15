@@ -417,10 +417,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         .events(room.room_id, undefined, 100)
         .then((evs) => {
           setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
-          // §1.7 — drop any server-sourced progress that was animating while we
-          // were offline; the task may have finished. A still-working silicon
-          // re-sends a fresh progress frame, which re-establishes the line.
-          setActiveProgress((p) => (p && p.source === "server" ? null : p));
+          // §1.7 — after a (re)connect, resync the progress line from the cache
+          // rather than blindly dropping it: this effect also fires on the first
+          // connect of a fresh page load, and the cache (persisted across
+          // refresh) is the only record of an in-flight task. A local receipt
+          // line is left alone. If the task finished, the cache was cleared by a
+          // `done`/message frame and this resolves to null.
+          setActiveProgress((p) =>
+            p && p.source !== "server" ? p : getRoomProgress(room.room_id),
+          );
         })
         .catch(() => undefined);
     }
@@ -1065,10 +1070,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   }, [visibleEvents, search]);
   const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;
   const latestVisibleEventId = latestVisibleEvent?.event_id ?? null;
-  const shouldShowActiveProgress =
-    !search &&
-    activeProgress?.roomId === room.room_id &&
-    latestVisibleEvent?.sender_kind !== "silicon";
+  // Show the progress line whenever there's active progress for this room. We
+  // no longer suppress it just because the latest visible event is from a
+  // silicon: progress is cleared the moment a real message lands (both locally
+  // and in the page-level cache), so a lingering entry genuinely means work is
+  // still in flight — including inter-silicon chats where every message is a
+  // silicon, and multi-step tasks that post then keep working.
+  const shouldShowActiveProgress = !search && activeProgress?.roomId === room.room_id;
   const progressAvatarHandle = React.useMemo(() => {
     // §1.6 — prefer the handle the progress frame actually attributed the work
     // to, instead of guessing "most recent silicon sender".

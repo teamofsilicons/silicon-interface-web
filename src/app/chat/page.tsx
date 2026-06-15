@@ -437,35 +437,6 @@ function ChatPageInner() {
     if (f.type === "event") {
       const ev = f.event;
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
-      // Record silicon work per room so reopening a closed chat can restore its
-      // progress line — the room view is unmounted while closed and misses
-      // these frames. Progress frames never touch the sidebar, so we stop here.
-      if (ev.type === "m.progress") {
-        if (f.room_id) {
-          const state = (ev.content.state as ProgressState) || "thinking";
-          if (state === "done") {
-            clearRoomProgress(f.room_id);
-          } else {
-            setRoomProgress(f.room_id, {
-              roomId: f.room_id,
-              groupId: String(ev.content.progress_group_id || ev.event_id),
-              state,
-              note: String(ev.content.note || ""),
-              updatedAt: Date.now(),
-              source: "server",
-              pct:
-                typeof ev.content.progress_pct === "number"
-                  ? ev.content.progress_pct
-                  : null,
-              handle: ev.sender_handle,
-            });
-          }
-        }
-        return;
-      }
-      // A real message means the work produced output (or the conversation moved
-      // on) — drop any cached progress so a reopen doesn't resurrect it.
-      if (f.room_id && !mine && isCountableEvent(ev)) clearRoomProgress(f.room_id);
       // Received-message sound — global (any room), once per event.
       // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
       if (!mine && isCountableEvent(ev)) {
@@ -573,15 +544,52 @@ function ChatPageInner() {
     }
     // §1d — track which rooms have a silicon mid-task so the sidebar can shimmer
     // them even when not open. Progress frames (and m.progress events) drive it.
+    // We also stash the full progress entry per room (progress-cache) so a chat
+    // reopened or refreshed mid-task can restore its progress line — the room
+    // view is unmounted while closed and never sees these frames.
     const progressRoom = "room_id" in f ? f.room_id : null;
     if (f.type === "progress" && progressRoom) {
-      if (f.state === "done") markRoomWorking(progressRoom, false);
-      else if (f.state) markRoomWorking(progressRoom, true);
+      if (f.state === "done") {
+        markRoomWorking(progressRoom, false);
+        clearRoomProgress(progressRoom);
+      } else if (f.state && f.progress_group_id) {
+        markRoomWorking(progressRoom, true);
+        setRoomProgress(progressRoom, {
+          roomId: progressRoom,
+          groupId: f.progress_group_id,
+          state: f.state as ProgressState,
+          note: f.note || "",
+          updatedAt: Date.now(),
+          source: "server",
+          pct: typeof f.progress_pct === "number" ? f.progress_pct : null,
+          handle: f.member_handle ?? null,
+        });
+      }
     } else if (f.type === "event" && f.event.type === "m.progress" && progressRoom) {
-      markRoomWorking(progressRoom, String(f.event.content.state) !== "done");
+      const state = String(f.event.content.state || "thinking");
+      if (state === "done") {
+        markRoomWorking(progressRoom, false);
+        clearRoomProgress(progressRoom);
+      } else {
+        markRoomWorking(progressRoom, true);
+        setRoomProgress(progressRoom, {
+          roomId: progressRoom,
+          groupId: String(f.event.content.progress_group_id || f.event.event_id),
+          state: state as ProgressState,
+          note: String(f.event.content.note || ""),
+          updatedAt: Date.now(),
+          source: "server",
+          pct:
+            typeof f.event.content.progress_pct === "number"
+              ? f.event.content.progress_pct
+              : null,
+          handle: f.event.sender_handle,
+        });
+      }
     } else if (f.type === "event" && progressRoom && f.event.sender_kind === "silicon") {
       // a real silicon message means it's done working in that room
       markRoomWorking(progressRoom, false);
+      clearRoomProgress(progressRoom);
     }
     };
   });

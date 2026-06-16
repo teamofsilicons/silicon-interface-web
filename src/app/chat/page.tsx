@@ -116,6 +116,23 @@ const OTHERS_TAB = "__others__";
 // own conversations.
 const OBSERVING_TAB = "__observing__";
 
+/** Small unread count chip shown on a team / Others / Observing tab. Inverts
+ *  its colors on the active tab (which has a dark/foreground background). */
+function TabUnreadBadge({ count, active }: { count: number; active: boolean }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex h-4 min-w-[1rem] shrink-0 items-center justify-center rounded-full px-1 text-[9px] font-semibold leading-none",
+        active ? "bg-background text-foreground" : "bg-primary text-primary-foreground",
+      )}
+      aria-label={`${count} unread message${count === 1 ? "" : "s"}`}
+    >
+      {count > 99 ? "99+" : count}
+    </span>
+  );
+}
+
 function loadSidebarWidth(): number {
   if (typeof window === "undefined") return SB_DEFAULT;
   const v = Number(window.localStorage.getItem(SB_STORAGE));
@@ -232,26 +249,57 @@ function ChatPageInner() {
   const activeTeam = activeTeamSlug ? teams.find((t) => t.slug === activeTeamSlug) : null;
   const viewedTeam = teamViewSlug ? teams.find((t) => t.slug === teamViewSlug) : null;
 
+  // Unread totals per tab, so the team / Others / Observing tabs show a badge
+  // when there's something new in a tab you're not currently looking at. Same
+  // count source as the per-room badges in the room list.
+  const unreadByTab = React.useMemo(() => {
+    const teamsMap: Record<string, number> = {};
+    let others = 0;
+    let observing = 0;
+    for (const r of rooms) {
+      const n = r.unread_count ?? (r.unread ? 1 : 0);
+      if (n <= 0) continue;
+      if (r.observed) observing += n;
+      else if (r.team_slug) teamsMap[r.team_slug] = (teamsMap[r.team_slug] ?? 0) + n;
+      else others += n;
+    }
+    return { teams: teamsMap, others, observing };
+  }, [rooms]);
+
   React.useEffect(() => {
     if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) {
       setActiveTeamTab(teamViewSlug);
     }
   }, [teamViewSlug, teams]);
 
+  // When a room is *first* opened, jump the tab to its team so the list shows
+  // the room in context. We only do this once per opened room (tracked by id)
+  // — after that the user is free to click into other team tabs / Others while
+  // the chat stays open, instead of the tab snapping back every render.
+  const autoTabbedRoomRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) return;
-    if (selectedRoom?.observed) {
-      if (activeTeamTab !== OBSERVING_TAB) setActiveTeamTab(OBSERVING_TAB);
+    if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) {
+      autoTabbedRoomRef.current = selectedRoom?.room_id ?? null;
       return;
     }
-    if (selectedRoom?.team_slug && teams.some((t) => t.slug === selectedRoom.team_slug)) {
-      if (activeTeamTab !== selectedRoom.team_slug) setActiveTeamTab(selectedRoom.team_slug);
-      return;
+    const roomId = selectedRoom?.room_id ?? null;
+    if (roomId && roomId !== autoTabbedRoomRef.current) {
+      autoTabbedRoomRef.current = roomId;
+      if (selectedRoom?.observed) {
+        if (activeTeamTab !== OBSERVING_TAB) setActiveTeamTab(OBSERVING_TAB);
+        return;
+      }
+      if (selectedRoom?.team_slug && teams.some((t) => t.slug === selectedRoom.team_slug)) {
+        if (activeTeamTab !== selectedRoom.team_slug) setActiveTeamTab(selectedRoom.team_slug);
+        return;
+      }
+      if (!selectedRoom?.team_slug && hasOtherRooms) {
+        if (activeTeamTab !== OTHERS_TAB) setActiveTeamTab(OTHERS_TAB);
+        return;
+      }
     }
-    if (selectedRoom && !selectedRoom.team_slug && hasOtherRooms) {
-      if (activeTeamTab !== OTHERS_TAB) setActiveTeamTab(OTHERS_TAB);
-      return;
-    }
+    if (!roomId) autoTabbedRoomRef.current = null;
+    // Always keep the active tab pointing at something that exists.
     const activeValid =
       teams.some((t) => t.slug === activeTeamTab) ||
       (activeTeamTab === OTHERS_TAB && hasOtherRooms) ||
@@ -888,6 +936,10 @@ function ChatPageInner() {
                     )}
                   />
                   <span className="min-w-0 truncate">{team.name}</span>
+                  <TabUnreadBadge
+                    count={unreadByTab.teams[team.slug] ?? 0}
+                    active={activeTeamSlug === team.slug}
+                  />
                 </button>
               ))}
               {hasOtherRooms && (
@@ -898,13 +950,14 @@ function ChatPageInner() {
                     if (viewedTeam) router.push("/chat");
                   }}
                   className={cn(
-                    "max-w-40 shrink-0 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
+                    "inline-flex max-w-40 shrink-0 items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
                     showingOthers
                       ? "border-foreground bg-foreground text-background"
                       : "border-border bg-card text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  Others
+                  <span className="min-w-0 truncate">Others</span>
+                  <TabUnreadBadge count={unreadByTab.others} active={showingOthers} />
                 </button>
               )}
               {hasObservedRooms && (
@@ -915,13 +968,14 @@ function ChatPageInner() {
                     if (viewedTeam) router.push("/chat");
                   }}
                   className={cn(
-                    "max-w-40 shrink-0 truncate border px-3 py-1.5 text-xs font-semibold transition-colors",
+                    "inline-flex max-w-40 shrink-0 items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
                     showingObserving
                       ? "border-foreground bg-foreground text-background"
                       : "border-border bg-card text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  Observing
+                  <span className="min-w-0 truncate">Observing</span>
+                  <TabUnreadBadge count={unreadByTab.observing} active={showingObserving} />
                 </button>
               )}
             </div>

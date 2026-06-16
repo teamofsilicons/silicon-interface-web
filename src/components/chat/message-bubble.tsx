@@ -754,11 +754,24 @@ function Body({ event }: { event: Event }) {
       );
     case "m.file":
       return c.media_id ? (
-        <MediaAttachment
-          mediaId={String(c.media_id)}
-          mime={c.mime ? String(c.mime) : undefined}
-          caption={c.caption ? String(c.caption) : undefined}
-        />
+        <div className="space-y-1.5">
+          <MediaAttachment
+            mediaId={String(c.media_id)}
+            mime={c.mime ? String(c.mime) : undefined}
+            filename={c.filename ? String(c.filename) : undefined}
+            caption={c.caption ? String(c.caption) : undefined}
+            showCaption={false}
+          />
+          {/* New-format messages carry the filename separately, so the caption
+              is the user's typed text — render it as a normal message line.
+              Legacy messages stored the filename in `caption`, so we leave it
+              to the chip and don't echo it here. */}
+          {c.filename && c.caption ? (
+            <div className="whitespace-pre-wrap break-words text-sm">
+              {renderMarkdown(String(c.caption))}
+            </div>
+          ) : null}
+        </div>
       ) : (
         <span className="text-xs text-muted-foreground">{String(c.caption ?? "attachment")}</span>
       );

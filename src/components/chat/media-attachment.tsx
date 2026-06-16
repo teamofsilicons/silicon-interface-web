@@ -28,6 +28,7 @@ export function MediaAttachment({
   mediaId,
   mime,
   caption,
+  filename: filenameProp,
   showCaption = true,
   localUrl,
   localDurationMs,
@@ -36,6 +37,10 @@ export function MediaAttachment({
   mediaId: string;
   mime?: string;
   caption?: string;
+  /** The attachment's real filename, kept separate from `caption` (the typed
+   *  message text). Used as the label on file/PDF chips and downloads. Legacy
+   *  messages omit it — there we fall back to `caption`. */
+  filename?: string;
   /** When false, the caption isn't rendered here — the bubble shows it as a
    *  normal message line instead (so image+text reads like a message). */
   showCaption?: boolean;
@@ -265,8 +270,10 @@ export function MediaAttachment({
     );
   }
 
-  // Filename / label used by both the preview header and the download.
-  const filename = caption?.trim() || media?.kind || "file";
+  // Filename / label used by both the preview header and the download. Prefer
+  // the explicit filename; fall back to the caption for legacy messages that
+  // stored the name there.
+  const filename = filenameProp?.trim() || caption?.trim() || media?.kind || "file";
 
   // Image — clickable thumbnail in a fixed-aspect frame so the bubble
   // doesn't reflow when the actual pixels arrive over the network. When the

@@ -1013,9 +1013,18 @@ export function Composer({
       setBusy(true);
       try {
         const fileType = up.mime.startsWith("image/") ? "m.image" : "m.file";
+        // Keep the real filename and the user's typed text in separate fields.
+        // `caption` is the message text (only when typed); `filename` is the
+        // attachment's name. Bundling text into `caption` made the file chip
+        // render the typed text as the filename ("renamed the file").
         await api.sendEvent(roomId, {
           type: fileType,
-          content: { media_id: up.mediaId, mime: up.mime, caption: body || file.name },
+          content: {
+            media_id: up.mediaId,
+            mime: up.mime,
+            filename: file.name,
+            ...(body ? { caption: body } : {}),
+          },
         });
         track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         reset();

@@ -16,6 +16,12 @@ import {
 } from "@/lib/notifications";
 import type { Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
+import {
+  setPendingPreview,
+  updatePendingPreview,
+  clearPendingPreview,
+  failPendingPreview,
+} from "@/lib/pending-preview";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -80,6 +86,28 @@ interface ProgressEntry {
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
+
+/** One-line text for an outgoing (optimistic) message, shown in the sidebar
+ *  preview while it's waiting / in flight. No emojis — the row renders an icon. */
+function outgoingPreviewText(payload: OptimisticPayload): string {
+  const c = (payload.content ?? {}) as Record<string, unknown>;
+  switch (payload.type) {
+    case "m.text":
+      return String(c.body ?? "");
+    case "m.image":
+      return c.caption ? String(c.caption) : "photo";
+    case "m.file":
+      return c.filename ? String(c.filename) : "attachment";
+    case "m.voice":
+      return "voice note";
+    case "m.tts":
+      return "audio";
+    case "m.remote_browser":
+      return "Silicon Browser link";
+    default:
+      return "message";
+  }
+}
 // Background refresh interval — keeps relative timestamps, read receipts,
 // and any out-of-band events fresh even if the WS connection blips.
 const POLL_INTERVAL_MS = 10_000;
@@ -409,7 +437,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     const cachedEvents = readRoomEventSnippet(roomId);
     setLoading(false);
     setHydrated(false);
-    setEvents(cachedEvents ?? []);
+    // Messages present when the chat opens are historical — force them final so
+    // a missed finalize frame doesn't replay the "streaming…" state as if the
+    // message just arrived. Live streaming still flows in via WS frames.
+    setEvents((cachedEvents ?? []).map((e) => ({ ...e, is_final: true })));
     // Restore an in-flight silicon progress line captured at the page level
     // while this room was closed, so reopening a chat where work is still
     // running shows progress immediately instead of waiting for the next frame.
@@ -428,7 +459,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         if (!mounted) return;
         setEvents((prev) => {
           const pending = prev.filter((e) => e.event_id.startsWith("temp-") || e._status === "pending");
-          return mergeServerEvents(pending, evs, myUsername);
+          // Loaded history is complete — mark final so it doesn't replay
+          // "streaming…" on open (live deltas still arrive via WS).
+          const finalized = evs.map((e) => ({ ...e, is_final: true }));
+          return mergeServerEvents(pending, finalized, myUsername);
         });
         setHasMore(evs.length >= 100); // §2.7 — a full window may have older history
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
@@ -1008,6 +1042,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         }
         return [...prev, placeholder];
       });
+      // Surface the outgoing message in the sidebar preview while it's waiting
+      // to send / in flight (cleared on ack, marked failed on error).
+      setPendingPreview(room.room_id, {
+        clientId,
+        text: outgoingPreviewText(payload),
+        status: "waiting",
+      });
       requestBottomStick("smooth");
       // No progress yet — we don't show anything until the message is actually
       // sent (see onAck → showReceipt).
@@ -1036,6 +1077,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
     requestBottomStick("smooth");
+    // Sent — the sidebar's last_event will reflect it; drop the pending preview.
+    clearPendingPreview(room.room_id, clientId);
     playAckTick(); // §3b — the confirm half of "send → delivered"
     setEvents((prev) => {
       const optIdx = prev.findIndex((e) => e._clientId === clientId);
@@ -1069,10 +1112,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(real.type)) {
       showReceipt("sent");
     }
-  }, [requestBottomStick, showsProgressForReplies, showReceipt]);
+  }, [requestBottomStick, showsProgressForReplies, showReceipt, room.room_id]);
 
   const onOptimisticUpdate = React.useCallback(
     (clientId: string, payload: OptimisticPayload) => {
+      updatePendingPreview(room.room_id, clientId, outgoingPreviewText(payload));
       setEvents((prev) =>
         prev.map((e) =>
           e._clientId === clientId
@@ -1086,16 +1130,20 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         ),
       );
     },
-    [],
+    [room.room_id],
   );
 
-  const onFail = React.useCallback((clientId: string, err: unknown) => {
-    setEvents((prev) =>
-      prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
-    );
-    setActiveProgress((prev) => (prev?.groupId === `local:${clientId}` ? null : prev));
-    toast.error(err instanceof ApiError ? err.message : String(err));
-  }, []);
+  const onFail = React.useCallback(
+    (clientId: string, err: unknown) => {
+      setEvents((prev) =>
+        prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
+      );
+      failPendingPreview(room.room_id, clientId);
+      setActiveProgress((prev) => (prev?.groupId === `local:${clientId}` ? null : prev));
+      toast.error(err instanceof ApiError ? err.message : String(err));
+    },
+    [room.room_id],
+  );
 
   // Empty-room "Say Hi" — sends a plain "hi" using the optimistic send flow.
   const [sayingHi, setSayingHi] = React.useState(false);
@@ -1255,7 +1303,16 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     };
 
-    const runActive = !search && shouldShowActiveProgress && !holdingMessage;
+    // Once the silicon has replied to the run's group (any silicon message after
+    // the anchor message), drop the status — one run = one status, and it clears
+    // the moment a reply lands. Prevents stale "working…" lingering forever.
+    const runActiveRaw = !search && shouldShowActiveProgress && !holdingMessage;
+    const anchorIdx =
+      runActiveRaw && runAnchorKey ? displayRows.findIndex((e) => keyOf(e) === runAnchorKey) : -1;
+    const repliedAfterAnchor =
+      anchorIdx >= 0 &&
+      displayRows.slice(anchorIdx + 1).some((e) => e.sender_kind === "silicon");
+    const runActive = runActiveRaw && !repliedAfterAnchor;
 
     const raw: Array<{ item: Item; iso: string }> = [];
     let cur: { party: Party; events: Row[] } | null = null;
@@ -1615,7 +1672,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                           onReply={readOnly ? undefined : onReply}
                           onReact={readOnly ? undefined : onReact}
                           onForward={readOnly ? undefined : onForward}
-                          onDelete={readOnly ? undefined : onSelfDelete}
+                          // No self-delete in silicon↔carbon direct chats — the
+                          // silicon has already received/acted on the message.
+                          onDelete={
+                            readOnly || (room.kind === "direct" && peer?.kind === "silicon")
+                              ? undefined
+                              : onSelfDelete
+                          }
                           pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
                         />
                       );

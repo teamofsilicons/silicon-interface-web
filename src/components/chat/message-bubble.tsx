@@ -261,6 +261,14 @@ export function MessageBubble({
         inGroupGap ? "my-0.5" : "my-1.5",
         isMine ? "justify-end" : "justify-start",
       )}
+      // Double-clicking the empty space beside a message replies (the gutter
+      // opposite the bubble — right of a received message, left of a sent one).
+      // The guard keeps it from firing on the bubble/content itself.
+      onDoubleClick={(e) => {
+        if (redacted || !onReply) return;
+        if (e.target !== e.currentTarget) return;
+        onReply(event);
+      }}
     >
       {!isMine && (
         // Avatar slot stays present even on middle-of-group bubbles so the
@@ -332,7 +340,6 @@ export function MessageBubble({
                 : "bg-bubble-received",
           )}
           onContextMenu={openMenuGesture}
-          onDoubleClick={openMenuGesture}
         >
           {/* Quoted parent so a reply visibly references its target. */}
           {replyToEvent && !redacted && (

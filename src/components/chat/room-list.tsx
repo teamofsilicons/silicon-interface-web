@@ -6,6 +6,7 @@ import {
   CaretLeft,
   Check,
   Checks,
+  Clock,
   Eye,
   File,
   FolderSimple,
@@ -14,12 +15,14 @@ import {
   PencilSimple,
   SpeakerHigh,
   Trash,
+  WarningCircle,
 } from "@phosphor-icons/react/dist/ssr";
 
 import type { Contact, Room } from "@/lib/types";
 import { roomDisplay } from "@/lib/peers";
 import { contactKey } from "@/lib/use-contacts";
 import { useDraft } from "@/lib/drafts";
+import { usePendingPreview } from "@/lib/pending-preview";
 import { cn, relativeTime } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -422,6 +425,9 @@ function RoomRow({
   // An unsent draft takes over the preview line (italic "draft: …"), like
   // Telegram. Updates live as the composer writes to the shared draft store.
   const draft = useDraft(r.room_id);
+  // An outgoing message still waiting to send / in flight (e.g. the silicon 5s
+  // hold) shows in the preview with a clock until it lands in last_event.
+  const pending = usePendingPreview(r.room_id);
   const currentGroupId = groupControls?.assignmentByRoom[r.room_id];
   const currentGroup = currentGroupId
     ? groupControls?.groups.find((g) => g.id === currentGroupId)
@@ -528,7 +534,21 @@ function RoomRow({
                 unread > 0 ? "text-foreground" : "text-muted-foreground",
               )}
             >
-              {draft ? (
+              {pending ? (
+                <span
+                  className={cn(
+                    "flex min-w-0 items-center gap-1 align-middle",
+                    pending.status === "failed" && "text-destructive",
+                  )}
+                >
+                  {pending.status === "failed" ? (
+                    <WarningCircle className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <Clock className="h-3 w-3 shrink-0" />
+                  )}
+                  <span className="min-w-0 truncate">{pending.text}</span>
+                </span>
+              ) : draft ? (
                 <span className="italic">
                   <span className="text-foreground/70">draft:</span> {draft}
                 </span>

@@ -14,7 +14,7 @@ import {
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
 import { playReceived, playReceivedSilicon } from "@/lib/sounds";
-import type { Contact, Event, ProgressState, Room, WsFrame } from "@/lib/types";
+import type { Contact, Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, setRoomProgress } from "@/lib/progress-cache";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
@@ -69,7 +69,7 @@ function eventPreview(ev: Event): string | null {
     case "m.voice":
       return "🎙 voice note";
     case "m.remote_browser":
-      return "🌐 Remote Browser link";
+      return "🌐 Silicon Browser link";
     case "m.tts": {
       const t = String(c.text ?? "").trim();
       return t ? `🔊 ${t.slice(0, 80)}` : "🔊 audio";
@@ -115,6 +115,8 @@ const OTHERS_TAB = "__others__";
 // tabs so the silicon-to-silicon traffic is easy to find and doesn't clutter my
 // own conversations.
 const OBSERVING_TAB = "__observing__";
+// Shared empty set so rooms with no resolved team return a stable reference.
+const EMPTY_SLUGS: ReadonlySet<string> = new Set<string>();
 
 /** Small unread-count chip shown on a team / Others / Observing tab. Inverts
  *  its colors on the active tab (which has a dark/foreground background). */
@@ -238,9 +240,75 @@ function ChatPageInner() {
   const myUsername = carbon?.username ?? null;
   const selectedRoom = rooms.find((r) => r.room_id === selected);
   const hasObservedRooms = rooms.some((r) => r.observed);
-  // A non-observed room with no team is an "Other"; observed rooms are routed to
-  // their own tab regardless of team.
-  const hasOtherRooms = rooms.some((r) => !r.team_slug && !r.observed);
+
+  // A direct chat started by id carries no team_slug from the backend, so it
+  // would land in "Others" even when its peer is on one of my teams. Load each
+  // of my teams' rosters and build `${kind}:${handle}` → set-of-team-slugs, so a
+  // room can be placed under every team its peers belong to (a person can be on
+  // several). `membershipsLoaded` lets the auto-tab effect wait for this rather
+  // than stranding a fresh room in Others before the rosters arrive.
+  const [peerTeams, setPeerTeams] = React.useState<Map<string, Set<string>>>(new Map());
+  const [membershipsLoaded, setMembershipsLoaded] = React.useState(false);
+  React.useEffect(() => {
+    if (!teams.length) {
+      setPeerTeams(new Map());
+      setMembershipsLoaded(true);
+      return;
+    }
+    let alive = true;
+    Promise.all(
+      teams.map((t) =>
+        api
+          .teamMembers(t.slug)
+          .then((rows) => ({ slug: t.slug, rows }))
+          .catch(() => ({ slug: t.slug, rows: [] as TeamMembership[] })),
+      ),
+    ).then((results) => {
+      if (!alive) return;
+      const map = new Map<string, Set<string>>();
+      for (const { slug, rows } of results) {
+        for (const m of rows) {
+          if (!m.member_handle) continue;
+          const key = `${m.member_kind}:${m.member_handle}`;
+          let set = map.get(key);
+          if (!set) {
+            set = new Set();
+            map.set(key, set);
+          }
+          set.add(slug);
+        }
+      }
+      setPeerTeams(map);
+      setMembershipsLoaded(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [teams]);
+
+  // The set of team slugs each room belongs to: its own team_slug (if any) plus
+  // every team its peers are members of. Empty set ⇒ the room lives in "Others".
+  const roomTeamsMap = React.useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const r of rooms) {
+      const slugs = new Set<string>();
+      if (r.team_slug) slugs.add(r.team_slug);
+      for (const p of r.peers) {
+        const s = peerTeams.get(`${p.kind}:${p.handle}`);
+        if (s) for (const slug of s) slugs.add(slug);
+      }
+      m.set(r.room_id, slugs);
+    }
+    return m;
+  }, [rooms, peerTeams]);
+  const roomTeams = React.useCallback(
+    (roomId: string): ReadonlySet<string> => roomTeamsMap.get(roomId) ?? EMPTY_SLUGS,
+    [roomTeamsMap],
+  );
+
+  // A non-observed room that belongs to no team is an "Other"; observed rooms
+  // are routed to their own tab regardless of team.
+  const hasOtherRooms = rooms.some((r) => !r.observed && roomTeams(r.room_id).size === 0);
   const activeTeamSlug = teams.some((t) => t.slug === activeTeamTab)
     ? activeTeamTab
     : null;
@@ -259,12 +327,19 @@ function ChatPageInner() {
     for (const r of rooms) {
       const n = r.unread_count ?? (r.unread ? 1 : 0);
       if (n <= 0) continue;
-      if (r.observed) observing += n;
-      else if (r.team_slug) teamsMap[r.team_slug] = (teamsMap[r.team_slug] ?? 0) + n;
-      else others += n;
+      if (r.observed) {
+        observing += n;
+        continue;
+      }
+      const slugs = roomTeams(r.room_id);
+      if (slugs.size) {
+        for (const slug of slugs) teamsMap[slug] = (teamsMap[slug] ?? 0) + n;
+      } else {
+        others += n;
+      }
     }
     return { teams: teamsMap, others, observing };
-  }, [rooms]);
+  }, [rooms, roomTeams]);
 
   React.useEffect(() => {
     if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) {
@@ -284,18 +359,31 @@ function ChatPageInner() {
     }
     const roomId = selectedRoom?.room_id ?? null;
     if (roomId && roomId !== autoTabbedRoomRef.current) {
-      autoTabbedRoomRef.current = roomId;
       if (selectedRoom?.observed) {
+        autoTabbedRoomRef.current = roomId;
         if (activeTeamTab !== OBSERVING_TAB) setActiveTeamTab(OBSERVING_TAB);
         return;
       }
-      if (selectedRoom?.team_slug && teams.some((t) => t.slug === selectedRoom.team_slug)) {
-        if (activeTeamTab !== selectedRoom.team_slug) setActiveTeamTab(selectedRoom.team_slug);
-        return;
-      }
-      if (!selectedRoom?.team_slug && hasOtherRooms) {
-        if (activeTeamTab !== OTHERS_TAB) setActiveTeamTab(OTHERS_TAB);
-        return;
+      const slugs = roomTeams(roomId);
+      // If the room resolves to no team but rosters are still loading, wait —
+      // jumping to Others now would strand a team chat there until the user
+      // re-opens it. Once loaded (or if it already has a team), commit the jump.
+      if (slugs.size === 0 && !membershipsLoaded) {
+        // leave autoTabbedRoomRef unset so we retry when memberships arrive
+      } else {
+        autoTabbedRoomRef.current = roomId;
+        if (slugs.size > 0) {
+          // Keep the current tab if it already shows this room; else jump to one
+          // of its teams.
+          if (!(activeTeamSlug && slugs.has(activeTeamSlug))) {
+            setActiveTeamTab([...slugs][0]);
+          }
+          return;
+        }
+        if (hasOtherRooms) {
+          if (activeTeamTab !== OTHERS_TAB) setActiveTeamTab(OTHERS_TAB);
+          return;
+        }
       }
     }
     if (!roomId) autoTabbedRoomRef.current = null;
@@ -309,7 +397,17 @@ function ChatPageInner() {
         teams[0]?.slug ?? (hasOtherRooms ? OTHERS_TAB : hasObservedRooms ? OBSERVING_TAB : ""),
       );
     }
-  }, [teamViewSlug, teams, selectedRoom, hasOtherRooms, hasObservedRooms, activeTeamTab]);
+  }, [
+    teamViewSlug,
+    teams,
+    selectedRoom,
+    hasOtherRooms,
+    hasObservedRooms,
+    activeTeamTab,
+    activeTeamSlug,
+    roomTeams,
+    membershipsLoaded,
+  ]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -686,8 +784,11 @@ function ChatPageInner() {
         if (!r.observed) return false;
       } else {
         if (r.observed) return false;
-        if (activeTeamSlug && r.team_slug !== activeTeamSlug) return false;
-        if (showingOthers && r.team_slug) return false;
+        const slugs = roomTeams(r.room_id);
+        // A team tab shows every room that belongs to that team (via its own
+        // team or any peer's membership); "Others" shows rooms in no team.
+        if (activeTeamSlug && !slugs.has(activeTeamSlug)) return false;
+        if (showingOthers && slugs.size > 0) return false;
       }
       if (filters.unread && !r.unread) return false;
       if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
@@ -716,7 +817,7 @@ function ChatPageInner() {
       return tb.localeCompare(ta);
     });
     return list;
-  }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers, showingObserving]);
+  }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers, showingObserving, roomTeams]);
 
   // Personal grouping applies only inside a real team tab and only when not
   // searching — the Others tab and any search fall back to the flat list.

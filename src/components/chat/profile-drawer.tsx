@@ -437,7 +437,11 @@ function VoiceTab({ events }: { events: Event[] }) {
   return (
     <div className="space-y-2">
       {events.map((e) => (
-        <MediaAttachment key={e.event_id} mediaId={String(e.content.media_id)} mime="audio/mpeg" />
+        <MediaAttachment
+          key={e.event_id}
+          mediaId={String(e.content.media_id)}
+          mime={e.content.mime ? String(e.content.mime) : "audio/webm"}
+        />
       ))}
     </div>
   );

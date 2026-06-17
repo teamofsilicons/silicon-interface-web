@@ -1211,23 +1211,35 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     return photoFor("silicon", progressAvatarHandle) ?? headerPhoto;
   }, [progressAvatarHandle, photoFor, headerPhoto]);
 
-  // §1 — run grouping. Record when the current silicon run started so messages
-  // the carbon sends *during* the run drop into a fresh group below the run's
-  // in-progress status, instead of merging with the pre-run messages.
-  const [runStartIso, setRunStartIso] = React.useState<string | null>(null);
-  const activeRunGroupId = shouldShowActiveProgress ? (activeProgress?.groupId ?? null) : null;
+  // §1 — anchor the active run's status to the message that started it. A
+  // message's key (_clientId/event_id) is stable across the optimistic→server
+  // swap, so identity beats timestamps here (wall-clock skew put the status
+  // above the latest message). Record the newest message's key when a run
+  // begins.
+  const lastRowKey = displayRows.length
+    ? ((displayRows[displayRows.length - 1] as LocalEvent)._clientId ??
+        displayRows[displayRows.length - 1].event_id)
+    : null;
+  const lastRowKeyRef = React.useRef<string | null>(lastRowKey);
+  lastRowKeyRef.current = lastRowKey;
+  const [runAnchorKey, setRunAnchorKey] = React.useState<string | null>(null);
+  // Capture the anchor ONCE, on the rising edge of "a run is active" — the
+  // message that was latest when the silicon began working. Messages sent while
+  // the run stays active must NOT move the anchor (a later message just creates
+  // a new progress group-id); they fall below the status as a fresh turn.
+  const runActiveNow = !search && shouldShowActiveProgress && !holdingMessage;
   React.useEffect(() => {
-    if (!activeRunGroupId) {
-      setRunStartIso(null);
+    if (!runActiveNow) {
+      setRunAnchorKey(null);
       return;
     }
-    setRunStartIso(new Date().toISOString());
-  }, [activeRunGroupId]);
+    setRunAnchorKey((prev) => prev ?? lastRowKeyRef.current);
+  }, [runActiveNow]);
 
   // §1 — fold the flat timeline into "turn" groups: consecutive messages from
-  // the same party (carbon vs silicon) become one soft panel. The active run's
-  // status is anchored at its start time, so a new carbon message sent mid-run
-  // opens a fresh carbon panel beneath the silicon run's panel.
+  // the same party (carbon vs silicon) read as one block. The active run's
+  // status is inserted right after the message that started it, so a later
+  // message opens a fresh turn beneath the status instead of above it.
   const timelineItems = React.useMemo(() => {
     type Party = "carbon" | "silicon";
     type Row = (typeof displayRows)[number];
@@ -1244,11 +1256,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     };
 
     const runActive = !search && shouldShowActiveProgress && !holdingMessage;
-    const anchorIso = runActive ? runStartIso : null;
 
     const raw: Array<{ item: Item; iso: string }> = [];
     let cur: { party: Party; events: Row[] } | null = null;
     let progressPlaced = false;
+    let lastIso = displayRows.length ? displayRows[0].created_at : new Date(0).toISOString();
     const flush = () => {
       if (cur && cur.events.length) {
         raw.push({
@@ -1264,32 +1276,32 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       }
       cur = null;
     };
-    const placeProgress = (iso: string) => {
+    const pushProgress = (iso: string) => {
       flush();
       raw.push({ item: { kind: "progress", key: "run-progress", dayLabel: null }, iso });
       progressPlaced = true;
     };
     for (const e of displayRows) {
-      if (runActive && !progressPlaced && anchorIso && e.created_at > anchorIso) {
-        placeProgress(anchorIso);
-      }
+      lastIso = e.created_at;
       if (isSystem(e)) {
         flush();
         raw.push({ item: { kind: "system", event: e, key: keyOf(e), dayLabel: null }, iso: e.created_at });
-        continue;
+      } else {
+        const p = partyOf(e);
+        if (!cur || cur.party !== p) {
+          flush();
+          cur = { party: p, events: [] };
+        }
+        cur.events.push(e);
       }
-      const p = partyOf(e);
-      if (!cur || cur.party !== p) {
-        flush();
-        cur = { party: p, events: [] };
+      // Insert the run status right after the message that started the run.
+      if (runActive && !progressPlaced && runAnchorKey && keyOf(e) === runAnchorKey) {
+        pushProgress(e.created_at);
       }
-      cur.events.push(e);
     }
     flush();
-    if (runActive && !progressPlaced) {
-      const last = displayRows[displayRows.length - 1];
-      placeProgress(anchorIso ?? last?.created_at ?? new Date(0).toISOString());
-    }
+    // Anchor not found (e.g. scrolled out of the loaded window) → bottom.
+    if (runActive && !progressPlaced) pushProgress(lastIso);
     // Day band before the first item of each new local calendar day.
     let prevDay: string | null = null;
     for (const r of raw) {
@@ -1300,7 +1312,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       }
     }
     return raw.map((r) => r.item);
-  }, [displayRows, search, shouldShowActiveProgress, holdingMessage, runStartIso]);
+  }, [displayRows, search, shouldShowActiveProgress, holdingMessage, runAnchorKey]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -1541,7 +1553,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   </React.Fragment>
                 );
               }
-              // The active silicon run's status, anchored inside a silicon panel.
+              // The active silicon run's status, anchored after the message
+              // that started the run.
               if (item.kind === "progress") {
                 if (!activeProgress) return null;
                 return (
@@ -1563,8 +1576,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   </React.Fragment>
                 );
               }
-              // A turn: consecutive messages from one party, grouped into a soft
-              // panel. Silicon turns read a touch lighter (raised) than carbon.
+              // A turn: consecutive messages from one party, separated from the
+              // next turn by spacing.
               return (
                 <React.Fragment key={item.key}>
                   {dayBand}
@@ -1612,8 +1625,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               );
             })
           )}
-          {/* Composer is holding a not-yet-sent message — shown at the bottom
-              since it's a pre-send state, not part of a silicon run. */}
+          {/* Composer holding a not-yet-sent message — pre-send state, pinned at
+              the bottom (the run status itself is anchored inline above). */}
           {holdingMessage ? (
             <div className="my-2 flex w-full items-center justify-start gap-2">
               <div className="w-7 shrink-0">

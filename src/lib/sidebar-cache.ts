@@ -11,6 +11,10 @@ interface SidebarCache {
   rooms: Room[];
   contacts: Contact[];
   teams: Team[];
+  /** `${kind}:${handle}` → team slugs that member belongs to. Lets a direct
+   *  chat land in the right team tab on first paint instead of flashing in
+   *  "Others" while the team rosters refetch. */
+  memberships: Record<string, string[]>;
   savedAt: number;
 }
 
@@ -19,7 +23,15 @@ function key(ownerId: string): string {
 }
 
 function empty(ownerId: string): SidebarCache {
-  return { version: VERSION, ownerId, rooms: [], contacts: [], teams: [], savedAt: Date.now() };
+  return {
+    version: VERSION,
+    ownerId,
+    rooms: [],
+    contacts: [],
+    teams: [],
+    memberships: {},
+    savedAt: Date.now(),
+  };
 }
 
 function read(ownerId: string): SidebarCache | null {
@@ -42,6 +54,10 @@ function read(ownerId: string): SidebarCache | null {
       rooms: parsed.rooms,
       contacts: parsed.contacts,
       teams: Array.isArray(parsed.teams) ? parsed.teams : [],
+      memberships:
+        parsed.memberships && typeof parsed.memberships === "object"
+          ? (parsed.memberships as Record<string, string[]>)
+          : {},
       savedAt: typeof parsed.savedAt === "number" ? parsed.savedAt : Date.now(),
     };
   } catch {
@@ -49,7 +65,10 @@ function read(ownerId: string): SidebarCache | null {
   }
 }
 
-function write(ownerId: string, patch: Partial<Pick<SidebarCache, "rooms" | "contacts" | "teams">>) {
+function write(
+  ownerId: string,
+  patch: Partial<Pick<SidebarCache, "rooms" | "contacts" | "teams" | "memberships">>,
+) {
   if (typeof window === "undefined" || !ownerId) return;
   const next: SidebarCache = {
     ...(read(ownerId) ?? empty(ownerId)),
@@ -94,4 +113,29 @@ export function loadCachedTeams(ownerId: string): Team[] | null {
 
 export function saveCachedTeams(ownerId: string, teams: Team[]) {
   write(ownerId, { teams });
+}
+
+/** Returns the cached `${kind}:${handle}` → team-slugs map, or null when there
+ *  is no cache yet (so callers can tell "no data" from "empty roster"). */
+export function loadCachedMemberships(ownerId: string | null): Map<string, Set<string>> | null {
+  if (!ownerId) return null;
+  const cached = read(ownerId);
+  if (!cached) return null;
+  const entries = Object.entries(cached.memberships);
+  if (entries.length === 0) return null;
+  const map = new Map<string, Set<string>>();
+  for (const [k, slugs] of entries) {
+    if (Array.isArray(slugs)) map.set(k, new Set(slugs));
+  }
+  return map.size ? map : null;
+}
+
+export function saveCachedMemberships(
+  ownerId: string | null,
+  memberships: Map<string, Set<string>>,
+) {
+  if (!ownerId) return;
+  const rec: Record<string, string[]> = {};
+  for (const [k, set] of memberships) rec[k] = [...set];
+  write(ownerId, { memberships: rec });
 }

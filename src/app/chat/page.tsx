@@ -19,7 +19,12 @@ import { clearRoomProgress, setRoomProgress } from "@/lib/progress-cache";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
-import { loadCachedRooms, saveCachedRooms } from "@/lib/sidebar-cache";
+import {
+  loadCachedRooms,
+  saveCachedRooms,
+  loadCachedMemberships,
+  saveCachedMemberships,
+} from "@/lib/sidebar-cache";
 import {
   createPersonalFolder,
   deletePersonalFolder,
@@ -247,13 +252,27 @@ function ChatPageInner() {
   // room can be placed under every team its peers belong to (a person can be on
   // several). `membershipsLoaded` lets the auto-tab effect wait for this rather
   // than stranding a fresh room in Others before the rosters arrive.
-  const [peerTeams, setPeerTeams] = React.useState<Map<string, Set<string>>>(new Map());
-  const [membershipsLoaded, setMembershipsLoaded] = React.useState(false);
+  // Hydrate the membership map from cache synchronously so a direct chat is
+  // placed in the right team tab on first paint, rather than flashing in
+  // "Others" until the rosters refetch.
+  const [peerTeams, setPeerTeams] = React.useState<Map<string, Set<string>>>(
+    () => loadCachedMemberships(ownerId) ?? new Map(),
+  );
+  const [membershipsLoaded, setMembershipsLoaded] = React.useState(
+    () => loadCachedMemberships(ownerId) != null,
+  );
   React.useEffect(() => {
     if (!teams.length) {
       setPeerTeams(new Map());
       setMembershipsLoaded(true);
       return;
+    }
+    // Re-seed from cache when the owner changes (e.g. account switch) before the
+    // fresh fetch lands.
+    const cached = loadCachedMemberships(ownerId);
+    if (cached) {
+      setPeerTeams(cached);
+      setMembershipsLoaded(true);
     }
     let alive = true;
     Promise.all(
@@ -280,11 +299,12 @@ function ChatPageInner() {
       }
       setPeerTeams(map);
       setMembershipsLoaded(true);
+      if (ownerId) saveCachedMemberships(ownerId, map);
     });
     return () => {
       alive = false;
     };
-  }, [teams]);
+  }, [teams, ownerId]);
 
   // The set of team slugs each room belongs to: its own team_slug (if any) plus
   // every team its peers are members of. Empty set ⇒ the room lives in "Others".

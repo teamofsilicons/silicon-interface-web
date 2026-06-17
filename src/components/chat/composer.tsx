@@ -359,10 +359,11 @@ function previewOf(ev: Event): string {
     const body = String(c.body ?? "");
     return body.length > 80 ? `${body.slice(0, 80)}…` : body;
   }
-  if (ev.type === "m.image") return "📷 photo";
-  if (ev.type === "m.file") return `📎 ${String(c.caption ?? "attachment")}`;
-  if (ev.type === "m.voice") return "🎙 voice note";
-  if (ev.type === "m.tts") return "🔊 audio";
+  if (ev.type === "m.image") return "photo";
+  if (ev.type === "m.file") return String(c.filename ?? c.caption ?? "attachment");
+  if (ev.type === "m.voice") return "voice note";
+  if (ev.type === "m.remote_browser") return "Silicon Browser link";
+  if (ev.type === "m.tts") return "audio";
   return ev.type;
 }
 
@@ -1025,21 +1026,16 @@ export function Composer({
       setBusy(true);
       try {
         const fileType = up.mime.startsWith("image/") ? "m.image" : "m.file";
-        // Keep the real filename and the user's typed text in separate fields.
-        // `caption` is the message text (only when typed); `filename` is the
-        // attachment's name. Bundling text into `caption` made the file chip
-        // render the typed text as the filename ("renamed the file").
+        // The attachment is its own message; `filename` carries the real name.
         await api.sendEvent(roomId, {
           type: fileType,
-          content: {
-            media_id: up.mediaId,
-            mime: up.mime,
-            filename: file.name,
-            ...(body ? { caption: body } : {}),
-          },
+          content: { media_id: up.mediaId, mime: up.mime, filename: file.name },
         });
         track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         reset();
+        // Any typed text rides as a *separate* message right after the file,
+        // not as a caption bundled into the attachment.
+        if (body) sendTextOptimistic(body);
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
       } finally {

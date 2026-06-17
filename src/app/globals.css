@@ -4,8 +4,9 @@
    SILICON INTERFACE — DESIGN SYSTEM
    Single source of truth for all design tokens. Aesthetic: siliconfriendly —
    warm beige canvas, near-black ink, JetBrains Mono throughout, sharp corners
-   (0 radius), flat (no shadows). High-contrast, minimal, terminal-like.
-   Every surface is defined by color + a hairline border, never elevation.
+   (0 radius). High-contrast, minimal, terminal-like. Sections are layered with
+   distinct surface tints + soft warm shadows so the UI reads with depth, while
+   hairline borders still define edges.
    Reference these via Tailwind utilities (bg-background, text-foreground, …)
    or var(--token); never hardcode hex values in components.
    =========================================================================== */
@@ -40,6 +41,9 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-bubble-received: var(--bubble-received);
+  /* distinct section surfaces — used to give the layout depth */
+  --color-sidebar: var(--sidebar);
+  --color-elevated: var(--elevated);
 
   /* sharp corners everywhere — every rounded-* utility resolves to a square */
   --radius-sm: 0px;
@@ -48,15 +52,17 @@
   --radius-xl: 0px;
   --radius-2xl: 0px;
 
-  /* flat — every shadow-* utility resolves to nothing */
-  --shadow-2xs: none;
-  --shadow-xs: none;
-  --shadow-sm: none;
-  --shadow: none;
-  --shadow-md: none;
-  --shadow-lg: none;
-  --shadow-xl: none;
-  --shadow-2xl: none;
+  /* Depth — subtle, warm-tinted elevation. Shadows are cast in a warm brown
+     (not pure black) so they sit naturally on the beige canvas. Kept soft so
+     the interface gains layering without losing its minimal, flat character. */
+  --shadow-2xs: 0 1px 1px rgba(60, 50, 36, 0.05);
+  --shadow-xs: 0 1px 2px rgba(60, 50, 36, 0.06);
+  --shadow-sm: 0 1px 2px rgba(60, 50, 36, 0.06), 0 2px 4px rgba(60, 50, 36, 0.05);
+  --shadow: 0 2px 4px rgba(60, 50, 36, 0.07), 0 6px 12px rgba(60, 50, 36, 0.05);
+  --shadow-md: 0 4px 8px rgba(60, 50, 36, 0.08), 0 10px 20px rgba(60, 50, 36, 0.06);
+  --shadow-lg: 0 8px 16px rgba(60, 50, 36, 0.1), 0 18px 36px rgba(60, 50, 36, 0.08);
+  --shadow-xl: 0 16px 32px rgba(60, 50, 36, 0.12), 0 28px 56px rgba(60, 50, 36, 0.1);
+  --shadow-2xl: 0 24px 56px rgba(60, 50, 36, 0.18);
 }
 
 :root {
@@ -87,6 +93,12 @@
   /* received-message bubble — a notch lighter than the canvas so messages
      from the other party lift visibly without breaking the warm-beige feel. */
   --bubble-received:      #f4f0e7;
+
+  /* --- section surfaces (depth) --- */
+  /* sidebar reads as a slightly recessed panel; elevated is for raised
+     surfaces (composer, popovers, cards) that sit above the canvas. */
+  --sidebar:              #e7e1d6; /* a touch deeper than the canvas */
+  --elevated:             #f4f0e8; /* raised surfaces — lighter than canvas */
 
   /* --- semantic --- */
   /* Darkened for AA as text on the beige canvas (old values ~3:1 failed).

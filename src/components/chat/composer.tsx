@@ -17,17 +17,11 @@ import { api, ApiError } from "@/lib/api";
 import { track } from "@/lib/analytics";
 import { searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
+import { getDraft, setDraft } from "@/lib/drafts";
 import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
@@ -125,6 +119,8 @@ const SILICON_EMPTY_HOLD_MS = 10_000;
 // "wait 1 more minute" extends the post-empty hold by this much.
 const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
+// Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
+const MAX_ATTACHMENTS = 10;
 
 // §6.6 — Up-front file validation, before we even ask for a presigned URL.
 // A sane cap keeps a 5 GB drop from OOM-ing the metadata decode / hanging the
@@ -154,6 +150,18 @@ interface QueuedTextSend {
   clientId: string;
   body: string;
   replyToEventId?: string;
+}
+
+/** One staged attachment, uploading in the background until ready to send. */
+interface StagedFile {
+  id: string;
+  file: File;
+  status: "uploading" | "ready" | "error";
+  /** 0–100 while uploading; null once done. */
+  pct: number | null;
+  loaded: number | null;
+  mediaId: string | null;
+  mime: string;
 }
 
 /**
@@ -426,14 +434,34 @@ export function Composer({
   mentionCandidates = [],
 }: Props) {
   const [text, setText] = React.useState("");
-  const [file, setFile] = React.useState<File | null>(null);
-  // Mirror of `file` so `attachFile` can guard against replacing an in-flight
-  // attachment without taking `file` as a dependency (which would re-create the
-  // callback on every staged change).
-  const fileRef = React.useRef<File | null>(null);
+  // Multiple attachments can be staged at once; each uploads in the background
+  // and is sent as its own message. `xhrRefs` lets us abort a specific in-flight
+  // upload when its chip is removed.
+  const [attachments, setAttachments] = React.useState<StagedFile[]>([]);
+  // Mirror so `attachFiles` can read the current count without side effects in a
+  // state updater (StrictMode invokes updaters twice).
+  const attachmentsRef = React.useRef<StagedFile[]>([]);
   React.useEffect(() => {
-    fileRef.current = file;
-  }, [file]);
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  const xhrRefs = React.useRef<Map<string, React.MutableRefObject<XMLHttpRequest | null>>>(
+    new Map(),
+  );
+  const updateAttachment = React.useCallback((id: string, patch: Partial<StagedFile>) => {
+    setAttachments((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  }, []);
+  const anyUploading = attachments.some((a) => a.status === "uploading");
+  // Mirror the staged list to the room's "uploading…" presence.
+  React.useEffect(() => {
+    api.activity(roomId, "uploading", anyUploading).catch(() => undefined);
+  }, [anyUploading, roomId]);
+  // Clear the beacon if we unmount (e.g. switch rooms) mid-upload.
+  React.useEffect(
+    () => () => {
+      api.activity(roomId, "uploading", false).catch(() => undefined);
+    },
+    [roomId],
+  );
   const [recording, setRecording] = React.useState(false);
   // §6.5 — Mirror `recording` in a ref so the unmount cleanup can clear a
   // dangling "recording…" beacon for the *current* room even if the room
@@ -454,13 +482,6 @@ export function Composer({
     [roomId],
   );
   const [busy, setBusy] = React.useState(false);
-  // Upload progress (0–100) while a staged file is sending; null when idle.
-  const [uploadPct, setUploadPct] = React.useState<number | null>(null);
-  // Real bytes uploaded so far — drives the "X / Y" label instead of deriving
-  // it from a rounded percent.
-  const [uploadLoaded, setUploadLoaded] = React.useState<number | null>(null);
-  const [confirmCancel, setConfirmCancel] = React.useState(false);
-  const xhrRef = React.useRef<XMLHttpRequest | null>(null);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
   // control during the upload, and retain the recorded blob if it fails so the
   // user can retry instead of losing the recording.
@@ -470,12 +491,6 @@ export function Composer({
     blob: Blob;
     durationMs: number;
   } | null>(null);
-  // The attached file uploads in the background as soon as it's staged; `send`
-  // then just posts the message referencing the ready media.
-  const [uploadStatus, setUploadStatus] = React.useState<
-    "idle" | "uploading" | "ready" | "error"
-  >("idle");
-  const uploadedRef = React.useRef<{ mediaId: string; mime: string } | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
   const textRef = React.useRef(text);
@@ -507,57 +522,114 @@ export function Composer({
     setTypingActiveState(active);
   }, []);
 
-  // Abort the in-flight upload and discard the staged file.
-  const cancelUpload = () => {
-    xhrRef.current?.abort();
-    setConfirmCancel(false);
-    setUploadPct(null);
-    setUploadLoaded(null);
-    setFile(null);
-  };
-
-  // §6.6 / §6.7 — Single entry point for staging an attachment, whether it
-  // arrives from the picker, a drag-drop, or a paste. It validates up front,
-  // refuses to silently replace an in-flight upload, and warns on HEIC.
-  const attachFile = React.useCallback(
-    (next: File | null) => {
-      if (!next) {
-        setFile(null);
-        return;
+  // Upload a single staged attachment in the background, updating its row by id
+  // as progress comes in. The XHR ref is registered so `removeAttachment` can
+  // abort it mid-flight.
+  const uploadOne = React.useCallback(
+    async (stage: StagedFile) => {
+      const { id, file } = stage;
+      const ref: React.MutableRefObject<XMLHttpRequest | null> = { current: null };
+      xhrRefs.current.set(id, ref);
+      try {
+        const r = await api.presignUpload({
+          mime: file.type || "application/octet-stream",
+          size: file.size,
+          kind: file.type.startsWith("image/") ? "image" : "file",
+          filename: file.name,
+          room_id: roomId,
+        });
+        const mediaId = r.media.media_id;
+        if (!r.upload.dev_mode) {
+          updateAttachment(id, { pct: 0, loaded: 0 });
+          const form = new FormData();
+          for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+          form.append("file", file);
+          await xhrUpload(
+            r.upload.url,
+            form,
+            (pct, loaded) => updateAttachment(id, { pct, loaded }),
+            ref,
+          );
+          // Decode metadata (#22 image dims; #6 audio/video duration) so the
+          // bubble reserves the right aspect / shows duration immediately.
+          let meta: Parameters<typeof api.mediaComplete>[1] = {};
+          if (file.type.startsWith("image/")) {
+            const d = await measureImage(file);
+            if (d) meta = { width: d.width, height: d.height };
+          } else if (file.type.startsWith("video/")) {
+            const d = await measureVideo(file);
+            if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
+          } else if (file.type.startsWith("audio/")) {
+            const d = await computePeaks(file);
+            if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
+          }
+          await api.mediaComplete(mediaId, meta);
+        }
+        updateAttachment(id, {
+          status: "ready",
+          mediaId,
+          mime: file.type || "application/octet-stream",
+          pct: null,
+          loaded: null,
+        });
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return; // removed
+        updateAttachment(id, { status: "error", pct: null, loaded: null });
+        toast.error(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        xhrRefs.current.delete(id);
       }
-      // §6.7 — One file at a time. If something is already staged/uploading,
-      // surface a clear message instead of silently aborting the first.
-      if (fileRef.current) {
-        toast.error("one file at a time - send or remove the current attachment first.");
-        return;
-      }
-      const err = validateFile(next);
-      if (err) {
-        toast.error(err);
-        return;
-      }
-      // §6.6 — HEIC can't render as a normal image; let the user know it'll
-      // attach as a file chip rather than show a (broken) thumbnail.
-      if (isHeic(next)) {
-        toast.message("HEIC photo attached as a file (browsers can't preview it inline).");
-      }
-      setFile(next);
     },
-    [],
+    [roomId, updateAttachment],
   );
 
-  // §6.7 — Multi-file selection (picker or drop) can only keep one; tell the
-  // user the rest were ignored instead of dropping them silently.
-  const attachFromList = React.useCallback(
+  // Abort (if uploading) and drop a staged attachment.
+  const removeAttachment = React.useCallback((id: string) => {
+    xhrRefs.current.get(id)?.current?.abort();
+    xhrRefs.current.delete(id);
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  // §6.6 / §6.7 — Stage one or more files from the picker, a drag-drop, or a
+  // paste. Each is validated, staged, and starts uploading immediately.
+  const attachFiles = React.useCallback(
     (list: FileList | File[] | null | undefined) => {
-      const files = list ? Array.from(list) : [];
-      if (files.length === 0) return;
-      if (files.length > 1) {
-        toast.message(`attaching the first of ${files.length} files - one at a time.`);
+      const incoming = list ? Array.from(list) : [];
+      if (incoming.length === 0) return;
+      const room = MAX_ATTACHMENTS - attachmentsRef.current.length;
+      if (room <= 0) {
+        toast.error(`up to ${MAX_ATTACHMENTS} attachments at a time.`);
+        return;
       }
-      attachFile(files[0] ?? null);
+      const staged: StagedFile[] = [];
+      for (const file of incoming) {
+        if (staged.length >= room) {
+          toast.message(`only the first ${MAX_ATTACHMENTS} attachments were added.`);
+          break;
+        }
+        const err = validateFile(file);
+        if (err) {
+          toast.error(`${file.name}: ${err}`);
+          continue;
+        }
+        if (isHeic(file)) {
+          toast.message("HEIC photo attached as a file (browsers can't preview it inline).");
+        }
+        staged.push({
+          id: newClientId(),
+          file,
+          status: "uploading",
+          pct: null,
+          loaded: null,
+          mediaId: null,
+          mime: file.type || "application/octet-stream",
+        });
+      }
+      if (staged.length === 0) return;
+      setAttachments((prev) => [...prev, ...staged]);
+      staged.forEach((s) => void uploadOne(s));
     },
-    [attachFile],
+    [uploadOne],
   );
   // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
   // the active token (':grin', ':lol', …) and surface matches in a small
@@ -616,10 +688,10 @@ export function Composer({
   // ownership.
   React.useEffect(() => {
     if (droppedFile) {
-      attachFile(droppedFile);
+      attachFiles([droppedFile]);
       onDroppedFileConsumed?.();
     }
-  }, [droppedFile, onDroppedFileConsumed, attachFile]);
+  }, [droppedFile, onDroppedFileConsumed, attachFiles]);
 
   // Clicking "reply" on a message sets a reply target — focus the input right
   // away so the user can start typing without a second click.
@@ -627,112 +699,23 @@ export function Composer({
     if (replyTo) taRef.current?.focus();
   }, [replyTo]);
 
-  // Start uploading the instant a file is attached — don't wait for "send".
-  // The upload (and metadata decode) run in the background; pressing send then
-  // just posts the message referencing the already-uploaded media.
-  React.useEffect(() => {
-    if (!file) {
-      uploadedRef.current = null;
-      setUploadStatus("idle");
-      setUploadPct(null);
-      setUploadLoaded(null);
-      return;
-    }
-    let cancelled = false;
-    uploadedRef.current = null;
-    setUploadStatus("uploading");
-    api.activity(roomId, "uploading", true).catch(() => undefined);
-    (async () => {
-      try {
-        const r = await api.presignUpload({
-          mime: file.type || "application/octet-stream",
-          size: file.size,
-          kind: file.type.startsWith("image/") ? "image" : "file",
-          filename: file.name,
-          room_id: roomId,
-        });
-        const mediaId = r.media.media_id;
-        if (!r.upload.dev_mode) {
-          setUploadPct(0);
-          setUploadLoaded(0);
-          const form = new FormData();
-          for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-          form.append("file", file);
-          await xhrUpload(
-            r.upload.url,
-            form,
-            (pct, loaded) => {
-              setUploadPct(pct);
-              setUploadLoaded(loaded);
-            },
-            xhrRef,
-          );
-          // Decode metadata (#22 image dims; #6 audio/video duration) so the
-          // bubble reserves the right aspect / shows duration immediately.
-          let meta: Parameters<typeof api.mediaComplete>[1] = {};
-          if (file.type.startsWith("image/")) {
-            const d = await measureImage(file);
-            if (d) meta = { width: d.width, height: d.height };
-          } else if (file.type.startsWith("video/")) {
-            const d = await measureVideo(file);
-            if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
-          } else if (file.type.startsWith("audio/")) {
-            const d = await computePeaks(file);
-            if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
-          }
-          await api.mediaComplete(mediaId, meta);
-        }
-        if (cancelled) return;
-        uploadedRef.current = { mediaId, mime: file.type || "application/octet-stream" };
-        setUploadStatus("ready");
-        setUploadPct(null);
-        setUploadLoaded(null);
-      } catch (e) {
-        if (cancelled) return;
-        setUploadPct(null);
-        setUploadLoaded(null);
-        if (e instanceof DOMException && e.name === "AbortError") {
-          setUploadStatus("idle");
-        } else {
-          setUploadStatus("error");
-          toast.error(e instanceof ApiError ? e.message : String(e));
-        }
-      } finally {
-        api.activity(roomId, "uploading", false).catch(() => undefined);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [file, roomId]);
-
   // ----- Draft persistence (per room, in localStorage) -----
   // Each room keeps its own in-progress draft so switching away and back — or
   // reloading — restores exactly what was being typed. The draft is removed
   // the moment the message is sent or the field is fully cleared.
-  const draftKey = `silicon-interface:draft:${roomId}`;
+  // Drafts live in a shared store (localStorage-backed) so the sidebar can show
+  // a live "draft: …" preview as the user types.
   const persistDraft = React.useCallback(
     (v: string) => {
-      try {
-        if (v.trim()) window.localStorage.setItem(`silicon-interface:draft:${roomId}`, v);
-        else window.localStorage.removeItem(`silicon-interface:draft:${roomId}`);
-      } catch {
-        /* storage may be unavailable (private mode / quota) — ignore */
-      }
+      setDraft(roomId, v);
     },
     [roomId],
   );
   // Load the room's saved draft when the active room changes.
   React.useEffect(() => {
-    let saved = "";
-    try {
-      saved = window.localStorage.getItem(draftKey) ?? "";
-    } catch {
-      /* ignore */
-    }
-    setText(saved);
+    setText(getDraft(roomId));
     setEmojiQuery(null);
-  }, [draftKey]);
+  }, [roomId]);
 
   // #5 — Typing beacon. POSTs `activity('typing', true)` on the first
   // character and `false` after 3s of idle. Survives across rapid keystrokes
@@ -786,7 +769,9 @@ export function Composer({
   const reset = () => {
     setText("");
     persistDraft("");
-    setFile(null);
+    for (const ref of xhrRefs.current.values()) ref.current?.abort();
+    xhrRefs.current.clear();
+    setAttachments([]);
   };
 
   const clearDelayTimer = React.useCallback(() => {
@@ -1006,8 +991,8 @@ export function Composer({
   const send = async () => {
     let body = text.trim();
 
-    // §7a/§7e — slash command palette (text only; a "/" with a file is a caption).
-    if (!file && body.startsWith("/")) {
+    // §7a/§7e — slash command palette (text only; a "/" with files is just text).
+    if (attachments.length === 0 && body.startsWith("/")) {
       const result = runSlashCommand(body);
       if (result.handled) {
         setText("");
@@ -1018,23 +1003,25 @@ export function Composer({
       if (result.replaceWith !== undefined) body = result.replaceWith; // transform + send
     }
 
-    // File path — the upload already started on attach. Post once it's ready
-    // (the send button stays disabled until then).
-    if (file) {
-      const up = uploadedRef.current;
-      if (uploadStatus !== "ready" || !up) return;
+    // Attachment path — uploads already started on attach. Each ready file is
+    // posted as its own message (the send button stays disabled until none are
+    // still uploading), then any typed text follows as a separate message.
+    if (attachments.length > 0) {
+      if (anyUploading) return;
+      const ready = attachments.filter((a) => a.status === "ready" && a.mediaId);
+      if (ready.length === 0 && !body) return;
       setBusy(true);
       try {
-        const fileType = up.mime.startsWith("image/") ? "m.image" : "m.file";
-        // The attachment is its own message; `filename` carries the real name.
-        await api.sendEvent(roomId, {
-          type: fileType,
-          content: { media_id: up.mediaId, mime: up.mime, filename: file.name },
-        });
-        track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
+        for (const a of ready) {
+          const fileType = a.mime.startsWith("image/") ? "m.image" : "m.file";
+          await api.sendEvent(roomId, {
+            type: fileType,
+            content: { media_id: a.mediaId, mime: a.mime, filename: a.file.name },
+          });
+          track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
+        }
         reset();
-        // Any typed text rides as a *separate* message right after the file,
-        // not as a caption bundled into the attachment.
+        // Typed text rides as a *separate* message after the attachments.
         if (body) sendTextOptimistic(body);
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
@@ -1188,7 +1175,7 @@ export function Composer({
   }
 
   return (
-    <div className="space-y-2 border-t bg-background p-2">
+    <div className="space-y-2 border-t bg-elevated p-2 shadow-[0_-2px_12px_-4px_rgba(60,50,36,0.12)]">
       {replyTo && (
         <div className="flex items-start gap-2 border-l-2 border-foreground/60 bg-card px-2 py-1 text-xs">
           <ArrowBendUpLeft className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" />
@@ -1216,17 +1203,18 @@ export function Composer({
           </button>
         </div>
       )}
-      {file && (
-        <StagedAttachment
-          file={file}
-          uploadPct={uploadPct}
-          uploadLoaded={uploadLoaded}
-          onRemove={() => {
-            // Mid-upload, the cross asks for confirmation before aborting.
-            if (uploadPct !== null) setConfirmCancel(true);
-            else setFile(null);
-          }}
-        />
+      {attachments.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          {attachments.map((a) => (
+            <StagedAttachment
+              key={a.id}
+              file={a.file}
+              uploadPct={a.status === "uploading" ? (a.pct ?? 0) : null}
+              uploadLoaded={a.loaded}
+              onRemove={() => removeAttachment(a.id)}
+            />
+          ))}
+        </div>
       )}
       {/* §6.3 — Voice upload progress + abort. */}
       {voiceUploadPct !== null && (
@@ -1333,7 +1321,7 @@ export function Composer({
           multiple
           className="hidden"
           onChange={(e) => {
-            attachFromList(e.target.files);
+            attachFiles(e.target.files);
             // Reset so picking the same file again still fires onChange, and a
             // rejected pick doesn't leave a stale selection on the input.
             e.target.value = "";
@@ -1392,7 +1380,7 @@ export function Composer({
               const items = e.clipboardData?.files;
               if (items && items.length > 0) {
                 e.preventDefault();
-                attachFromList(items);
+                attachFiles(items);
               }
             }}
             onKeyDown={(e) => {
@@ -1498,7 +1486,7 @@ export function Composer({
             }}
           />
         </div>
-        {!text.trim() && !file ? (
+        {!text.trim() && attachments.length === 0 ? (
           <button
             type="button"
             onClick={() => {
@@ -1516,11 +1504,11 @@ export function Composer({
           <button
             type="button"
             onClick={send}
-            disabled={busy || (!!file && uploadStatus !== "ready")}
+            disabled={busy || anyUploading}
             aria-label="send"
             className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            {busy || (!!file && uploadStatus === "uploading") ? (
+            {busy || anyUploading ? (
               <CircleNotch className="animate-spin" />
             ) : (
               <PaperPlaneRight />
@@ -1553,25 +1541,6 @@ export function Composer({
           />
         )}
       </div>
-
-      <Dialog open={confirmCancel} onOpenChange={setConfirmCancel}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Cancel upload?</DialogTitle>
-            <DialogDescription>
-              The file is still uploading. Cancel and discard it?
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={() => setConfirmCancel(false)}>
-              keep uploading
-            </Button>
-            <Button variant="destructive" onClick={cancelUpload}>
-              cancel upload
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

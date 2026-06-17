@@ -990,7 +990,7 @@ function ChatPageInner() {
         className={cn(
           // `min-h-0` so the room list scrolls *inside* the aside instead of
           // pushing the page taller than the viewport.
-          "relative min-h-0 w-full shrink-0 flex-col border-r md:flex md:w-[var(--sidebar-w)]",
+          "relative z-10 min-h-0 w-full shrink-0 flex-col border-r bg-sidebar shadow-[1px_0_14px_-3px_rgba(60,50,36,0.12)] md:flex md:w-[var(--sidebar-w)]",
           selected || viewedTeam ? "hidden" : "flex",
         )}
       >

@@ -5,7 +5,7 @@ import { Bell, X } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
 import type { Announcement } from "@/lib/types";
-import { cn, relativeTime } from "@/lib/utils";
+import { relativeTime } from "@/lib/utils";
 import { printConsoleBanner } from "@/lib/console-banner";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -132,51 +132,54 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
             <ul className="divide-y">
               {items.map((item) => {
                 const isUnread = item.id > seen;
+                // Hierarchy: kind chip → title → description → link. A single
+                // dot on the right marks unread; read and unread rows are
+                // otherwise identical.
                 const inner = (
-                  <span className="block min-w-0">
-                    <span className="flex min-w-0 items-center justify-between gap-3">
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span
-                          className={cn(
-                            "label-mono shrink-0 border px-1.5 py-0.5",
-                            isUnread && "bg-foreground text-background",
-                          )}
-                        >
-                          {item.kind}
-                        </span>
-                        <span className="min-w-0 truncate text-sm font-semibold">
-                          {item.title}
-                        </span>
+                  <span className="block min-w-0 pr-4">
+                    <span className="flex items-center justify-between gap-3">
+                      <span className="label-mono shrink-0 border px-1.5 py-0.5">
+                        {item.kind}
                       </span>
                       <span className="shrink-0 text-[10px] text-muted-foreground">
                         {relativeTime(item.created_at)}
                       </span>
                     </span>
+                    <span className="mt-1.5 block text-sm font-semibold leading-snug">
+                      {item.title}
+                    </span>
                     {item.body ? (
-                      <span className="mt-1 block text-xs text-muted-foreground">
+                      <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
                         {item.body}
+                      </span>
+                    ) : null}
+                    {item.url ? (
+                      <span className="mt-1.5 block truncate text-xs text-foreground/70 underline underline-offset-2">
+                        {item.url}
                       </span>
                     ) : null}
                   </span>
                 );
                 return (
-                  <li key={item.id}>
+                  <li key={item.id} className="relative">
+                    {/* Unread dot — rightmost, vertically centered. */}
+                    {isUnread ? (
+                      <span
+                        aria-label="unread"
+                        className="pointer-events-none absolute right-3 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-primary"
+                      />
+                    ) : null}
                     {item.url ? (
                       <a
                         href={item.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className={cn(
-                          "block px-4 py-3 transition-colors hover:bg-accent",
-                          isUnread && "bg-secondary/70",
-                        )}
+                        className="block px-4 py-3 transition-colors hover:bg-accent"
                       >
                         {inner}
                       </a>
                     ) : (
-                      <div className={cn("px-4 py-3", isUnread && "bg-secondary/70")}>
-                        {inner}
-                      </div>
+                      <div className="px-4 py-3 transition-colors hover:bg-accent">{inner}</div>
                     )}
                   </li>
                 );

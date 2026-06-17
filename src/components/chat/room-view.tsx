@@ -1247,7 +1247,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       {/* Header — clicking anywhere on the left side opens the profile. */}
       {/* Header — fixed height so clicking search doesn't shift the row when
           the search field swaps in for the icon button. */}
-      <header className="group/header flex h-[68px] items-center gap-3 border-b pl-6 pr-6">
+      <header className="group/header relative z-10 flex h-[68px] items-center gap-3 border-b bg-elevated pl-6 pr-6 shadow-[0_2px_12px_-6px_rgba(60,50,36,0.14)]">
         <button
           type="button"
           onClick={() => {

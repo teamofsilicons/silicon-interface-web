@@ -19,6 +19,7 @@ import {
 import type { Contact, Room } from "@/lib/types";
 import { roomDisplay } from "@/lib/peers";
 import { contactKey } from "@/lib/use-contacts";
+import { useDraft } from "@/lib/drafts";
 import { cn, relativeTime } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -418,6 +419,9 @@ function RoomRow({
     unread > 0 ? "font-semibold" : "font-medium",
   );
   const preview = roomPreview(r, d.subtitle);
+  // An unsent draft takes over the preview line (italic "draft: …"), like
+  // Telegram. Updates live as the composer writes to the shared draft store.
+  const draft = useDraft(r.room_id);
   const currentGroupId = groupControls?.assignmentByRoom[r.room_id];
   const currentGroup = currentGroupId
     ? groupControls?.groups.find((g) => g.id === currentGroupId)
@@ -524,7 +528,13 @@ function RoomRow({
                 unread > 0 ? "text-foreground" : "text-muted-foreground",
               )}
             >
-              <LastEventPreview room={r} fallback={preview} />
+              {draft ? (
+                <span className="italic">
+                  <span className="text-foreground/70">draft:</span> {draft}
+                </span>
+              ) : (
+                <LastEventPreview room={r} fallback={preview} />
+              )}
             </p>
             {unread > 0 ? (
               <span

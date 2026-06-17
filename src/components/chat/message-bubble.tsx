@@ -193,6 +193,17 @@ export function MessageBubble({
   // (sender, minute) group so they read as a single block.
   const inGroupGap = !showSender && !showTime;
 
+  // §5 — one consistent way to reach a message's actions: the 3-dot button,
+  // right-click, and double-click all open the same menu. `moreOpen` controls
+  // that shared dropdown; `hasActions` gates whether the gestures do anything.
+  const [moreOpen, setMoreOpen] = React.useState(false);
+  const hasActions = !redacted && !!(onReply || onReact || onForward || onDelete);
+  const openMenuGesture = (e: React.MouseEvent) => {
+    if (!hasActions) return;
+    e.preventDefault();
+    setMoreOpen(true);
+  };
+
   return (
     <div
       className={cn(
@@ -203,11 +214,6 @@ export function MessageBubble({
         inGroupGap ? "my-0.5" : "my-1.5",
         isMine ? "justify-end" : "justify-start",
       )}
-      onDoubleClick={(e) => {
-        if (redacted || !onReply) return;
-        if (e.target !== e.currentTarget) return;
-        onReply(event);
-      }}
     >
       {!isMine && (
         // Avatar slot stays present even on middle-of-group bubbles so the
@@ -247,7 +253,7 @@ export function MessageBubble({
             // visible asymmetry around media attachments). `group` lives on the
             // message column wrapper so hovering anywhere on the block (bubble,
             // padding, label, time) reveals the actions — not just the text.
-            "relative p-3 text-sm",
+            "relative p-3 text-sm shadow-sm",
             copyFlash && "copy-flash",
             redacted
               ? "border bg-muted text-muted-foreground italic"
@@ -260,6 +266,8 @@ export function MessageBubble({
                 ? "bubble-sent bg-primary text-primary-foreground"
                 : "border bg-bubble-received",
           )}
+          onContextMenu={openMenuGesture}
+          onDoubleClick={openMenuGesture}
         >
           {/* Quoted parent so a reply visibly references its target. */}
           {replyToEvent && !redacted && (
@@ -279,12 +287,14 @@ export function MessageBubble({
           {/* Hover actions: reply / react / more. Floats above the bubble on
               hover; on mobile, tap-to-reveal is not supported here — a small-
               screen affordance is a follow-up. */}
-          {!redacted && (onReply || onReact || onForward || onDelete) && (
+          {hasActions && (
             <BubbleActions
               event={event}
               isMine={isMine}
               isOwnSilicon={!!isOwnSilicon}
               myReactions={myReactionEmojis}
+              moreOpen={moreOpen}
+              onMoreOpenChange={setMoreOpen}
               onReply={onReply}
               onReact={onReact}
               onForward={onForward}
@@ -356,6 +366,8 @@ function BubbleActions({
   isMine,
   isOwnSilicon,
   myReactions,
+  moreOpen,
+  onMoreOpenChange,
   onReply,
   onReact,
   onForward,
@@ -367,6 +379,10 @@ function BubbleActions({
   isMine: boolean;
   isOwnSilicon: boolean;
   myReactions: Set<string>;
+  /** Controlled open state for the "more" dropdown — shared with the bubble's
+   *  right-click / double-click gestures so all three open the same menu. */
+  moreOpen: boolean;
+  onMoreOpenChange: (open: boolean) => void;
   onReply?: (event: Event) => void;
   onReact?: (event: Event, emoji: string) => void;
   onForward?: (event: Event) => void;
@@ -416,7 +432,9 @@ function BubbleActions({
     (open: boolean) => setOpenMenus((n) => Math.max(0, n + (open ? 1 : -1))),
     [],
   );
-  const menuOpen = openMenus > 0;
+  // Keep the bar visible while the reaction popover OR the shared "more" menu is
+  // open (the latter can be triggered from the bubble itself, not just here).
+  const menuOpen = openMenus > 0 || moreOpen;
   return (
     <div
       className={cn(
@@ -473,7 +491,7 @@ function BubbleActions({
           </PopoverContent>
         </Popover>
       )}
-      <DropdownMenu onOpenChange={onMenuOpenChange}>
+      <DropdownMenu open={moreOpen} onOpenChange={onMoreOpenChange}>
         <DropdownMenuTrigger asChild>
           <ActionIconButton title="more options">
             <DotsThree />
@@ -804,7 +822,10 @@ function Body({ event }: { event: Event }) {
       return (
         <div className="space-y-1">
           {c.media_id ? (
-            <MediaAttachment mediaId={String(c.media_id)} mime="audio/mpeg" />
+            <MediaAttachment
+              mediaId={String(c.media_id)}
+              mime={c.mime ? String(c.mime) : "audio/mpeg"}
+            />
           ) : (
             <div className="flex items-center gap-2 text-xs">
               <Sparkle className="h-4 w-4" /> tts

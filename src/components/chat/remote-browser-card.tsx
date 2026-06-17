@@ -1,9 +1,24 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUpRight, GlobeHemisphereWest } from "@phosphor-icons/react/dist/ssr";
+import { ArrowUpRight } from "@phosphor-icons/react/dist/ssr";
 
 import { cn } from "@/lib/utils";
+
+/** The Silicon Browser mark: a filled square with the Silicon up-left glyph.
+ *  Themed via tokens (foreground square, background glyph) so it matches the
+ *  brand avatars and adapts to light/dark. */
+function SiliconBrowserMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 60 60" className={className} xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <rect width="60" height="60" className="fill-foreground" />
+      <path
+        d="M12.128 49.512L10 47.27L24.06 33.172H14.18V30.208H29V45.408H25.96V35.452L12.128 49.512Z"
+        className="fill-background"
+      />
+    </svg>
+  );
+}
 
 /**
  * A silicon-sent, time-limited link to a Silicon Browser session. Renders a
@@ -100,9 +115,7 @@ export function RemoteBrowserCard({
     >
       {/* Header — icon badge, title, and a live/expired status dot. */}
       <div className="flex items-center gap-3 border-b px-3.5 py-3">
-        <span className="grid h-8 w-8 shrink-0 place-items-center border bg-background">
-          <GlobeHemisphereWest className="h-4 w-4" weight="regular" />
-        </span>
+        <SiliconBrowserMark className="h-8 w-8 shrink-0" />
         <div className="min-w-0 flex-1 text-sm font-medium">Silicon Browser</div>
         <span
           aria-hidden

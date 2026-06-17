@@ -51,14 +51,12 @@ export function RemoteBrowserCard({
 
   // Only http(s) links are clickable — refuse javascript:/data:/file: so a
   // silicon-sent card can never become an injection vector.
-  let host = url;
   let safeUrl: string | null = null;
   try {
     const u = new URL(url);
-    host = u.host || url;
     if (u.protocol === "http:" || u.protocol === "https:") safeUrl = url;
   } catch {
-    /* leave host as-is; safeUrl stays null → non-clickable */
+    /* not a valid URL; safeUrl stays null → non-clickable */
   }
 
   const clickable = !expired && !!safeUrl;
@@ -69,29 +67,38 @@ export function RemoteBrowserCard({
       ? "expires soon"
       : `expires in ${minutesLeft}m`;
 
-  const card = (
+  const open = () => {
+    if (safeUrl) window.open(safeUrl, "_blank", "noopener,noreferrer");
+  };
+
+  return (
     <div
       className={cn(
         "group/sb w-72 max-w-full overflow-hidden border bg-card text-foreground transition-colors",
         expired ? "opacity-60" : "group-hover/sb:border-foreground/40",
+        clickable && "cursor-pointer",
       )}
+      {...(clickable
+        ? {
+            role: "button" as const,
+            tabIndex: 0,
+            "aria-label": "open Silicon Browser",
+            onClick: open,
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                open();
+              }
+            },
+          }
+        : {})}
     >
       {/* Header — icon badge, title, and a live/expired status dot. */}
       <div className="flex items-center gap-3 border-b px-3.5 py-3">
         <span className="grid h-8 w-8 shrink-0 place-items-center border bg-background">
           <GlobeHemisphereWest className="h-4 w-4" weight="regular" />
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 text-sm font-medium leading-none">
-            Silicon Browser
-            {clickable && (
-              <ArrowUpRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover/sb:opacity-60" />
-            )}
-          </div>
-          <div className="mt-1 truncate text-xs text-muted-foreground" title={url}>
-            {host}
-          </div>
-        </div>
+        <div className="min-w-0 flex-1 text-sm font-medium">Silicon Browser</div>
         <span
           aria-hidden
           className={cn(
@@ -131,12 +138,9 @@ export function RemoteBrowserCard({
               className="transition-[stroke-dashoffset] duration-1000 ease-linear"
             />
           </svg>
-          <div className="absolute flex flex-col items-center leading-none">
-            <span className="text-lg font-semibold tabular-nums">{expired ? "0" : minutesLeft}</span>
-            <span className="label-mono mt-0.5 text-[9px] tracking-widest text-muted-foreground">
-              {expired ? "DONE" : "MIN LEFT"}
-            </span>
-          </div>
+          <span className="absolute text-xl font-semibold tabular-nums leading-none">
+            {expired ? "0" : minutesLeft}
+          </span>
         </div>
         <span
           className={cn(
@@ -148,6 +152,22 @@ export function RemoteBrowserCard({
         </span>
       </div>
 
+      {/* Open Browser action — opens the same link as clicking the card. */}
+      {clickable && (
+        <div className="px-3.5 pb-3.5">
+          <a
+            href={safeUrl!}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="flex items-center justify-center gap-1.5 bg-foreground px-3 py-2 text-xs font-medium text-background transition-opacity hover:opacity-90"
+          >
+            Open Browser
+            <ArrowUpRight className="h-3.5 w-3.5" weight="bold" />
+          </a>
+        </div>
+      )}
+
       {/* Footer tag. */}
       <div className="flex items-center gap-1.5 border-t px-3.5 py-2">
         <span className="h-1 w-1 shrink-0 bg-muted-foreground/60" />
@@ -156,14 +176,5 @@ export function RemoteBrowserCard({
         </span>
       </div>
     </div>
-  );
-
-  // Non-clickable when expired or the scheme isn't http(s). The hover affordance
-  // lives on the `group/sb` so only the real link reacts.
-  if (!clickable) return card;
-  return (
-    <a href={safeUrl!} target="_blank" rel="noopener noreferrer" className="group/sb block">
-      {card}
-    </a>
   );
 }

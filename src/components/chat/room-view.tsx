@@ -14,7 +14,7 @@ import {
   markNotificationsAsked,
   requestBrowserNotifications,
 } from "@/lib/notifications";
-import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
+import type { Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
 
 import { Button } from "@/components/ui/button";
@@ -290,18 +290,60 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     for (const p of room.peers) m.set(p.handle, p);
     return m;
   }, [room.peers]);
-  // People in this room offered by the composer's `@` autocomplete.
-  const mentionCandidates = React.useMemo<MentionCandidate[]>(
-    () =>
-      room.peers.map((p) => ({
+  // In a team chat, `@` should offer everyone on the team — not just whoever is
+  // already a peer in this room. Load the team roster when the room belongs to a
+  // team; direct/Others chats fall back to the room peers alone.
+  const [teamRoster, setTeamRoster] = React.useState<TeamMembership[]>([]);
+  React.useEffect(() => {
+    const slug = room.team_slug;
+    if (!slug) {
+      setTeamRoster([]);
+      return;
+    }
+    let alive = true;
+    api
+      .teamMembers(slug)
+      .then((rows) => {
+        if (alive) setTeamRoster(rows);
+      })
+      .catch(() => {
+        if (alive) setTeamRoster([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [room.team_slug]);
+
+  // People offered by the composer's `@` autocomplete. Room peers first (they
+  // carry richer name/photo data), then any remaining team members, deduped by
+  // kind+handle. Self is never mentionable.
+  const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
+    const seen = new Map<string, MentionCandidate>();
+    const add = (c: MentionCandidate) => {
+      if (myUsername && c.handle === myUsername) return;
+      const key = `${c.kind}:${c.handle}`;
+      if (!seen.has(key)) seen.set(key, c);
+    };
+    for (const p of room.peers) {
+      add({
         kind: p.kind,
         handle: p.handle,
         name: p.name,
         photoUrl: p.profile_photo_url,
         asciiUrl: p.profile_ascii_url,
-      })),
-    [room.peers],
-  );
+      });
+    }
+    for (const m of teamRoster) {
+      if ((m.member_kind !== "carbon" && m.member_kind !== "silicon") || !m.member_handle) continue;
+      add({
+        kind: m.member_kind,
+        handle: m.member_handle,
+        name: m.member_handle,
+        photoUrl: m.member_photo_url,
+      });
+    }
+    return [...seen.values()];
+  }, [room.peers, teamRoster, myUsername]);
   const contactForSender = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
@@ -690,6 +732,23 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     viewport.addEventListener("scroll", onScroll, { passive: true });
     return () => viewport.removeEventListener("scroll", onScroll);
   }, [room.room_id, scrollViewport, isNearBottom]);
+
+  // Keep the view pinned to the latest message whenever layout changes while the
+  // user is already at the bottom: the composer's "will send" hold banner
+  // appearing shrinks the viewport, and a streaming reply / late-loading media
+  // grows the content — either would otherwise let the last message slide out of
+  // sight. Gated on stickToBottomRef so a user who scrolled up is left alone.
+  React.useEffect(() => {
+    const viewport = scrollViewport();
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const content = viewport.firstElementChild;
+    const ro = new ResizeObserver(() => {
+      if (stickToBottomRef.current) scrollToBottom("auto");
+    });
+    ro.observe(viewport); // viewport shrinks when the composer banner appears
+    if (content) ro.observe(content); // content grows as messages stream in
+    return () => ro.disconnect();
+  }, [room.room_id, scrollViewport, scrollToBottom]);
 
   React.useEffect(() => {
     if (loading) return;

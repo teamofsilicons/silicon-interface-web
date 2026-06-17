@@ -421,7 +421,7 @@ export function MediaAttachment({
   // the PDF chip — pin the ink color so the chip stays readable inside a
   // primary-colored "mine" bubble.
   return (
-    <div className="inline-flex items-center gap-2 bg-card px-3 py-2 text-xs text-foreground">
+    <div className="flex w-60 max-w-full items-center gap-2 bg-card px-3 py-2 text-xs text-foreground">
       <File className="h-4 w-4 shrink-0" />
       <span className="min-w-0 flex-1 truncate">{filename}</span>
       {!isDev && (

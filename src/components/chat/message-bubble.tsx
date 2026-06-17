@@ -9,6 +9,9 @@ import {
   Copy,
   DotsThree,
   DownloadSimple,
+  File as FileIcon,
+  FilePdf,
+  ImageSquare,
   MusicNote,
   Share,
   Smiley,
@@ -53,6 +56,46 @@ import {
 } from "@/components/ui/dialog";
 
 const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
+
+/**
+ * A tilted "bookmark" pin for an attachment that was sent alongside a text
+ * message — clicking opens the attachment in a new tab (image/video/pdf) or
+ * downloads it. Sits over the top edge of the text bubble.
+ */
+function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; tilt: number }) {
+  const mediaId = String(content.media_id ?? "");
+  const mime = String(content.mime ?? "").toLowerCase();
+  const filename = String(content.filename ?? content.caption ?? "file");
+  const isVisual = mime.startsWith("image/") || mime.startsWith("video/");
+  const Icon = isVisual ? ImageSquare : mime.includes("pdf") ? FilePdf : FileIcon;
+  const open = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!mediaId) return;
+    try {
+      const r = await api.mediaDetail(mediaId);
+      if (!r.download_url) return;
+      if (isVisual || mime.includes("pdf")) {
+        window.open(r.download_url, "_blank", "noopener,noreferrer");
+      } else {
+        downloadAsset(r.download_url, filename);
+      }
+    } catch {
+      toast.error("couldn't open attachment");
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={open}
+      title={filename}
+      style={{ transform: `rotate(${tilt}deg)` }}
+      className="pointer-events-auto flex max-w-[8rem] items-center gap-1 border bg-card px-2 py-1 text-[11px] text-foreground shadow-sm transition-transform hover:-translate-y-0.5 hover:rotate-0"
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0" weight="regular" />
+      <span className="min-w-0 truncate">{filename}</span>
+    </button>
+  );
+}
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
@@ -104,6 +147,9 @@ interface Props {
   onForward?: (event: Event) => void;
   /** Self-delete (5-min carbon window). */
   onDelete?: (event: Event) => void;
+  /** Attachment events sent alongside this text message — rendered as tilted
+   *  pins over the bubble instead of as their own standalone bubbles. */
+  pinnedAttachments?: Event[];
 }
 
 export function MessageBubble({
@@ -127,6 +173,7 @@ export function MessageBubble({
   onReact,
   onForward,
   onDelete,
+  pinnedAttachments,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
   // early return so the Hook order is stable across render branches.
@@ -246,6 +293,24 @@ export function MessageBubble({
             <span>{senderLabel}</span>
           </div>
         )}
+        {/* §2 — attachments sent with this text peek over the bubble's top edge
+            as tilted bookmarks; the negative margin tucks them onto the bubble. */}
+        {pinnedAttachments && pinnedAttachments.length > 0 && (
+          <div
+            className={cn(
+              "relative z-10 -mb-2 flex flex-wrap gap-1.5 px-1",
+              isMine ? "justify-end" : "justify-start",
+            )}
+          >
+            {pinnedAttachments.map((att, idx) => (
+              <AttachmentPin
+                key={att.event_id || idx}
+                content={att.content as Record<string, unknown>}
+                tilt={-12}
+              />
+            ))}
+          </div>
+        )}
         <div
           className={cn(
             // Symmetric p-3 padding so an inline image/file inside the bubble
@@ -264,7 +329,7 @@ export function MessageBubble({
                 // (A Tailwind `selection:` utility can't win against the
                 // unlayered global ::selection rule, hence the explicit class.)
                 ? "bubble-sent bg-primary text-primary-foreground"
-                : "border bg-bubble-received",
+                : "bg-bubble-received",
           )}
           onContextMenu={openMenuGesture}
           onDoubleClick={openMenuGesture}

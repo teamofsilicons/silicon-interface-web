@@ -17,7 +17,7 @@ import { api, ApiError } from "@/lib/api";
 import { track } from "@/lib/analytics";
 import { searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
-import { getDraft, setDraft } from "@/lib/drafts";
+import { flushDraft, getDraft, setDraft } from "@/lib/drafts";
 import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -711,10 +711,15 @@ export function Composer({
     },
     [roomId],
   );
-  // Load the room's saved draft when the active room changes.
+  // Load the room's saved draft when the active room changes. On leaving the
+  // room, flush its draft to the sidebar immediately (don't wait for the typing
+  // pause) so switching chats surfaces the draft right away.
   React.useEffect(() => {
     setText(getDraft(roomId));
     setEmojiQuery(null);
+    return () => {
+      flushDraft(roomId);
+    };
   }, [roomId]);
 
   // #5 — Typing beacon. POSTs `activity('typing', true)` on the first
@@ -967,11 +972,11 @@ export function Composer({
     [buildQueuedPayload, clearDelayTimer, roomId],
   );
 
-  const sendTextOptimistic = (body: string) => {
+  const sendTextOptimistic = (body: string, extraContent?: Record<string, unknown>) => {
     const clientId = newClientId();
     const payload: OptimisticPayload = {
       type: "m.text",
-      content: { body },
+      content: { body, ...(extraContent ?? {}) },
       reply_to_event_id: replyTo?.event_id,
     };
     onOptimisticAdd(clientId, payload);
@@ -1012,17 +1017,27 @@ export function Composer({
       if (ready.length === 0 && !body) return;
       setBusy(true);
       try {
+        // When text rides along with attachments, tag both with a shared
+        // bundle_id so the timeline can render the attachments as pins on the
+        // text bubble. With no text, attachments stand alone (no bundle).
+        const bundleId = body && ready.length > 0 ? newClientId() : null;
         for (const a of ready) {
           const fileType = a.mime.startsWith("image/") ? "m.image" : "m.file";
           await api.sendEvent(roomId, {
             type: fileType,
-            content: { media_id: a.mediaId, mime: a.mime, filename: a.file.name },
+            content: {
+              media_id: a.mediaId,
+              mime: a.mime,
+              filename: a.file.name,
+              ...(bundleId ? { bundle_id: bundleId } : {}),
+            },
           });
           track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         }
         reset();
-        // Typed text rides as a *separate* message after the attachments.
-        if (body) sendTextOptimistic(body);
+        // Typed text rides as a *separate* message after the attachments,
+        // carrying the same bundle_id so they render together.
+        if (body) sendTextOptimistic(body, bundleId ? { bundle_id: bundleId } : undefined);
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
       } finally {
@@ -1175,7 +1190,7 @@ export function Composer({
   }
 
   return (
-    <div className="space-y-2 border-t bg-elevated p-2 shadow-[0_-2px_12px_-4px_rgba(60,50,36,0.12)]">
+    <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
         <div className="flex items-start gap-2 border-l-2 border-foreground/60 bg-card px-2 py-1 text-xs">
           <ArrowBendUpLeft className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" />
@@ -1303,7 +1318,7 @@ export function Composer({
                 onClick={() => void flushDelayedTextQueue()}
                 className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
               >
-                Send anyway
+                send now
               </button>
             </>
           )}

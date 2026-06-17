@@ -1156,6 +1156,34 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       return searchable.includes(s);
     });
   }, [visibleEvents, search]);
+  // §2 — collapse attachment+text bundles: attachments sharing a `bundle_id`
+  // with a text message are pinned onto that bubble instead of rendered as their
+  // own rows. `displayRows` is the timeline minus those folded-in attachments;
+  // `pinsByKey` maps the text bubble's render key to its attachment events.
+  const { displayRows, pinsByKey } = React.useMemo(() => {
+    const keyOf = (e: Event) => (e as LocalEvent)._clientId ?? e.event_id;
+    const bundles = new Map<string, { text?: Event; atts: Event[] }>();
+    for (const e of filteredEvents) {
+      const bid = (e.content as { bundle_id?: unknown }).bundle_id;
+      if (typeof bid !== "string" || !bid) continue;
+      const b = bundles.get(bid) ?? { atts: [] as Event[] };
+      if (e.type === "m.text") b.text = e;
+      else if (e.type === "m.image" || e.type === "m.file") b.atts.push(e);
+      bundles.set(bid, b);
+    }
+    const skip = new Set<Event>();
+    const pins = new Map<string, Event[]>();
+    for (const b of bundles.values()) {
+      if (b.text && b.atts.length) {
+        for (const a of b.atts) skip.add(a);
+        pins.set(keyOf(b.text), b.atts);
+      }
+    }
+    return {
+      displayRows: skip.size ? filteredEvents.filter((e) => !skip.has(e)) : filteredEvents,
+      pinsByKey: pins,
+    };
+  }, [filteredEvents]);
   const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;
   const latestVisibleEventId = latestVisibleEvent?.event_id ?? null;
   // Show the progress line whenever there's active progress for this room. We
@@ -1182,6 +1210,97 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (!progressAvatarHandle) return headerPhoto;
     return photoFor("silicon", progressAvatarHandle) ?? headerPhoto;
   }, [progressAvatarHandle, photoFor, headerPhoto]);
+
+  // §1 — run grouping. Record when the current silicon run started so messages
+  // the carbon sends *during* the run drop into a fresh group below the run's
+  // in-progress status, instead of merging with the pre-run messages.
+  const [runStartIso, setRunStartIso] = React.useState<string | null>(null);
+  const activeRunGroupId = shouldShowActiveProgress ? (activeProgress?.groupId ?? null) : null;
+  React.useEffect(() => {
+    if (!activeRunGroupId) {
+      setRunStartIso(null);
+      return;
+    }
+    setRunStartIso(new Date().toISOString());
+  }, [activeRunGroupId]);
+
+  // §1 — fold the flat timeline into "turn" groups: consecutive messages from
+  // the same party (carbon vs silicon) become one soft panel. The active run's
+  // status is anchored at its start time, so a new carbon message sent mid-run
+  // opens a fresh carbon panel beneath the silicon run's panel.
+  const timelineItems = React.useMemo(() => {
+    type Party = "carbon" | "silicon";
+    type Row = (typeof displayRows)[number];
+    type Item =
+      | { kind: "panel"; party: Party; events: Row[]; key: string; dayLabel: string | null }
+      | { kind: "system"; event: Row; key: string; dayLabel: string | null }
+      | { kind: "progress"; key: string; dayLabel: string | null };
+    const keyOf = (e: Row) => (e as LocalEvent)._clientId ?? e.event_id;
+    const isSystem = (e: Row) => e.type === "m.system" || e.type === "m.session_marker";
+    const partyOf = (e: Row): Party => (e.sender_kind === "silicon" ? "silicon" : "carbon");
+    const dayKey = (iso: string) => {
+      const d = new Date(iso);
+      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    };
+
+    const runActive = !search && shouldShowActiveProgress && !holdingMessage;
+    const anchorIso = runActive ? runStartIso : null;
+
+    const raw: Array<{ item: Item; iso: string }> = [];
+    let cur: { party: Party; events: Row[] } | null = null;
+    let progressPlaced = false;
+    const flush = () => {
+      if (cur && cur.events.length) {
+        raw.push({
+          item: {
+            kind: "panel",
+            party: cur.party,
+            events: cur.events,
+            key: keyOf(cur.events[0]),
+            dayLabel: null,
+          },
+          iso: cur.events[0].created_at,
+        });
+      }
+      cur = null;
+    };
+    const placeProgress = (iso: string) => {
+      flush();
+      raw.push({ item: { kind: "progress", key: "run-progress", dayLabel: null }, iso });
+      progressPlaced = true;
+    };
+    for (const e of displayRows) {
+      if (runActive && !progressPlaced && anchorIso && e.created_at > anchorIso) {
+        placeProgress(anchorIso);
+      }
+      if (isSystem(e)) {
+        flush();
+        raw.push({ item: { kind: "system", event: e, key: keyOf(e), dayLabel: null }, iso: e.created_at });
+        continue;
+      }
+      const p = partyOf(e);
+      if (!cur || cur.party !== p) {
+        flush();
+        cur = { party: p, events: [] };
+      }
+      cur.events.push(e);
+    }
+    flush();
+    if (runActive && !progressPlaced) {
+      const last = displayRows[displayRows.length - 1];
+      placeProgress(anchorIso ?? last?.created_at ?? new Date(0).toISOString());
+    }
+    // Day band before the first item of each new local calendar day.
+    let prevDay: string | null = null;
+    for (const r of raw) {
+      const d = dayKey(r.iso);
+      if (d !== prevDay) {
+        r.item.dayLabel = dayLabel(r.iso);
+        prevDay = d;
+      }
+    }
+    return raw.map((r) => r.item);
+  }, [displayRows, search, shouldShowActiveProgress, holdingMessage, runStartIso]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -1401,65 +1520,100 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               )}
             </div>
           ) : (
-            filteredEvents.map((e, i) => {
-              // Group consecutive messages by (sender_handle, minute):
-              //   • showSender on the FIRST bubble of a run (received only)
-              //   • showTime on the LAST bubble of a run
-              // The minute compare uses the YYYY-MM-DDTHH:MM slice of the ISO
-              // string so we don't bring a Date constructor + tz math into a
-              // hot render path.
-              const prev = filteredEvents[i - 1];
-              const next = filteredEvents[i + 1];
-              const sameAs = (a?: LocalEvent | Event) =>
-                !!a &&
-                a.sender_handle === e.sender_handle &&
-                a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
-              const showSender = !sameAs(prev);
-              const showTime = !sameAs(next);
-              // Day boundary uses real Dates (not an ISO slice) so the band
-              // lands on the LOCAL calendar day, not the UTC one.
-              const localDay = (iso: string) => {
-                const d = new Date(iso);
-                return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-              };
-              const newDay =
-                !prev || localDay(prev.created_at) !== localDay(e.created_at);
+            timelineItems.map((item) => {
+              const dayBand = item.dayLabel ? (
+                <div className="py-1 text-center text-[10px] text-muted-foreground">
+                  {item.dayLabel}
+                </div>
+              ) : null;
+              // System events (markers/dividers) render full-width, outside a
+              // turn panel.
+              if (item.kind === "system") {
+                return (
+                  <React.Fragment key={item.key}>
+                    {dayBand}
+                    <MessageBubble
+                      event={item.event}
+                      isMine={isMyEvent(item.event, myUsername)}
+                      myHandle={myUsername}
+                      isDirect={room.kind === "direct"}
+                    />
+                  </React.Fragment>
+                );
+              }
+              // The active silicon run's status, anchored inside a silicon panel.
+              if (item.kind === "progress") {
+                if (!activeProgress) return null;
+                return (
+                  <React.Fragment key={item.key}>
+                    {dayBand}
+                    <div className="my-3">
+                      <ProgressLine
+                        entry={activeProgress}
+                        avatarSeed={progressAvatarHandle || headerSeed}
+                        avatarSrc={progressAvatarSrc}
+                        avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
+                        staleMs={progressStaleMs}
+                        onDismiss={() => {
+                          clearRoomProgress(room.room_id);
+                          setActiveProgress(null);
+                        }}
+                      />
+                    </div>
+                  </React.Fragment>
+                );
+              }
+              // A turn: consecutive messages from one party, grouped into a soft
+              // panel. Silicon turns read a touch lighter (raised) than carbon.
               return (
-                <React.Fragment key={e._clientId ?? e.event_id}>
-                {newDay && (
-                  <div className="py-1 text-center text-[10px] text-muted-foreground">
-                    {dayLabel(e.created_at)}
+                <React.Fragment key={item.key}>
+                  {dayBand}
+                  {/* Turn grouping: consecutive same-party messages, separated
+                      from the next turn by spacing only (no border/fill). */}
+                  <div className="my-3">
+                    {item.events.map((e, j) => {
+                      // (sender, minute) sub-grouping, computed within the panel.
+                      const prev = item.events[j - 1];
+                      const next = item.events[j + 1];
+                      const sameAs = (a?: LocalEvent | Event) =>
+                        !!a &&
+                        a.sender_handle === e.sender_handle &&
+                        a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
+                      return (
+                        <MessageBubble
+                          key={e._clientId ?? e.event_id}
+                          event={e}
+                          isMine={isMyEvent(e, myUsername)}
+                          myHandle={myUsername}
+                          replyToEvent={
+                            e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined
+                          }
+                          isDirect={room.kind === "direct"}
+                          status={e._status}
+                          senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
+                          senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
+                          senderAvatarKind={e.sender_kind}
+                          senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
+                          onSenderClick={openSenderProfile}
+                          onTakeBack={readOnly ? undefined : onTakeBack}
+                          showSender={!sameAs(prev)}
+                          showTime={!sameAs(next)}
+                          reactions={reactionsByTarget.get(e.event_id) ?? undefined}
+                          onReply={readOnly ? undefined : onReply}
+                          onReact={readOnly ? undefined : onReact}
+                          onForward={readOnly ? undefined : onForward}
+                          onDelete={readOnly ? undefined : onSelfDelete}
+                          pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
+                        />
+                      );
+                    })}
                   </div>
-                )}
-                <MessageBubble
-                  event={e}
-                  isMine={isMyEvent(e, myUsername)}
-                  myHandle={myUsername}
-                  replyToEvent={
-                    e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined
-                  }
-                  isDirect={room.kind === "direct"}
-                  status={e._status}
-                  senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
-                  senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
-                  senderAvatarKind={e.sender_kind}
-                  senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
-                  onSenderClick={openSenderProfile}
-                  onTakeBack={readOnly ? undefined : onTakeBack}
-                  showSender={showSender}
-                  showTime={showTime}
-                  reactions={reactionsByTarget.get(e.event_id) ?? undefined}
-                  onReply={readOnly ? undefined : onReply}
-                  onReact={readOnly ? undefined : onReact}
-                  onForward={readOnly ? undefined : onForward}
-                  onDelete={readOnly ? undefined : onSelfDelete}
-                />
                 </React.Fragment>
               );
             })
           )}
-          {/* While a silicon text is held (not yet sent), say so instead of
-              showing silicon progress — the silicon hasn't received it yet. */}
+          {/* Composer is holding a not-yet-sent message — shown at the bottom
+              since it's a pre-send state, not part of a silicon run. */}
           {holdingMessage ? (
             <div className="my-2 flex w-full items-center justify-start gap-2">
               <div className="w-7 shrink-0">
@@ -1474,20 +1628,6 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                 holding the message until you finish typing.
               </span>
             </div>
-          ) : shouldShowActiveProgress ? (
-            // Activity line (avatar + working copy); the [####----] % bar is
-            // stripped out inside ProgressLine.
-            <ProgressLine
-              entry={activeProgress}
-              avatarSeed={progressAvatarHandle || headerSeed}
-              avatarSrc={progressAvatarSrc}
-              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
-              staleMs={progressStaleMs}
-              onDismiss={() => {
-                clearRoomProgress(room.room_id);
-                setActiveProgress(null);
-              }}
-            />
           ) : null}
           <div ref={endRef} />
         </div>

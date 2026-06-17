@@ -18,7 +18,7 @@ interface Props {
 export function AppHeader(_: Props) {
   const { carbon } = useAuth();
   return (
-    <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
+    <header className="sticky top-0 z-30 border-b bg-sidebar/95 backdrop-blur">
       <div className="flex w-full items-center justify-between px-6 py-3">
         <Link href="/" className="flex items-center" aria-label="Silicon Interface - home">
           <Logo size={26} withWordmark />

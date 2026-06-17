@@ -1011,28 +1011,8 @@ function ChatPageInner() {
             left flex-1 and reaches the row's full height; a 1px vertical
             divider separates it from the new-chat (+) button on the right,
             matching the composer's attach | input | send pattern. */}
-        <div className="flex h-[52px] items-stretch border-b">
-          <div className="flex flex-1 items-center gap-2 pl-6 pr-3 transition-colors focus-within:bg-accent/30">
-            <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
-            <input
-              value={sidebarQuery}
-              onChange={(e) => setSidebarQuery(e.target.value)}
-              placeholder="search Carbons + Silicons"
-              className="h-full w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-            />
-          </div>
-          <button
-            type="button"
-            onClick={() => setDialogOpen(true)}
-            aria-label="new chat"
-            title="new chat"
-            className="flex w-12 shrink-0 items-center justify-center border-l border-border text-foreground transition-colors hover:bg-accent"
-          >
-            <Plus />
-          </button>
-        </div>
         {(teams.length > 0 || hasOtherRooms || hasObservedRooms) && (
-          <div className="flex items-stretch border-b bg-background">
+          <div className="flex items-stretch border-b">
             <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden py-2 pl-6 pr-3">
               {teams.map((team) => (
                 <button
@@ -1110,7 +1090,7 @@ function ChatPageInner() {
                 title={`${activeTeam.name} team workspace`}
                 onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
                 className={cn(
-                  "grid w-12 shrink-0 place-items-center border-l text-foreground transition-colors hover:bg-accent",
+                  "m-2 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent",
                   viewedTeam?.slug === activeTeam.slug && "bg-secondary",
                 )}
               >
@@ -1119,6 +1099,27 @@ function ChatPageInner() {
             ) : null}
           </div>
         )}
+        {/* Search + new chat, below the teams bar. */}
+        <div className="flex h-[52px] items-stretch border-b">
+          <div className="flex flex-1 items-center gap-2 pl-6 pr-3 transition-colors focus-within:bg-accent/30">
+            <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
+            <input
+              value={sidebarQuery}
+              onChange={(e) => setSidebarQuery(e.target.value)}
+              placeholder="search Carbons + Silicons"
+              className="h-full w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => setDialogOpen(true)}
+            aria-label="new chat"
+            title="new chat"
+            className="m-2 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
         <TeamFilterBar
           filters={filters}
           onChange={setFilters}

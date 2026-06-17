@@ -97,7 +97,7 @@
   /* --- section surfaces (depth) --- */
   /* sidebar reads as a slightly recessed panel; elevated is for raised
      surfaces (composer, popovers, cards) that sit above the canvas. */
-  --sidebar:              #e7e1d6; /* a touch deeper than the canvas */
+  --sidebar:              #f5f0e7; /* sidebar + navbar surface */
   --elevated:             #f4f0e8; /* raised surfaces — lighter than canvas */
 
   /* --- semantic --- */

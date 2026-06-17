@@ -1,13 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { GlobeHemisphereWest } from "@phosphor-icons/react/dist/ssr";
+import { ArrowUpRight, GlobeHemisphereWest } from "@phosphor-icons/react/dist/ssr";
 
 import { cn } from "@/lib/utils";
 
 /**
- * A silicon-sent, time-limited link to a remote browser session. Renders a
- * Silicon-styled card with a circular countdown ring (the ring shrinks as time
+ * A silicon-sent, time-limited link to a Silicon Browser session. Renders a
+ * Silicon-styled card with a circular countdown ring (the ring drains as time
  * runs out). Once expired it's no longer clickable; otherwise it opens _blank.
  */
 export function RemoteBrowserCard({
@@ -42,9 +42,9 @@ export function RemoteBrowserCard({
   // show the actual remaining time so the label tracks the ring.
   const expiresSoon = !expired && remainMs <= 5 * 60_000;
 
-  // Ring geometry.
-  const size = 48;
-  const stroke = 3;
+  // Ring geometry — a generous, legible dial.
+  const size = 84;
+  const stroke = 4;
   const r = (size - stroke) / 2;
   const circ = 2 * Math.PI * r;
   const offset = circ * (1 - frac);
@@ -61,20 +61,52 @@ export function RemoteBrowserCard({
     /* leave host as-is; safeUrl stays null → non-clickable */
   }
 
-  const card = (
-    <div className={cn("w-64 max-w-full space-y-2 border bg-card p-3 text-foreground", expired && "opacity-60")}>
-      <div className="flex items-center gap-2">
-        <GlobeHemisphereWest className="h-4 w-4 shrink-0" />
-        <span className="text-sm font-medium">Remote Browser</span>
-      </div>
-      <div className="truncate text-xs text-muted-foreground" title={url}>
-        {host}
-      </div>
-      <span className="label-mono text-[10px] tracking-wide text-muted-foreground">
-        SILICON BROWSER
-      </span>
+  const clickable = !expired && !!safeUrl;
 
-      <div className="flex flex-col items-center gap-1 pt-1">
+  const statusText = expired
+    ? "link expired"
+    : expiresSoon
+      ? "expires soon"
+      : `expires in ${minutesLeft}m`;
+
+  const card = (
+    <div
+      className={cn(
+        "group/sb w-72 max-w-full overflow-hidden border bg-card text-foreground transition-colors",
+        expired ? "opacity-60" : "group-hover/sb:border-foreground/40",
+      )}
+    >
+      {/* Header — icon badge, title, and a live/expired status dot. */}
+      <div className="flex items-center gap-3 border-b px-3.5 py-3">
+        <span className="grid h-8 w-8 shrink-0 place-items-center border bg-background">
+          <GlobeHemisphereWest className="h-4 w-4" weight="regular" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-sm font-medium leading-none">
+            Silicon Browser
+            {clickable && (
+              <ArrowUpRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover/sb:opacity-60" />
+            )}
+          </div>
+          <div className="mt-1 truncate text-xs text-muted-foreground" title={url}>
+            {host}
+          </div>
+        </div>
+        <span
+          aria-hidden
+          className={cn(
+            "h-2 w-2 shrink-0 rounded-full",
+            expired
+              ? "bg-muted-foreground/40"
+              : expiresSoon
+                ? "bg-foreground"
+                : "bg-foreground animate-pulse motion-reduce:animate-none",
+          )}
+        />
+      </div>
+
+      {/* Countdown dial. */}
+      <div className="flex flex-col items-center gap-2 px-3.5 py-4">
         <div className="relative inline-flex items-center justify-center">
           <svg width={size} height={size} className="-rotate-90">
             <circle
@@ -84,7 +116,7 @@ export function RemoteBrowserCard({
               fill="none"
               stroke="currentColor"
               strokeWidth={stroke}
-              className="opacity-15"
+              className="opacity-10"
             />
             <circle
               cx={size / 2}
@@ -99,30 +131,38 @@ export function RemoteBrowserCard({
               className="transition-[stroke-dashoffset] duration-1000 ease-linear"
             />
           </svg>
-          <span className="absolute label-mono text-[10px] font-medium">
-            {expired ? "0" : `${minutesLeft}m`}
-          </span>
+          <div className="absolute flex flex-col items-center leading-none">
+            <span className="text-lg font-semibold tabular-nums">{expired ? "0" : minutesLeft}</span>
+            <span className="label-mono mt-0.5 text-[9px] tracking-widest text-muted-foreground">
+              {expired ? "DONE" : "MIN LEFT"}
+            </span>
+          </div>
         </div>
-        <span className="text-[10px] text-muted-foreground">
-          {expired
-            ? "link expired"
-            : expiresSoon
-              ? "expires soon"
-              : `expires in ${minutesLeft}m`}
+        <span
+          className={cn(
+            "text-[11px]",
+            expiresSoon ? "text-foreground" : "text-muted-foreground",
+          )}
+        >
+          {statusText}
+        </span>
+      </div>
+
+      {/* Footer tag. */}
+      <div className="flex items-center gap-1.5 border-t px-3.5 py-2">
+        <span className="h-1 w-1 shrink-0 bg-muted-foreground/60" />
+        <span className="label-mono text-[10px] tracking-wide text-muted-foreground">
+          SILICON BROWSER SESSION
         </span>
       </div>
     </div>
   );
 
-  // Non-clickable when expired or the scheme isn't http(s).
-  if (expired || !safeUrl) return card;
+  // Non-clickable when expired or the scheme isn't http(s). The hover affordance
+  // lives on the `group/sb` so only the real link reacts.
+  if (!clickable) return card;
   return (
-    <a
-      href={safeUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="block transition-opacity hover:opacity-90"
-    >
+    <a href={safeUrl!} target="_blank" rel="noopener noreferrer" className="group/sb block">
       {card}
     </a>
   );

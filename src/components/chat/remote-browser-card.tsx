@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 /** The Silicon Browser mark: a filled square with the Silicon up-left glyph.
  *  Themed via tokens (foreground square, background glyph) so it matches the
  *  brand avatars and adapts to light/dark. */
-function SiliconBrowserMark({ className }: { className?: string }) {
+export function SiliconBrowserMark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 60 60" className={className} xmlns="http://www.w3.org/2000/svg" aria-hidden>
       <rect width="60" height="60" className="fill-foreground" />

@@ -2,14 +2,17 @@
 
 import * as React from "react";
 import {
+  Camera,
   CaretLeft,
   Check,
   Checks,
   Eye,
+  File,
   FolderSimple,
   FolderSimplePlus,
   Microphone,
   PencilSimple,
+  SpeakerHigh,
   Trash,
 } from "@phosphor-icons/react/dist/ssr";
 
@@ -21,6 +24,7 @@ import { cn, relativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
+import { SiliconBrowserMark } from "@/components/chat/remote-browser-card";
 import { GlyphSkeleton } from "@/components/ui/glyph-skeleton";
 import {
   DropdownMenu,
@@ -520,18 +524,7 @@ function RoomRow({
                 unread > 0 ? "text-foreground" : "text-muted-foreground",
               )}
             >
-              {r.last_event?.type === "m.voice" ? (
-                <span className="inline-flex items-center gap-1 align-middle">
-                  <Microphone className="h-3 w-3 shrink-0" /> voice note
-                </span>
-              ) : r.last_event?.type === "m.file" ? (
-                // Long filenames: ellipsis in the MIDDLE so the
-                // extension stays visible (the <p> still end-truncates
-                // as a width fallback).
-                fileNamePreview(r.last_event.preview)
-              ) : (
-                preview
-              )}
+              <LastEventPreview room={r} fallback={preview} />
             </p>
             {unread > 0 ? (
               <span
@@ -615,10 +608,42 @@ function middleEllipsis(s: string, max = 30): string {
   return `${base.slice(0, head)}…${base.slice(base.length - tail)}${ext}`;
 }
 
-/** A file last-event preview ("📎 name") with the filename middle-truncated. */
+// Legacy previews (and some backend ones) prefix a type emoji; strip it so the
+// label is clean text and we render a Phosphor icon instead.
+function stripPreviewEmoji(s: string): string {
+  return s.replace(/^(?:📷|📎|🎙|🔊|🌐|🖼|📹|📁)\s*/u, "");
+}
+
+/** A file last-event preview with the filename middle-truncated. */
 function fileNamePreview(preview: string): string {
-  const m = preview.match(/^(📎\s*)(.*)$/);
-  return m ? `${m[1]}${middleEllipsis(m[2])}` : middleEllipsis(preview);
+  return middleEllipsis(stripPreviewEmoji(preview));
+}
+
+/** One-line, type-aware last-message preview: a Phosphor icon (no emojis) plus
+ *  a short label. Falls back to the plain text preview for text / no events. */
+function LastEventPreview({ room, fallback }: { room: Room; fallback: string }) {
+  const t = room.last_event?.type;
+  const iconCls = "h-3 w-3 shrink-0";
+  const wrap = (icon: React.ReactNode, label: React.ReactNode) => (
+    <span className="flex min-w-0 items-center gap-1 align-middle">
+      {icon}
+      <span className="min-w-0 truncate">{label}</span>
+    </span>
+  );
+  switch (t) {
+    case "m.voice":
+      return wrap(<Microphone className={iconCls} />, "voice note");
+    case "m.tts":
+      return wrap(<SpeakerHigh className={iconCls} />, stripPreviewEmoji(fallback) || "audio");
+    case "m.image":
+      return wrap(<Camera className={iconCls} />, stripPreviewEmoji(fallback) || "photo");
+    case "m.remote_browser":
+      return wrap(<SiliconBrowserMark className={iconCls} />, "Silicon Browser link");
+    case "m.file":
+      return wrap(<File className={iconCls} />, fileNamePreview(room.last_event?.preview ?? ""));
+    default:
+      return <>{fallback}</>;
+  }
 }
 
 function roomPreview(room: Room, fallback: string): string {

@@ -650,13 +650,15 @@ function replyPreview(ev: Event): string {
     case "m.text":
       return String(c.body ?? "");
     case "m.image":
-      return c.caption ? `📷 ${String(c.caption)}` : "📷 photo";
+      return c.caption ? String(c.caption) : "photo";
     case "m.file":
-      return c.caption ? `📎 ${String(c.caption)}` : "📎 attachment";
+      return c.filename ? String(c.filename) : c.caption ? String(c.caption) : "attachment";
     case "m.voice":
-      return c.transcript ? `🎙 ${String(c.transcript)}` : "🎙 voice note";
+      return c.transcript ? String(c.transcript) : "voice note";
+    case "m.remote_browser":
+      return "Silicon Browser link";
     case "m.tts":
-      return c.text ? `🔊 ${String(c.text)}` : "🔊 audio";
+      return c.text ? String(c.text) : "audio";
     default:
       return "message";
   }

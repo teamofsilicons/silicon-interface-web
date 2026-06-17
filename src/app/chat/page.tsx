@@ -63,21 +63,24 @@ function eventPreview(ev: Event): string | null {
       const body = String(c.body ?? "").trim();
       return body.length > 120 ? `${body.slice(0, 120)}…` : body;
     }
+    // No emojis in previews — the sidebar renders a Phosphor icon per type
+    // (see room-list). These strings are the icon-less labels.
     case "m.image": {
       const cap = String(c.caption ?? "").trim();
-      return cap ? `📷 ${cap}` : "📷 photo";
+      return cap || "photo";
     }
     case "m.file": {
+      const name = String(c.filename ?? "").trim();
       const cap = String(c.caption ?? "").trim();
-      return cap ? `📎 ${cap}` : "📎 attachment";
+      return name || cap || "attachment";
     }
     case "m.voice":
-      return "🎙 voice note";
+      return "voice note";
     case "m.remote_browser":
-      return "🌐 Silicon Browser link";
+      return "Silicon Browser link";
     case "m.tts": {
       const t = String(c.text ?? "").trim();
-      return t ? `🔊 ${t.slice(0, 80)}` : "🔊 audio";
+      return t ? t.slice(0, 80) : "audio";
     }
     default:
       return null;

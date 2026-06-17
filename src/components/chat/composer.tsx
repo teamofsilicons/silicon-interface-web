@@ -479,9 +479,10 @@ export function Composer({
   // When the held message has entered its final countdown, this is the wall
   // time it will auto-send at (null otherwise). Drives the "will send in {N}s".
   const [emptyHoldEndsAt, setEmptyHoldEndsAt] = React.useState<number | null>(null);
-  // True once "wait 1 more minute" has extended the hold — flips the flush
-  // button label from "send anyways" to "send now".
-  const [waitExtended, setWaitExtended] = React.useState(false);
+  // Tracks whether "wait 1 more minute" has extended the hold. The value isn't
+  // read for the label (the flush button always reads "send now"), but the
+  // setter still resets the flag across hold cycles.
+  const [, setWaitExtended] = React.useState(false);
   // Bumped on an interval while the countdown runs so the banner re-renders.
   const [, setHoldTick] = React.useState(0);
 
@@ -1294,7 +1295,7 @@ export function Composer({
                   onClick={() => void flushDelayedTextQueue()}
                   className="text-xs font-medium text-foreground underline-offset-2 hover:underline"
                 >
-                  {waitExtended ? "send now" : "send anyways"}
+                  send now
                 </button>
               </div>
             </>

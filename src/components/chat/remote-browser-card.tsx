@@ -37,7 +37,7 @@ export function RemoteBrowserCard({
 
   const totalMs = (ttlMinutes ?? 60) * 60_000;
   const remainMs = validExp ? Math.max(0, expMs - now) : 0;
-  // An explicit close expires the card regardless of the remaining timer.
+  // An explicit early close expires the card regardless of the remaining timer.
   const expired = closed || !validExp || remainMs <= 0;
   const frac = totalMs > 0 ? Math.max(0, Math.min(1, remainMs / totalMs)) : 0;
   const minutesLeft = Math.ceil(remainMs / 60_000);

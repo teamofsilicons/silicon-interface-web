@@ -116,7 +116,7 @@ const OTHERS_TAB = "__others__";
 // own conversations.
 const OBSERVING_TAB = "__observing__";
 
-/** Small unread count chip shown on a team / Others / Observing tab. Inverts
+/** Small unread-count chip shown on a team / Others / Observing tab. Inverts
  *  its colors on the active tab (which has a dark/foreground background). */
 function TabUnreadBadge({ count, active }: { count: number; active: boolean }) {
   if (count <= 0) return null;

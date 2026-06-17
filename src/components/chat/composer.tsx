@@ -294,7 +294,7 @@ function filterMentions(candidates: MentionCandidate[], query: string): MentionC
   const q = query.toLowerCase();
   return candidates
     .filter((c) => !q || c.handle.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
-    .slice(0, 8);
+    .slice(0, 50);
 }
 
 /**
@@ -310,9 +310,20 @@ function MentionQuickPicker({
   selectedIndex: number;
   onPick: (c: MentionCandidate) => void;
 }) {
+  const listRef = React.useRef<HTMLDivElement>(null);
+  // Keep the keyboard-highlighted row visible as the user arrows through a long
+  // roster. `block: "nearest"` only scrolls when the row is out of view, so it
+  // never yanks the list around unnecessarily.
+  React.useEffect(() => {
+    const el = listRef.current?.children[selectedIndex] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex]);
   if (results.length === 0) return null;
   return (
-    <div className="absolute bottom-full inset-x-0 z-50 mb-2 max-h-64 overflow-y-auto border bg-card p-1 shadow-md">
+    <div
+      ref={listRef}
+      className="absolute bottom-full inset-x-0 z-50 mb-2 max-h-64 overflow-y-auto border bg-card p-1 shadow-md"
+    >
       {results.map((c, i) => (
         <button
           key={`${c.kind}:${c.handle}`}

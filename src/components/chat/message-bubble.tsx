@@ -817,6 +817,7 @@ function Body({ event }: { event: Event }) {
           url={String(c.url ?? "")}
           expiresAt={c.expires_at ? String(c.expires_at) : undefined}
           ttlMinutes={Number(c.ttl_minutes) || 60}
+          closed={Boolean(c.closed)}
         />
       );
     case "m.progress": {

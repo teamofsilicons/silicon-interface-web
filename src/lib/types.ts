@@ -434,6 +434,7 @@ export type WsFrame =
   | { type: "event.delta"; room_id: string; event_id: string; delta: string; seq: number }
   | { type: "event.final"; room_id: string; event_id: string }
   | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
+  | { type: "event.remote_browser_close"; room_id: string; event_id: string; expires_at: string }
   | {
       type: "read_receipt";
       room_id: string;

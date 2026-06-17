@@ -14,10 +14,12 @@ export function RemoteBrowserCard({
   url,
   expiresAt,
   ttlMinutes,
+  closed = false,
 }: {
   url: string;
   expiresAt?: string;
   ttlMinutes?: number;
+  closed?: boolean;
 }) {
   const expMs = expiresAt ? Date.parse(expiresAt) : 0;
   const validExp = expMs > 0 && Number.isFinite(expMs);
@@ -35,7 +37,8 @@ export function RemoteBrowserCard({
 
   const totalMs = (ttlMinutes ?? 60) * 60_000;
   const remainMs = validExp ? Math.max(0, expMs - now) : 0;
-  const expired = !validExp || remainMs <= 0;
+  // An explicit close expires the card regardless of the remaining timer.
+  const expired = closed || !validExp || remainMs <= 0;
   const frac = totalMs > 0 ? Math.max(0, Math.min(1, remainMs / totalMs)) : 0;
   const minutesLeft = Math.ceil(remainMs / 60_000);
   // "expires soon" should mean something — only flag it near the end. Otherwise
@@ -61,11 +64,13 @@ export function RemoteBrowserCard({
 
   const clickable = !expired && !!safeUrl;
 
-  const statusText = expired
-    ? "link expired"
-    : expiresSoon
-      ? "expires soon"
-      : `expires in ${minutesLeft}m`;
+  const statusText = closed
+    ? "session closed"
+    : expired
+      ? "link expired"
+      : expiresSoon
+        ? "expires soon"
+        : `expires in ${minutesLeft}m`;
 
   const open = () => {
     if (safeUrl) window.open(safeUrl, "_blank", "noopener,noreferrer");

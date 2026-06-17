@@ -622,6 +622,19 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             : e,
         ),
       );
+    } else if (f.type === "event.remote_browser_close") {
+      // The silicon closed the shared browser early — flip the card to
+      // "session closed" and expire its link without waiting for the timer.
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.event_id === f.event_id
+            ? {
+                ...e,
+                content: { ...e.content, closed: true, expires_at: f.expires_at },
+              }
+            : e,
+        ),
+      );
     } else if (f.type === "read_receipt") {
       // §2.6 — mark by POSITION, not string `<=`. String ordering is only valid
       // for fixed-width Crockford ULIDs; forwarded/UUID-fallback ids break it.

@@ -276,18 +276,18 @@ function GroupRow({
   const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
   // Only personal folders can be renamed/deleted; team folders are read-only.
   const editable = group.source === "personal";
+  const openMenu = editable
+    ? (e: React.MouseEvent) => {
+        e.preventDefault();
+        setAnchor({ x: e.clientX, y: e.clientY });
+        setMenuOpen(true);
+      }
+    : undefined;
   return (
     <li
       className="relative"
-      onContextMenu={
-        editable
-          ? (e) => {
-              e.preventDefault();
-              setAnchor({ x: e.clientX, y: e.clientY });
-              setMenuOpen(true);
-            }
-          : undefined
-      }
+      onContextMenu={openMenu}
+      onDoubleClick={openMenu}
     >
       <button
         type="button"
@@ -336,18 +336,18 @@ function GroupBackHeader({ group, controls }: { group: DisplayFolder; controls: 
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
   const editable = group.source === "personal";
+  const openMenu = editable
+    ? (e: React.MouseEvent) => {
+        e.preventDefault();
+        setAnchor({ x: e.clientX, y: e.clientY });
+        setMenuOpen(true);
+      }
+    : undefined;
   return (
     <div
       className="relative border-b bg-secondary/40"
-      onContextMenu={
-        editable
-          ? (e) => {
-              e.preventDefault();
-              setAnchor({ x: e.clientX, y: e.clientY });
-              setMenuOpen(true);
-            }
-          : undefined
-      }
+      onContextMenu={openMenu}
+      onDoubleClick={openMenu}
     >
       <button
         type="button"
@@ -433,25 +433,25 @@ function RoomRow({
     ? groupControls?.groups.find((g) => g.id === currentGroupId)
     : undefined;
 
-  // A right-click / two-finger tap (the native `contextmenu` gesture) opens the
-  // chat's options menu (group actions) at the pointer. A normal tap still just
-  // opens the chat. We pin an invisible anchor to the click point and let Radix
-  // flip the menu left/up when it would overflow the viewport.
+  // Right-click or double-click a chat to open its options menu (move-to-group
+  // actions) at the pointer. A normal tap still just opens the chat. We pin an
+  // invisible anchor to the click point and let Radix flip the menu left/up when
+  // it would overflow the viewport.
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
+  const openMenu = groupControls
+    ? (e: React.MouseEvent) => {
+        e.preventDefault();
+        setAnchor({ x: e.clientX, y: e.clientY });
+        setMenuOpen(true);
+      }
+    : undefined;
 
   return (
     <li
       className="relative"
-      onContextMenu={
-        groupControls
-          ? (e) => {
-              e.preventDefault();
-              setAnchor({ x: e.clientX, y: e.clientY });
-              setMenuOpen(true);
-            }
-          : undefined
-      }
+      onContextMenu={openMenu}
+      onDoubleClick={openMenu}
     >
       <button
         type="button"

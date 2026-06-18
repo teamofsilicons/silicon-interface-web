@@ -27,7 +27,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 
-import { downloadAsset } from "./media-previewer";
+import { downloadAsset, MediaPreviewer } from "./media-previewer";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,42 +58,94 @@ import {
 const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
 
 /**
- * A tilted "bookmark" pin for an attachment that was sent alongside a text
- * message — clicking opens the attachment in a new tab (image/video/pdf) or
- * downloads it. Sits over the top edge of the text bubble.
+ * A tilted card pin for an attachment that was sent alongside a text message.
+ * Images/videos show a real thumbnail in the preview area; other files show a
+ * large type icon. A footer row carries a small type-glyph + the filename.
+ * Clicking opens the attachment in a new tab (image/video/pdf) or downloads it.
+ * The cards overlap and tilt over the top edge of the text bubble.
  */
 function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; tilt: number }) {
   const mediaId = String(content.media_id ?? "");
   const mime = String(content.mime ?? "").toLowerCase();
   const filename = String(content.filename ?? content.caption ?? "file");
-  const isVisual = mime.startsWith("image/") || mime.startsWith("video/");
+  const isImage = mime.startsWith("image/");
+  const isVideo = mime.startsWith("video/");
+  const isVisual = isImage || isVideo;
   const Icon = isVisual ? ImageSquare : mime.includes("pdf") ? FilePdf : FileIcon;
+
+  // Fetch the presigned URL once on mount so visual cards can show a real
+  // thumbnail and so a click can preview in place without a fetch round-trip.
+  const [url, setUrl] = React.useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (!mediaId) return;
+    let alive = true;
+    api
+      .mediaDetail(mediaId)
+      .then((r) => {
+        if (alive) setUrl(r.download_url ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [mediaId]);
+
   const open = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!mediaId) return;
+    // Preview in place. If the URL hasn't landed yet, fetch it before opening
+    // so the previewer never mounts with an empty source.
+    if (url) {
+      setPreviewOpen(true);
+      return;
+    }
     try {
       const r = await api.mediaDetail(mediaId);
       if (!r.download_url) return;
-      if (isVisual || mime.includes("pdf")) {
-        window.open(r.download_url, "_blank", "noopener,noreferrer");
-      } else {
-        downloadAsset(r.download_url, filename);
-      }
+      setUrl(r.download_url);
+      setPreviewOpen(true);
     } catch {
       toast.error("couldn't open attachment");
     }
   };
+
   return (
-    <button
-      type="button"
-      onClick={open}
-      title={filename}
-      style={{ transform: `rotate(${tilt}deg)` }}
-      className="pointer-events-auto flex max-w-[8rem] items-center gap-1 border bg-card px-2 py-1 text-[11px] text-foreground shadow-sm transition-transform hover:-translate-y-0.5 hover:rotate-0"
-    >
-      <Icon className="h-3.5 w-3.5 shrink-0" weight="regular" />
-      <span className="min-w-0 truncate">{filename}</span>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={open}
+        title={filename}
+        style={{ transform: `rotate(${tilt}deg)` }}
+        className="pointer-events-auto flex w-32 flex-col overflow-hidden border bg-card text-left text-foreground shadow-md transition-transform hover:-translate-y-0.5 hover:rotate-0 hover:shadow-lg"
+      >
+        {/* Preview: a real thumbnail for images/video, else a big type icon. */}
+        <div className="flex h-20 w-full items-center justify-center overflow-hidden bg-muted text-muted-foreground">
+          {isImage && url ? (
+            // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL
+            <img src={url} alt="" className="h-full w-full object-cover" />
+          ) : isVideo && url ? (
+            <video src={url} muted className="h-full w-full object-cover" />
+          ) : (
+            <Icon className="h-8 w-8" weight="thin" />
+          )}
+        </div>
+        {/* Footer: small type-glyph + truncated filename. */}
+        <div className="flex items-center gap-1 border-t px-2 py-1.5">
+          <Icon className="h-3 w-3 shrink-0 text-muted-foreground" weight="regular" />
+          <span className="min-w-0 truncate text-[11px]">{filename}</span>
+        </div>
+      </button>
+      {url && (
+        <MediaPreviewer
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
+          url={url}
+          mime={mime}
+          filename={filename}
+        />
+      )}
+    </>
   );
 }
 
@@ -240,16 +292,11 @@ export function MessageBubble({
   // (sender, minute) group so they read as a single block.
   const inGroupGap = !showSender && !showTime;
 
-  // §5 — one consistent way to reach a message's actions: the 3-dot button,
-  // right-click, and double-click all open the same menu. `moreOpen` controls
-  // that shared dropdown; `hasActions` gates whether the gestures do anything.
+  // Message actions are reached via the 3-dot button (and the hover reply/react
+  // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
+  // controlled state for that dropdown.
   const [moreOpen, setMoreOpen] = React.useState(false);
   const hasActions = !redacted && !!(onReply || onReact || onForward || onDelete);
-  const openMenuGesture = (e: React.MouseEvent) => {
-    if (!hasActions) return;
-    e.preventDefault();
-    setMoreOpen(true);
-  };
 
   return (
     <div
@@ -261,14 +308,6 @@ export function MessageBubble({
         inGroupGap ? "my-0.5" : "my-1.5",
         isMine ? "justify-end" : "justify-start",
       )}
-      // Double-clicking the empty space beside a message replies (the gutter
-      // opposite the bubble — right of a received message, left of a sent one).
-      // The guard keeps it from firing on the bubble/content itself.
-      onDoubleClick={(e) => {
-        if (redacted || !onReply) return;
-        if (e.target !== e.currentTarget) return;
-        onReply(event);
-      }}
     >
       {!isMine && (
         // Avatar slot stays present even on middle-of-group bubbles so the
@@ -314,7 +353,7 @@ export function MessageBubble({
               <AttachmentPin
                 key={att.event_id || idx}
                 content={att.content as Record<string, unknown>}
-                tilt={-12}
+                tilt={-5}
               />
             ))}
           </div>
@@ -339,7 +378,6 @@ export function MessageBubble({
                 ? "bubble-sent bg-primary text-primary-foreground"
                 : "bg-bubble-received",
           )}
-          onContextMenu={openMenuGesture}
         >
           {/* Quoted parent so a reply visibly references its target. */}
           {replyToEvent && !redacted && (
@@ -353,7 +391,7 @@ export function MessageBubble({
           {redacted ? (
             <span className="italic">message deleted</span>
           ) : (
-            <Body event={event} />
+            <Body event={event} isMine={isMine} />
           )}
 
           {/* Hover actions: reply / react / more. Floats above the bubble on
@@ -620,9 +658,18 @@ function BubbleActions({
 }
 
 /** Telegram-style chip rendered above a forwarded bubble's body. */
-function ForwardedFromChip({ handle }: { handle: string }) {
+function ForwardedFromChip({ handle, isMine }: { handle: string; isMine?: boolean }) {
   return (
-    <div className="flex items-center gap-1 border-l-2 border-foreground/40 bg-foreground/5 pl-2 py-0.5 text-[10px] text-foreground/80">
+    <div
+      className={cn(
+        "flex items-center gap-1 border-l-2 pl-2 py-0.5 text-[10px]",
+        // On the ink "mine" bubble the dark foreground color vanishes — flip to
+        // the cream primary-foreground so the chip stays legible.
+        isMine
+          ? "border-primary-foreground/50 bg-primary-foreground/10 text-primary-foreground/90"
+          : "border-foreground/40 bg-foreground/5 text-foreground/80",
+      )}
+    >
       <Share className="h-3 w-3 opacity-60" />
       <span>
         Forwarded from <span className="font-medium">@{handle}</span>
@@ -794,7 +841,7 @@ function VoiceTranscript({ text }: { text: string }) {
   );
 }
 
-function Body({ event }: { event: Event }) {
+function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
   const c = event.content;
   // #17 — forwarded chip rendered at the top of the bubble body. Telegram
   // style: "Forwarded from @alice".
@@ -816,7 +863,7 @@ function Body({ event }: { event: Event }) {
       }
       return (
         <div className="space-y-1">
-          {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} />}
+          {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />}
           <div className="whitespace-pre-wrap break-words">
             {renderMarkdown(body)}
             {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}

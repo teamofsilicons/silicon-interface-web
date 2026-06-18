@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useSearchParams } from "next/navigation";
-import { GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -111,20 +111,20 @@ import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
 import { CommandMenu } from "@/components/chat/command-menu";
 import { KeymapCheatsheet } from "@/components/chat/keymap-cheatsheet";
-import { TeamFilterBar, EMPTY_FILTERS, type ChatFilters } from "@/components/teams/team-filter-bar";
+import {
+  TeamFilterBar,
+  EMPTY_FILTERS,
+  OTHERS_TAB,
+  OBSERVING_TAB,
+  type ChatFilters,
+} from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
-import { IdAvatar } from "@/components/profile/id-avatar";
 
 // Resizable sidebar bounds + storage. Width persists across reloads.
 const SB_DEFAULT = 320;
 const SB_MIN = 240;
 const SB_MAX = 560;
 const SB_STORAGE = "silicon-interface:sidebar-width";
-const OTHERS_TAB = "__others__";
-// Inter-silicon chats I only observe get their own tab, pulled out of the team
-// tabs so the silicon-to-silicon traffic is easy to find and doesn't clutter my
-// own conversations.
-const OBSERVING_TAB = "__observing__";
 // Shared empty set so rooms with no resolved team return a stable reference.
 const EMPTY_SLUGS: ReadonlySet<string> = new Set<string>();
 
@@ -153,23 +153,6 @@ function saveOpenFolder(ownerId: string | null, teamSlug: string | null, groupId
   } catch {
     /* storage unavailable — ignore */
   }
-}
-
-/** Small unread-count chip shown on a team / Others / Observing tab. Inverts
- *  its colors on the active tab (which has a dark/foreground background). */
-function TabUnreadBadge({ count, active }: { count: number; active: boolean }) {
-  if (count <= 0) return null;
-  return (
-    <span
-      className={cn(
-        "inline-flex h-4 min-w-[1rem] shrink-0 items-center justify-center rounded-full px-1 text-[9px] font-semibold leading-none",
-        active ? "bg-background text-foreground" : "bg-primary text-primary-foreground",
-      )}
-      aria-label={`${count} unread message${count === 1 ? "" : "s"}`}
-    >
-      {count > 99 ? "99+" : count}
-    </span>
-  );
 }
 
 function loadSidebarWidth(): number {
@@ -260,7 +243,6 @@ function ChatPageInner() {
   const workingRoomIds = React.useMemo(() => new Set(Object.keys(workingRooms)), [workingRooms]);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
-  const [activeTeamTab, setActiveTeamTab] = React.useState<string>("");
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
   // Sidebar search — filters the conversation list by display name, handle,
   // or last message body.
@@ -393,13 +375,22 @@ function ChatPageInner() {
   );
 
   // A non-observed room that belongs to no team is an "Other"; observed rooms
-  // are routed to their own tab regardless of team.
+  // are a separate "Observing" filter regardless of team.
   const hasOtherRooms = rooms.some((r) => !r.observed && roomTeams(r.room_id).size === 0);
-  const activeTeamSlug = teams.some((t) => t.slug === activeTeamTab)
-    ? activeTeamTab
-    : null;
-  const showingOthers = activeTeamTab === OTHERS_TAB && hasOtherRooms;
-  const showingObserving = activeTeamTab === OBSERVING_TAB && hasObservedRooms;
+
+  // Teams are a multi-select FILTER (not sections): none selected → show all.
+  // Folders/grouping only make sense for a single team, so a single team chip
+  // (with no Others/Observing) still activates that team's folder view.
+  const selectedTeamSlugs = React.useMemo(
+    () => filters.teams.filter((t) => teams.some((tm) => tm.slug === t)),
+    [filters.teams, teams],
+  );
+  const wantOthers = filters.teams.includes(OTHERS_TAB);
+  const wantObserving = filters.teams.includes(OBSERVING_TAB);
+  const activeTeamSlug =
+    selectedTeamSlugs.length === 1 && !wantOthers && !wantObserving
+      ? selectedTeamSlugs[0]
+      : null;
   const activeTeam = activeTeamSlug ? teams.find((t) => t.slug === activeTeamSlug) : null;
   const viewedTeam = teamViewSlug ? teams.find((t) => t.slug === teamViewSlug) : null;
 
@@ -427,73 +418,20 @@ function ChatPageInner() {
     return { teams: teamsMap, others, observing };
   }, [rooms, roomTeams]);
 
+  // Deep-link: `/chat?teams=slug1,slug2` pre-selects those team filter chips
+  // (used by the invite page's "View team"). Applied once per distinct param.
+  const teamsParam = search.get("teams");
+  const appliedTeamsParamRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) {
-      setActiveTeamTab(teamViewSlug);
-    }
-  }, [teamViewSlug, teams]);
-
-  // When a room is *first* opened, jump the tab to its team so the list shows
-  // the room in context. We only do this once per opened room (tracked by id)
-  // — after that the user is free to click into other team tabs / Others while
-  // the chat stays open, instead of the tab snapping back every render.
-  const autoTabbedRoomRef = React.useRef<string | null>(null);
-  React.useEffect(() => {
-    if (teamViewSlug && teams.some((t) => t.slug === teamViewSlug)) {
-      autoTabbedRoomRef.current = selectedRoom?.room_id ?? null;
-      return;
-    }
-    const roomId = selectedRoom?.room_id ?? null;
-    if (roomId && roomId !== autoTabbedRoomRef.current) {
-      if (selectedRoom?.observed) {
-        autoTabbedRoomRef.current = roomId;
-        if (activeTeamTab !== OBSERVING_TAB) setActiveTeamTab(OBSERVING_TAB);
-        return;
-      }
-      const slugs = roomTeams(roomId);
-      // If the room resolves to no team but rosters are still loading, wait —
-      // jumping to Others now would strand a team chat there until the user
-      // re-opens it. Once loaded (or if it already has a team), commit the jump.
-      if (slugs.size === 0 && !membershipsLoaded) {
-        // leave autoTabbedRoomRef unset so we retry when memberships arrive
-      } else {
-        autoTabbedRoomRef.current = roomId;
-        if (slugs.size > 0) {
-          // Keep the current tab if it already shows this room; else jump to one
-          // of its teams.
-          if (!(activeTeamSlug && slugs.has(activeTeamSlug))) {
-            setActiveTeamTab([...slugs][0]);
-          }
-          return;
-        }
-        if (hasOtherRooms) {
-          if (activeTeamTab !== OTHERS_TAB) setActiveTeamTab(OTHERS_TAB);
-          return;
-        }
-      }
-    }
-    if (!roomId) autoTabbedRoomRef.current = null;
-    // Always keep the active tab pointing at something that exists.
-    const activeValid =
-      teams.some((t) => t.slug === activeTeamTab) ||
-      (activeTeamTab === OTHERS_TAB && hasOtherRooms) ||
-      (activeTeamTab === OBSERVING_TAB && hasObservedRooms);
-    if (!activeValid) {
-      setActiveTeamTab(
-        teams[0]?.slug ?? (hasOtherRooms ? OTHERS_TAB : hasObservedRooms ? OBSERVING_TAB : ""),
-      );
-    }
-  }, [
-    teamViewSlug,
-    teams,
-    selectedRoom,
-    hasOtherRooms,
-    hasObservedRooms,
-    activeTeamTab,
-    activeTeamSlug,
-    roomTeams,
-    membershipsLoaded,
-  ]);
+    if (!teamsParam) return;
+    if (appliedTeamsParamRef.current === teamsParam) return;
+    appliedTeamsParamRef.current = teamsParam;
+    const slugs = teamsParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (slugs.length) setFilters((f) => ({ ...f, teams: slugs }));
+  }, [teamsParam]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -884,19 +822,27 @@ function ChatPageInner() {
 
   const filtered = React.useMemo(() => {
     const q = sidebarQuery.trim().toLowerCase();
+    // Team filter chips (multi-select). Observed (inter-silicon) rooms only
+    // appear when the Observing chip is on — they never show in the default
+    // "all" view or under a team/Others selection.
+    const teamSlugs = filters.teams.filter((t) => t !== OTHERS_TAB && t !== OBSERVING_TAB);
+    const wantOth = filters.teams.includes(OTHERS_TAB);
+    const wantObs = filters.teams.includes(OBSERVING_TAB);
     const list = rooms.filter((r) => {
-      // #8 — Unread filter hides any room that has nothing new for me.
-      // Observed (inter-silicon) rooms live only in the Observing tab; every
-      // other tab excludes them, and the Observing tab excludes everything else.
-      if (showingObserving) {
-        if (!r.observed) return false;
+      if (r.observed) {
+        if (!wantObs) return false; // observed rooms gated behind the chip
       } else {
-        if (r.observed) return false;
-        const slugs = roomTeams(r.room_id);
-        // A team tab shows every room that belongs to that team (via its own
-        // team or any peer's membership); "Others" shows rooms in no team.
-        if (activeTeamSlug && !slugs.has(activeTeamSlug)) return false;
-        if (showingOthers && slugs.size > 0) return false;
+        // Non-observed: with any team/Others chip selected, the room must match
+        // one of them; with only "Observing" selected, hide all non-observed;
+        // with nothing selected, show everything.
+        if (teamSlugs.length || wantOth) {
+          const slugs = roomTeams(r.room_id);
+          const matchTeam = teamSlugs.some((s) => slugs.has(s));
+          const matchOthers = wantOth && slugs.size === 0;
+          if (!matchTeam && !matchOthers) return false;
+        } else if (wantObs) {
+          return false; // only Observing selected → no non-observed rooms
+        }
       }
       if (filters.unread && !r.unread) return false;
       if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
@@ -925,7 +871,7 @@ function ChatPageInner() {
       return tb.localeCompare(ta);
     });
     return list;
-  }, [rooms, filters, sidebarQuery, activeTeamSlug, showingOthers, showingObserving, roomTeams]);
+  }, [rooms, filters, sidebarQuery, roomTeams]);
 
   // Personal grouping applies only inside a real team tab and only when not
   // searching — the Others tab and any search fall back to the flat list.
@@ -1110,99 +1056,7 @@ function ChatPageInner() {
           aria-label="resize sidebar"
           className="absolute right-0 top-0 z-10 hidden h-full w-1.5 cursor-col-resize transition-colors hover:bg-border md:block"
         />
-        {/* Sidebar header — single border-b row. Search field fills the
-            left flex-1 and reaches the row's full height; a 1px vertical
-            divider separates it from the new-chat (+) button on the right,
-            matching the composer's attach | input | send pattern. */}
-        {(teams.length > 0 || hasOtherRooms || hasObservedRooms) && (
-          <div className="flex items-stretch border-b">
-            <div className="flex min-h-0 min-w-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden py-2 pl-6 pr-3">
-              {teams.map((team) => (
-                <button
-                  key={team.slug}
-                  type="button"
-                  onClick={() => {
-                    setActiveTeamTab(team.slug);
-                    if (viewedTeam) navigate(`/chat?team=${encodeURIComponent(team.slug)}`);
-                  }}
-                  className={cn(
-                    "inline-flex max-w-48 shrink-0 items-center gap-2 overflow-hidden truncate border p-0 pr-3 text-xs font-semibold leading-none transition-colors",
-                    activeTeamSlug === team.slug
-                      ? "border-foreground bg-foreground text-background"
-                      : "border-border bg-card text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <IdAvatar
-                    seed={`team:${team.slug}`}
-                    src={team.logo_url}
-                    size={28}
-                    family="team"
-                    className={cn(
-                      "m-0.5 border-0",
-                      activeTeamSlug === team.slug ? "bg-background" : "bg-muted",
-                    )}
-                  />
-                  <span className="min-w-0 truncate">{team.name}</span>
-                  <TabUnreadBadge
-                    count={unreadByTab.teams[team.slug] ?? 0}
-                    active={activeTeamSlug === team.slug}
-                  />
-                </button>
-              ))}
-              {hasOtherRooms && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTeamTab(OTHERS_TAB);
-                    if (viewedTeam) navigate("/chat");
-                  }}
-                  className={cn(
-                    "inline-flex max-w-40 shrink-0 items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
-                    showingOthers
-                      ? "border-foreground bg-foreground text-background"
-                      : "border-border bg-card text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span className="min-w-0 truncate">Others</span>
-                  <TabUnreadBadge count={unreadByTab.others} active={showingOthers} />
-                </button>
-              )}
-              {hasObservedRooms && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTeamTab(OBSERVING_TAB);
-                    if (viewedTeam) navigate("/chat");
-                  }}
-                  className={cn(
-                    "inline-flex max-w-40 shrink-0 items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
-                    showingObserving
-                      ? "border-foreground bg-foreground text-background"
-                      : "border-border bg-card text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span className="min-w-0 truncate">Observing</span>
-                  <TabUnreadBadge count={unreadByTab.observing} active={showingObserving} />
-                </button>
-              )}
-            </div>
-            {activeTeam ? (
-              <button
-                type="button"
-                aria-label={`${activeTeam.name} team workspace`}
-                title={`${activeTeam.name} team workspace`}
-                onClick={() => navigate(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
-                className={cn(
-                  "m-2 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent",
-                  viewedTeam?.slug === activeTeam.slug && "bg-secondary",
-                )}
-              >
-                <GearSix className="h-4 w-4" />
-              </button>
-            ) : null}
-          </div>
-        )}
-        {/* Search + new chat, below the teams bar. */}
+        {/* Search + new chat. */}
         <div className="flex h-[52px] items-stretch border-b">
           <div className="flex flex-1 items-center gap-2 pl-6 pr-3 transition-colors focus-within:bg-accent/30">
             <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
@@ -1226,6 +1080,15 @@ function ChatPageInner() {
         <TeamFilterBar
           filters={filters}
           onChange={setFilters}
+          teams={teams.map((t) => ({ slug: t.slug, name: t.name, logo_url: t.logo_url }))}
+          hasOthers={hasOtherRooms}
+          hasObserving={hasObservedRooms}
+          unread={unreadByTab}
+          onOpenTeamSettings={
+            activeTeam
+              ? () => navigate(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)
+              : undefined
+          }
         />
         <RoomList
           rooms={filtered}

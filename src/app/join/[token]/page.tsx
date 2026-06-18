@@ -6,7 +6,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { CircleNotch } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
-import { CheckCircle, Sparkle } from "@phosphor-icons/react/dist/ssr";
+import { CheckCircle } from "@phosphor-icons/react/dist/ssr";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
@@ -153,12 +153,18 @@ function JoinPageInner() {
   return (
     <main className="bg-dots flex min-h-screen flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-md space-y-8">
-        {/* §invite — the moment. A big team mark with a Silicon badge, a warm
-            "you've been invited" line, and the team name front and centre. */}
+        {/* §invite — the moment. The Silicon Interface wordmark up top, then a
+            big team mark with a Silicon badge, the "you're invited" line, and
+            the team name front and centre. */}
         <div className="flex flex-col items-center text-center">
+          <Link href="/" className="mb-8">
+            <Logo size={20} withWordmark />
+          </Link>
+
           <div className="relative">
             <IdAvatar
               seed={info.team_slug}
+              src={info.team_logo_url}
               size={88}
               family="team"
               className="border bg-card shadow-sm"
@@ -168,8 +174,8 @@ function JoinPageInner() {
             </span>
           </div>
 
-          <p className="label-mono mt-6 inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
-            <Sparkle weight="fill" className="h-3 w-3" /> you&apos;re invited
+          <p className="label-mono mt-6 text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+            you&apos;re invited
           </p>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             {info.team_name} has invited you
@@ -184,7 +190,19 @@ function JoinPageInner() {
 
         {/* The action card. */}
         <div className="space-y-4 border bg-card p-6 shadow-sm">
-          {!authed ? (
+          {authed && info.already_member ? (
+            <>
+              <p className="text-center text-sm text-muted-foreground">
+                You&rsquo;re already part of{" "}
+                <span className="font-medium text-foreground">{info.team_name}</span>.
+              </p>
+              <Button asChild className="w-full">
+                <Link href={`/chat?teams=${encodeURIComponent(info.team_slug)}`}>
+                  View team
+                </Link>
+              </Button>
+            </>
+          ) : !authed ? (
             <>
               <p className="text-center text-sm text-muted-foreground">
                 Log in or sign up to accept your invite.
@@ -260,11 +278,6 @@ function JoinPageInner() {
             </>
           )}
         </div>
-
-        {/* §invite — the wordmark, grounding the page as part of the product. */}
-        <Link href="/" className="flex justify-center">
-          <Logo size={16} withWordmark className="opacity-50 transition-opacity hover:opacity-80" />
-        </Link>
       </div>
     </main>
   );

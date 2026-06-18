@@ -306,12 +306,16 @@ export interface InviteInfo {
   scope: "team" | "silicon";
   team_slug: string;
   team_name: string;
+  /** Uploaded team logo (permanent URL); null falls back to a generated mark. */
+  team_logo_url?: string | null;
   silicon_name: string | null;
   channel: "link" | "email";
   needs_code: boolean;
   verify_carbons: boolean;
   whitelist: { domains: string[]; emails: string[] } | null;
   role: TeamRole;
+  /** True when the signed-in visitor already belongs to this team. */
+  already_member?: boolean;
 }
 
 export interface LinkPreview {

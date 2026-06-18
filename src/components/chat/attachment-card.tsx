@@ -79,7 +79,7 @@ export function AttachmentCard({
       {/* Footer: small type-glyph + middle-truncated filename (+ optional size). */}
       <div className="flex items-center gap-1 border-t px-2 py-1.5">
         <Glyph className="h-3 w-3 shrink-0 text-muted-foreground" weight="regular" />
-        <FileName name={filename} tailChars={8} className="text-[11px]" />
+        <FileName name={filename} head={4} tail={8} className="text-[11px]" />
         {sizeLabel ? (
           <span className="label-mono ml-auto shrink-0 text-[9px] text-muted-foreground">
             {sizeLabel}

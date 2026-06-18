@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
+import { looksLikeMarkdown } from "@/lib/markdown";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
 /** Upload to a presigned URL via XHR (fetch can't report upload progress).
@@ -121,18 +122,6 @@ const SILICON_EMPTY_HOLD_MS = 10_000;
 // "wait 1 more minute" extends the post-empty hold by this much.
 const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
-
-// Show a live markdown preview only once the draft has a block-level markdown
-// construct (heading, list, blockquote, fenced code, table) or a link/image —
-// a stray "*" in a normal sentence shouldn't pop a preview.
-const MD_BLOCK_RE = /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.*\|)/;
-function looksLikeMarkdown(s: string): boolean {
-  if (!s || s.length < 2) return false;
-  if (s.includes("```")) return true;
-  if (MD_BLOCK_RE.test(s)) return true;
-  if (/\[[^\]]+\]\([^)]+\)/.test(s)) return true; // [text](url) / ![alt](src)
-  return false;
-}
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
 const MAX_ATTACHMENTS = 10;
 

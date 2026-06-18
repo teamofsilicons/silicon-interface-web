@@ -171,6 +171,26 @@ function ChatListFooter({ context }: { context?: ChatListContext }) {
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const MAX_PROGRESS_LINE_CHARS = 64;
 
+// Receipt progression is monotonic — pending → sent → delivered → read. The WS
+// echo ("delivered") and read_receipts ("read") often land BEFORE the HTTP send
+// ack, so an ack must never knock a message back down to "sent". `bestStatus`
+// keeps whichever status is further along.
+const STATUS_RANK: Record<MessageStatus, number> = {
+  failed: -1,
+  pending: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
+};
+function bestStatus(
+  a: MessageStatus | undefined,
+  b: MessageStatus | undefined,
+): MessageStatus | undefined {
+  if (a == null) return b;
+  if (b == null) return a;
+  return STATUS_RANK[a] >= STATUS_RANK[b] ? a : b;
+}
+
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
@@ -1086,7 +1106,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       );
       if (optIdx >= 0 && dupIdx < 0) {
         const updated = [...prev];
-        updated[optIdx] = { ...real, _clientId: clientId, _status: "sent" };
+        // Don't downgrade: the WS echo / read_receipt may have already advanced
+        // this row past "sent" before the HTTP ack landed.
+        updated[optIdx] = {
+          ...real,
+          _clientId: clientId,
+          _status: bestStatus(prev[optIdx]._status, "sent"),
+        };
         return updated;
       }
       if (optIdx >= 0 && dupIdx >= 0) {
@@ -1095,14 +1121,17 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         updated[dupIdx] = {
           ...dup,
           _clientId: clientId,
-          _status: dup._status ?? "sent",
+          _status: bestStatus(dup._status, "sent"),
         };
         updated.splice(optIdx, 1);
         return updated;
       }
       if (dupIdx >= 0) {
         const updated = [...prev];
-        updated[dupIdx] = { ...updated[dupIdx], _status: updated[dupIdx]._status ?? "sent" };
+        updated[dupIdx] = {
+          ...updated[dupIdx],
+          _status: bestStatus(updated[dupIdx]._status, "sent"),
+        };
         return updated;
       }
       return prev;

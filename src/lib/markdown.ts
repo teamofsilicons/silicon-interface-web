@@ -113,6 +113,18 @@ function inline(text: string, base: string): React.ReactNode[] {
   return nodes;
 }
 
+// A draft/message is "markdown" worth a full render only once it has a
+// block-level construct (heading, list, blockquote, fenced code, table) or a
+// link/image — a stray "*" in a normal sentence shouldn't trigger it.
+const MD_BLOCK_RE = /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.*\|)/;
+export function looksLikeMarkdown(s: string): boolean {
+  if (!s || s.length < 2) return false;
+  if (s.includes("```")) return true;
+  if (MD_BLOCK_RE.test(s)) return true;
+  if (/\[[^\]]+\]\([^)]+\)/.test(s)) return true; // [text](url) / ![alt](src)
+  return false;
+}
+
 /** Extract every URL from a chunk of text — used for link previews. */
 export function extractUrls(text: string): string[] {
   const found = text.match(URL_RE);

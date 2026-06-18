@@ -24,7 +24,7 @@ import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import type { Event, ProgressState } from "@/lib/types";
-import { renderMarkdown } from "@/lib/markdown";
+import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 
@@ -34,6 +34,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { AttachmentCard } from "@/components/chat/attachment-card";
+import { MarkdownView } from "@/components/chat/markdown-view";
 import { fileGlyph, isPreviewable } from "@/components/chat/file-icon";
 import { LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
@@ -875,13 +876,27 @@ function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
       }
+      // A message written in markdown renders as real markdown (headings,
+      // lists, code, tables…); plain chatter keeps the lightweight inline
+      // renderer (bold/italic/links + preserved newlines).
+      const asMarkdown = looksLikeMarkdown(body);
       return (
         <div className="space-y-1">
           {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />}
-          <div className="whitespace-pre-wrap break-words">
-            {renderMarkdown(body)}
-            {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
-          </div>
+          {asMarkdown ? (
+            <div className="break-words">
+              <MarkdownView
+                source={body}
+                className={cn("text-sm", isMine && "text-primary-foreground")}
+              />
+              {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
+            </div>
+          ) : (
+            <div className="whitespace-pre-wrap break-words">
+              {renderMarkdown(body)}
+              {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
+            </div>
+          )}
         </div>
       );
     }

@@ -203,28 +203,56 @@ function ChatPageInner() {
   // §1d — roomId → expiry timestamp for rooms with a silicon mid-task. Drives a
   // faint sidebar "working…" shimmer even when the room isn't open.
   const [workingRooms, setWorkingRooms] = React.useState<Record<string, number>>({});
-  const markRoomWorking = React.useCallback((roomId: string, working: boolean) => {
-    setWorkingRooms((prev) => {
-      if (working) return { ...prev, [roomId]: Date.now() + 45_000 };
-      if (!(roomId in prev)) return prev;
-      const next = { ...prev };
-      delete next[roomId];
-      return next;
-    });
-  }, []);
+  // roomId → latest progress note, shown live in the sidebar row's preview line.
+  const [workingNotes, setWorkingNotes] = React.useState<Record<string, string>>({});
+  const markRoomWorking = React.useCallback(
+    (roomId: string, working: boolean, note?: string) => {
+      setWorkingRooms((prev) => {
+        if (working) return { ...prev, [roomId]: Date.now() + 45_000 };
+        if (!(roomId in prev)) return prev;
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
+      });
+      setWorkingNotes((prev) => {
+        if (working) {
+          const text = (note ?? "").trim();
+          if (prev[roomId] === text) return prev;
+          return { ...prev, [roomId]: text };
+        }
+        if (!(roomId in prev)) return prev;
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
+      });
+    },
+    [],
+  );
   // Sweep expired entries so a silicon that died without a `done` stops shimmering.
   React.useEffect(() => {
     const id = window.setInterval(() => {
+      const now = Date.now();
+      const expired: string[] = [];
       setWorkingRooms((prev) => {
-        const now = Date.now();
         let changed = false;
         const next: Record<string, number> = {};
         for (const [k, v] of Object.entries(prev)) {
           if (v > now) next[k] = v;
-          else changed = true;
+          else {
+            changed = true;
+            expired.push(k);
+          }
         }
         return changed ? next : prev;
       });
+      if (expired.length) {
+        setWorkingNotes((prev) => {
+          if (!expired.some((k) => k in prev)) return prev;
+          const next = { ...prev };
+          for (const k of expired) delete next[k];
+          return next;
+        });
+      }
     }, 5000);
     return () => window.clearInterval(id);
   }, []);
@@ -759,7 +787,7 @@ function ChatPageInner() {
         markRoomWorking(progressRoom, false);
         clearRoomProgress(progressRoom);
       } else if (f.state && f.progress_group_id) {
-        markRoomWorking(progressRoom, true);
+        markRoomWorking(progressRoom, true, f.note || "");
         setRoomProgress(progressRoom, {
           roomId: progressRoom,
           groupId: f.progress_group_id,
@@ -778,7 +806,7 @@ function ChatPageInner() {
         markRoomWorking(progressRoom, false);
         clearRoomProgress(progressRoom);
       } else {
-        markRoomWorking(progressRoom, true);
+        markRoomWorking(progressRoom, true, String(f.event.content.note || ""));
         setRoomProgress(progressRoom, {
           roomId: progressRoom,
           groupId: String(f.event.content.progress_group_id || f.event.event_id),
@@ -1193,6 +1221,7 @@ function ChatPageInner() {
           loading={loading}
           hoverRoomId={hoverRoomId}
           workingRoomIds={workingRoomIds}
+          workingNotes={workingNotes}
           onRoomDragEnter={onRoomDragEnter}
           onRoomDragLeave={onRoomDragLeave}
           groupSections={groupSections}

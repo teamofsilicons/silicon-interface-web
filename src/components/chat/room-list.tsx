@@ -93,6 +93,9 @@ interface Props {
   hoverRoomId?: string | null;
   /** §1d — rooms with a silicon mid-task; rendered with a faint shimmer. */
   workingRoomIds?: Set<string>;
+  /** roomId → latest progress note for a working room, shown live in the
+   *  row's message-preview line with a blinking dot. */
+  workingNotes?: Record<string, string>;
   onRoomDragEnter?: (roomId: string) => void;
   onRoomDragLeave?: (roomId: string) => void;
   /** When set, render `groupSections` (collapsible) + `ungroupedRooms` instead
@@ -113,6 +116,7 @@ export function RoomList({
   className,
   hoverRoomId,
   workingRoomIds,
+  workingNotes,
   onRoomDragEnter,
   onRoomDragLeave,
   groupSections,
@@ -153,6 +157,7 @@ export function RoomList({
     onSelect,
     hoverRoomId,
     workingRoomIds,
+    workingNotes,
     onRoomDragEnter,
     onRoomDragLeave,
     groupControls,
@@ -384,6 +389,7 @@ interface RowProps {
   onSelect: (id: string) => void;
   hoverRoomId?: string | null;
   workingRoomIds?: Set<string>;
+  workingNotes?: Record<string, string>;
   onRoomDragEnter?: (roomId: string) => void;
   onRoomDragLeave?: (roomId: string) => void;
   groupControls?: GroupControls;
@@ -397,6 +403,7 @@ function RoomRow({
   onSelect,
   hoverRoomId,
   workingRoomIds,
+  workingNotes,
   onRoomDragEnter,
   onRoomDragLeave,
   groupControls,
@@ -404,6 +411,7 @@ function RoomRow({
   const d = roomDisplay(r);
   const isHover = hoverRoomId === r.room_id;
   const isWorking = workingRoomIds?.has(r.room_id) ?? false;
+  const workingNote = workingNotes?.[r.room_id]?.trim() || "";
   const unread = r.unread_count ?? (r.unread ? 1 : 0);
   // The latest message is mine when its sender handle matches me — in
   // that case the right slot shows a send-status tick instead of a
@@ -484,13 +492,9 @@ function RoomRow({
             size={36}
             family={peer?.kind ?? "carbon"}
           />
-          {/* §1d — a silicon is working in this room (even unopened). */}
-          {isWorking ? (
-            <span
-              className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 animate-pulse border border-background bg-foreground motion-reduce:animate-none"
-              title="a silicon is working here"
-            />
-          ) : null}
+          {/* §1d — "a silicon is working here" is now shown in the message
+              preview line below (blinking dot + live note), not as an avatar
+              badge. */}
         </div>
         <div className="min-w-0 flex-1 overflow-hidden">
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_3.75rem] items-center gap-2">
@@ -531,10 +535,25 @@ function RoomRow({
             <p
               className={cn(
                 "min-w-0 flex-1 truncate text-xs",
-                unread > 0 ? "text-foreground" : "text-muted-foreground",
+                isWorking
+                  ? "text-foreground"
+                  : unread > 0
+                    ? "text-foreground"
+                    : "text-muted-foreground",
               )}
             >
-              {pending ? (
+              {isWorking ? (
+                // Live silicon activity — a blinking dot + the latest progress
+                // note, so the work in progress is visible from the sidebar
+                // without opening the chat.
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-foreground motion-reduce:animate-none"
+                    aria-hidden
+                  />
+                  <span className="min-w-0 truncate">{workingNote || "working…"}</span>
+                </span>
+              ) : pending ? (
                 // Status (stopwatch / warning) rides in the receipt slot on the
                 // right, like the ticks — here we just show the text.
                 <span className={cn("min-w-0 truncate", pending.status === "failed" && "text-destructive")}>

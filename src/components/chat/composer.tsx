@@ -222,7 +222,9 @@ function StagedAttachment({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-xs font-medium">{file.name}</div>
+        <div className="truncate text-xs font-medium" title={file.name}>
+          {file.name}
+        </div>
         <div className="label-mono text-[10px] text-muted-foreground">
           {uploading
             ? `${formatBytes(uploadLoaded ?? (file.size * (uploadPct ?? 0)) / 100)} / ${formatBytes(file.size)} (${uploadPct}%)`
@@ -232,6 +234,7 @@ function StagedAttachment({
       <Button
         size="icon"
         variant="ghost"
+        className="shrink-0"
         onClick={onRemove}
         aria-label={uploading ? "cancel upload" : "remove attachment"}
       >
@@ -1221,7 +1224,9 @@ export function Composer({
       {attachments.length > 0 && (
         // Inset to line up with the text box (past the 44px attach/send buttons
         // + 8px gap on each side), so attachments are as wide as the chat box.
-        <div className="flex flex-col gap-1.5 px-[52px]">
+        // Capped height with scroll so a big batch of files doesn't push the
+        // composer (and the conversation) off-screen.
+        <div className="flex max-h-56 flex-col gap-1.5 overflow-y-auto px-[52px]">
           {attachments.map((a) => (
             <StagedAttachment
               key={a.id}

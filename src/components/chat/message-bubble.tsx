@@ -57,6 +57,16 @@ import {
 
 const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
 
+/** Deterministic tilt in [-3, 3] degrees, hashed from a stable key so each
+ *  pin keeps its angle across re-renders (a fresh Math.random would jitter on
+ *  every paint). */
+function pinTilt(key: string): number {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+  // Map the hash to [-3, 3] with one decimal of variation.
+  return Math.round(((Math.abs(h) % 61) / 10 - 3) * 10) / 10;
+}
+
 /**
  * A tilted card pin for an attachment that was sent alongside a text message.
  * Images/videos show a real thumbnail in the preview area; other files show a
@@ -353,7 +363,7 @@ export function MessageBubble({
               <AttachmentPin
                 key={att.event_id || idx}
                 content={att.content as Record<string, unknown>}
-                tilt={-5}
+                tilt={pinTilt(att.event_id || String(idx))}
               />
             ))}
           </div>

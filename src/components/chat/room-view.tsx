@@ -5,7 +5,7 @@ import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
-import { dayLabel } from "@/lib/utils";
+import { cn, dayLabel } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent, playAckTick, vibrate } from "@/lib/sounds";
@@ -142,13 +142,20 @@ const VIRTUOSO_FIRST_ITEM_BASE = 1_000_000;
 // carries the composer's "holding…" state and the bottom padding.
 type ChatListContext = { loadingOlder: boolean; holdingNode: React.ReactNode };
 function ChatListHeader({ context }: { context?: ChatListContext }) {
+  // Keep a CONSTANT height whether or not we're loading: toggling the
+  // "loading earlier…" line used to grow/shrink the header at the top of the
+  // list, which shoved the whole timeline up and down as you scrolled into
+  // history. Always reserve the row and just fade the text in/out.
   return (
-    <div className="pt-4">
-      {context?.loadingOlder ? (
-        <div className="flex justify-center pb-2">
-          <span className="label-mono text-[11px] text-muted-foreground">loading earlier…</span>
-        </div>
-      ) : null}
+    <div className="flex justify-center pb-2 pt-4">
+      <span
+        className={cn(
+          "label-mono text-[11px] text-muted-foreground transition-opacity",
+          context?.loadingOlder ? "opacity-100" : "opacity-0",
+        )}
+      >
+        loading earlier…
+      </span>
     </div>
   );
 }
@@ -1495,7 +1502,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     stickToBottomRef.current = true;
     const jump = () => virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    const t = window.setTimeout(jump, 200);
+    // The 200ms safety jump is only to catch late-hydrating content — if the
+    // user has already scrolled up by then, don't yank them back down.
+    const t = window.setTimeout(() => {
+      if (stickToBottomRef.current) jump();
+    }, 200);
     return () => {
       cancelAnimationFrame(raf);
       window.clearTimeout(t);

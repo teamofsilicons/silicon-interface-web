@@ -49,25 +49,42 @@ import type { Cron } from "@/lib/types";
 export function TeamPanel({
   slug,
   onClose,
+  initialTab,
 }: {
   slug: string;
   onClose?: () => void;
+  initialTab?: TeamPanelTab;
 }) {
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-background">
-      <TeamPanelBody key={slug} slug={slug} onClose={onClose} />
+      <TeamPanelBody key={slug} slug={slug} onClose={onClose} initialTab={initialTab} />
     </section>
   );
 }
 
 type TeamPanelTab = "overview" | "structure" | "members" | "crons" | "invites" | "settings" | "billing";
 
-function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }) {
+function TeamPanelBody({
+  slug,
+  onClose,
+  initialTab,
+}: {
+  slug: string;
+  onClose?: () => void;
+  initialTab?: TeamPanelTab;
+}) {
   const [team, setTeam] = React.useState<Team | null>(null);
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
   const [structureSvg, setStructureSvg] = React.useState<string>("");
   const [structureDsl, setStructureDsl] = React.useState<string>("");
-  const [tab, setTab] = React.useState<TeamPanelTab>("overview");
+  const [tab, setTab] = React.useState<TeamPanelTab>(initialTab ?? "overview");
+
+  // Honour a changed initialTab (e.g. "Pay now" deep-links to ?tab=billing
+  // while this panel is already open) — the panel isn't remounted, so the
+  // useState initializer alone wouldn't switch tabs.
+  React.useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
 
   React.useEffect(() => {
     let alive = true;

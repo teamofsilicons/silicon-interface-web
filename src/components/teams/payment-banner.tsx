@@ -1,15 +1,37 @@
 "use client";
 
 import * as React from "react";
-import { CircleNotch, X } from "@phosphor-icons/react/dist/ssr";
-import { toast } from "sonner";
+import { useRouter } from "next/navigation";
+import { CaretLeft, CaretRight } from "@phosphor-icons/react/dist/ssr";
 
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 import { isTeamHead, useTeams } from "@/lib/use-teams";
 import type { PaymentStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
+
+// Cache the last-seen banner rows so a reload shows them instantly instead of
+// flashing nothing while billing re-fetches.
+const CACHE_KEY = "silicon-interface:payment-banner";
+function readCache(): TeamPayment[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.sessionStorage.getItem(CACHE_KEY);
+    const arr = raw ? (JSON.parse(raw) as TeamPayment[]) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+function writeCache(rows: TeamPayment[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(CACHE_KEY, JSON.stringify(rows));
+  } catch {
+    /* quota / unavailable — non-fatal */
+  }
+}
 
 interface TeamPayment {
   slug: string;
@@ -46,11 +68,12 @@ type Tier = "info" | "warn" | "urgent" | "critical";
  * recomputes the day count at local midnight.
  */
 export function PaymentBanner() {
+  const router = useRouter();
   const { teams } = useTeams();
-  const [rows, setRows] = React.useState<TeamPayment[]>([]);
-  const [dismissed, setDismissed] = React.useState<Record<string, string>>({});
-  const [day, setDay] = React.useState(() => new Date().toDateString());
-  const [paying, setPaying] = React.useState<string | null>(null);
+  // Seed from cache so the banner shows instantly on reload.
+  const [rows, setRows] = React.useState<TeamPayment[]>(() => readCache());
+  const [index, setIndex] = React.useState(0);
+  const [, setDay] = React.useState(() => new Date().toDateString());
 
   const headTeams = React.useMemo(
     () =>
@@ -77,7 +100,11 @@ export function PaymentBanner() {
           }
         }),
       );
-      if (alive) setRows(out.filter(Boolean) as TeamPayment[]);
+      if (alive) {
+        const next = out.filter(Boolean) as TeamPayment[];
+        setRows(next);
+        writeCache(next);
+      }
     };
     void check();
     const id = setInterval(check, 60 * 60 * 1000);
@@ -93,106 +120,98 @@ export function PaymentBanner() {
     return () => clearInterval(id);
   }, []);
 
-  const payNow = async (r: TeamPayment) => {
-    setPaying(r.slug);
-    try {
-      const res = await api.teamCheckout(r.slug, {
-        cycle_id: r.payment.cycle_id,
-        return_url: typeof window === "undefined" ? "" : window.location.href,
-      });
-      if (res.checkout_url) {
-        window.location.href = res.checkout_url;
-      } else {
-        toast.error(res.error || "Couldn't start checkout.");
-        setPaying(null);
-      }
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Couldn't start checkout.");
-      setPaying(null);
-    }
+  // Pay now opens the team's billing page (the workspace's Billing tab).
+  const payNow = (r: TeamPayment) => {
+    router.push(`/chat?team=${encodeURIComponent(r.slug)}&tab=billing`);
   };
 
-  const visible = rows.filter((r) => dismissed[r.slug] !== `${day}:${r.payment.due_date}`);
-  if (!visible.length) return null;
+  if (!rows.length) return null;
+  const i = Math.min(index, rows.length - 1);
+  const r = rows[i];
+  const pay = r.payment;
+  const due = pay.due_date;
+  const d = due ? daysUntil(due) : pay.days_left;
+  const daysToPause = pay.pause_date ? daysUntil(pay.pause_date) : pay.days_to_pause ?? null;
+  const paused = pay.state === "paused" || (daysToPause !== null && daysToPause < 0);
+  const amount = money(pay.amount_cents, pay.currency);
+
+  const tier: Tier = paused
+    ? "critical"
+    : d === null
+      ? "warn"
+      : d <= 0
+        ? "critical"
+        : d <= 2
+          ? "urgent"
+          : d <= 7
+            ? "warn"
+            : "info";
+
+  const { title, line } = copy(r.name, d, daysToPause, amount, paused);
+  const multiple = rows.length > 1;
 
   return (
-    <div className="flex flex-col">
-      {visible.map((r) => {
-        const pay = r.payment;
-        const due = pay.due_date;
-        const d = due ? daysUntil(due) : pay.days_left;
-        const daysToPause = pay.pause_date ? daysUntil(pay.pause_date) : pay.days_to_pause ?? null;
-        const paused = pay.state === "paused" || (daysToPause !== null && daysToPause < 0);
-        const amount = money(pay.amount_cents, pay.currency);
-
-        const tier: Tier = paused
-          ? "critical"
-          : d === null
-            ? "warn"
-            : d <= 0
-              ? "critical"
-              : d <= 2
-                ? "urgent"
-                : d <= 7
-                  ? "warn"
-                  : "info";
-
-        const { title, line } = copy(r.name, d, daysToPause, amount, paused);
-        // Only the quiet early heads-up is dismissible — once it's urgent the
-        // banner stays put.
-        const dismissible = tier === "info";
-
-        return (
-          <div
-            key={r.slug}
-            role="alert"
+    <div
+      role="alert"
+      className={cn(
+        // px-6 + 36px mark to line up with the folder / chat rows below.
+        "flex gap-3 border-b py-3 pl-6 pr-4",
+        tier === "critical" && "bg-destructive text-white",
+        tier === "urgent" && "bg-warning/60 text-foreground",
+        tier === "warn" && "bg-warning/25 text-foreground",
+        tier === "info" && "bg-secondary text-foreground",
+      )}
+    >
+      <IdAvatar
+        seed={`team:${r.slug}`}
+        src={r.logo_url}
+        size={36}
+        family="team"
+        className={cn("mt-0.5 h-9 w-9 shrink-0 border-0", tier === "critical" ? "bg-white/15" : "bg-muted")}
+      />
+      <div className="min-w-0 flex-1">
+        <div className={cn("truncate text-sm", tier === "info" ? "font-medium" : "font-semibold")}>
+          {title}
+        </div>
+        <div className={cn("mt-0.5 truncate text-xs", tier === "critical" ? "text-white/85" : "text-muted-foreground")}>
+          {line}
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => payNow(r)}
             className={cn(
-              "flex items-center gap-3 border-b px-6 py-2.5",
-              tier === "critical" && "bg-destructive text-white",
-              tier === "urgent" && "bg-warning/60 text-foreground",
-              tier === "warn" && "bg-warning/25 text-foreground",
-              tier === "info" && "bg-secondary text-foreground",
+              "h-8 px-4 text-xs",
+              tier === "critical" && "bg-white text-destructive hover:bg-white/90",
             )}
           >
-            <IdAvatar
-              seed={`team:${r.slug}`}
-              src={r.logo_url}
-              size={36}
-              family="team"
-              className={cn("shrink-0 border-0", tier === "critical" ? "bg-white/15" : "bg-muted")}
-            />
-            <div className="min-w-0 flex-1">
-              <div className={cn("truncate text-sm", tier === "info" ? "font-medium" : "font-semibold")}>
-                {title}
-              </div>
-              <div className={cn("truncate text-xs", tier === "critical" ? "text-white/85" : "text-muted-foreground")}>
-                {line}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              onClick={() => payNow(r)}
-              disabled={paying === r.slug}
-              className={cn(
-                "shrink-0",
-                tier === "critical" && "bg-white text-destructive hover:bg-white/90",
-              )}
-            >
-              {paying === r.slug && <CircleNotch className="animate-spin" />} Pay now
-            </Button>
-            {dismissible && (
+            Pay now
+          </Button>
+          {multiple && (
+            <div className="flex items-center gap-0.5">
               <button
                 type="button"
-                aria-label="Dismiss"
-                className="shrink-0 rounded p-1 opacity-60 transition-opacity hover:opacity-100"
-                onClick={() => setDismissed((m) => ({ ...m, [r.slug]: `${day}:${r.payment.due_date}` }))}
+                aria-label="previous notification"
+                onClick={() => setIndex((n) => (n - 1 + rows.length) % rows.length)}
+                className="grid h-7 w-6 place-items-center opacity-70 transition-opacity hover:opacity-100"
               >
-                <X className="h-3.5 w-3.5" />
+                <CaretLeft className="h-4 w-4" weight="bold" />
               </button>
-            )}
-          </div>
-        );
-      })}
+              <span className="label-mono text-[9px] tabular-nums opacity-70">
+                {i + 1}/{rows.length}
+              </span>
+              <button
+                type="button"
+                aria-label="next notification"
+                onClick={() => setIndex((n) => (n + 1) % rows.length)}
+                className="grid h-7 w-6 place-items-center opacity-70 transition-opacity hover:opacity-100"
+              >
+                <CaretRight className="h-4 w-4" weight="bold" />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

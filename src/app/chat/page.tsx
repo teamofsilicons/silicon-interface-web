@@ -120,6 +120,7 @@ import {
   type ChatFilters,
 } from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
+import { PaymentBanner } from "@/components/teams/payment-banner";
 
 // Resizable sidebar bounds + storage. Width persists across reloads.
 const SB_DEFAULT = 320;
@@ -1127,6 +1128,8 @@ function ChatPageInner() {
           </button>
         </div>
         <TeamFilterBar filters={filters} onChange={setFilters} />
+        {/* Head-only payment-deadline banner — sits above the chat list. */}
+        <PaymentBanner />
         <RoomList
           rooms={filtered}
           myHandle={myUsername}
@@ -1156,7 +1159,11 @@ function ChatPageInner() {
           onContactsChanged={contacts.refresh}
         />
       ) : viewedTeam ? (
-        <TeamPanel slug={viewedTeam.slug} onClose={() => navigate("/chat")} />
+        <TeamPanel
+          slug={viewedTeam.slug}
+          initialTab={(search.get("tab") as React.ComponentProps<typeof TeamPanel>["initialTab"]) ?? undefined}
+          onClose={() => navigate("/chat")}
+        />
       ) : (
         <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
           <div className="max-w-md space-y-3 text-center">

@@ -2,7 +2,6 @@
 
 import { AppHeader } from "@/components/app-header";
 import { AuthGuard } from "@/components/auth-guard";
-import { PaymentBanner } from "@/components/teams/payment-banner";
 import { TimezoneSync } from "@/components/timezone-sync";
 
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
@@ -16,8 +15,6 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
       <TimezoneSync />
       <div className="flex h-screen flex-col overflow-hidden">
         <AppHeader active="chat" />
-        {/* Head-only: escalating payment-deadline banner over the final 15 days. */}
-        <PaymentBanner />
         <div className="flex min-h-0 flex-1 overflow-hidden">{children}</div>
       </div>
     </AuthGuard>

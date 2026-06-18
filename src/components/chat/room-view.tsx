@@ -32,6 +32,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import {
   Composer,
@@ -123,11 +124,40 @@ const MIN_PROGRESS_STATUS_MS = 1000;
 // How long a "message sent / read" receipt shows before switching to the
 // actual silicon work progress.
 const RECEIPT_HOLD_MS = 3000;
-// §1.1 — progress staleness thresholds. After SOFT with no update we degrade
-// the playful line to an honest "still working, no update for Ns"; after HARD
-// we offer a way to dismiss/refresh in case the silicon died with no `done`.
-const PROGRESS_STALE_SOFT_MS = 30_000;
-const PROGRESS_STALE_HARD_MS = 90_000;
+// §1.1 — progress staleness. We keep showing the last live line as long as the
+// silicon might still be working; only after a long silence do we collapse it to
+// a quiet "Still working…" (with a dismiss, in case it died with no `done`).
+const PROGRESS_STALE_HARD_MS = 100_000;
+// Backend search: hits per block (page) and the debounce before firing a query.
+const SEARCH_INTERVAL = 40;
+const SEARCH_DEBOUNCE_MS = 280;
+// Virtuoso's first-item index starts high so prepending older history can
+// decrement it (keeping the scroll position anchored) without going negative.
+const VIRTUOSO_FIRST_ITEM_BASE = 1_000_000;
+
+// Context + header/footer for the virtualized timeline. Header shows the
+// load-earlier indicator (loading is auto-triggered by startReached); footer
+// carries the composer's "holding…" state and the bottom padding.
+type ChatListContext = { loadingOlder: boolean; holdingNode: React.ReactNode };
+function ChatListHeader({ context }: { context?: ChatListContext }) {
+  return (
+    <div className="pt-4">
+      {context?.loadingOlder ? (
+        <div className="flex justify-center pb-2">
+          <span className="label-mono text-[11px] text-muted-foreground">loading earlier…</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+function ChatListFooter({ context }: { context?: ChatListContext }) {
+  return (
+    <>
+      {context?.holdingNode ? <div className="px-6">{context.holdingNode}</div> : null}
+      <div className="h-4" />
+    </>
+  );
+}
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const MAX_PROGRESS_LINE_CHARS = 64;
 const ROOM_SNIPPET_LIMIT = 40;
@@ -226,6 +256,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   } | null>(null);
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const [search, setSearch] = React.useState<string | null>(null);
+  // Backend message search (/events/search) — covers the whole history, not just
+  // the loaded window. `searchResults` is null when no query is active.
+  const [searchResults, setSearchResults] = React.useState<Event[] | null>(null);
+  const [searchLoading, setSearchLoading] = React.useState(false);
+  const [searchHasMore, setSearchHasMore] = React.useState(false);
+  const searchBlockRef = React.useRef(0);
   const [cronOpen, setCronOpen] = React.useState(false);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
@@ -272,41 +308,25 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     [room.peers, memberHandleLookup],
   );
 
-  const endRef = React.useRef<HTMLDivElement>(null);
   const sectionRef = React.useRef<HTMLElement>(null);
+  // The search path still uses a plain ScrollArea (small result sets); the main
+  // timeline is virtualized with Virtuoso.
   const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
+  const virtuosoRef = React.useRef<VirtuosoHandle>(null);
+  // Tracks whether the user is parked at the bottom (set by Virtuoso's
+  // atBottomStateChange) — gates the "stick to bottom" behavior.
   const stickToBottomRef = React.useRef(true);
-  const forceNextBottomRef = React.useRef(false);
+  // Virtuoso prepend anchoring: `firstItemIndex` shrinks as older history is
+  // prepended, so the viewport stays put instead of jumping. Reset per room.
+  const [firstItemIndex, setFirstItemIndex] = React.useState(VIRTUOSO_FIRST_ITEM_BASE);
 
-  const scrollViewport = React.useCallback((): HTMLElement | null => {
-    return (
-      scrollRootRef.current?.querySelector("[data-radix-scroll-area-viewport]") ??
-      null
-    ) as HTMLElement | null;
+  const scrollToBottom = React.useCallback((behavior: "auto" | "smooth" = "auto") => {
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior });
   }, []);
 
-  const isNearBottom = React.useCallback(() => {
-    const viewport = scrollViewport();
-    if (!viewport) return true;
-    return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96;
-  }, [scrollViewport]);
-
-  const scrollToBottom = React.useCallback(
-    (behavior: ScrollBehavior = "auto") => {
-      const viewport = scrollViewport();
-      if (viewport) {
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior });
-        return;
-      }
-      endRef.current?.scrollIntoView({ behavior, block: "end" });
-    },
-    [scrollViewport],
-  );
-
   const requestBottomStick = React.useCallback(
-    (behavior: ScrollBehavior = "smooth") => {
+    (behavior: "auto" | "smooth" = "smooth") => {
       stickToBottomRef.current = true;
-      forceNextBottomRef.current = true;
       requestAnimationFrame(() => scrollToBottom(behavior));
     },
     [scrollToBottom],
@@ -774,67 +794,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     return () => window.clearInterval(id);
   }, [activeProgress]);
 
-  // ----- Scroll-to-bottom + auto-read -----
-  const didInitialScrollRef = React.useRef(false);
+  // ----- Scroll anchoring (Virtuoso) + auto-read -----
+  // Reset the prepend anchor + bottom-stick when the room changes (Virtuoso is
+  // keyed by room, so it remounts and starts at the bottom).
   React.useEffect(() => {
-    didInitialScrollRef.current = false;
+    setFirstItemIndex(VIRTUOSO_FIRST_ITEM_BASE);
     stickToBottomRef.current = true;
-    forceNextBottomRef.current = true;
   }, [room.room_id]);
 
-  React.useEffect(() => {
-    const viewport = scrollViewport();
-    if (!viewport) return;
-    const onScroll = () => {
-      const near = isNearBottom();
-      stickToBottomRef.current = near;
-      if (near) setUnseenBelow(false); // §1.9 — caught up, hide the pill
-    };
-    onScroll();
-    viewport.addEventListener("scroll", onScroll, { passive: true });
-    return () => viewport.removeEventListener("scroll", onScroll);
-  }, [room.room_id, scrollViewport, isNearBottom]);
-
-  // Keep the view pinned to the latest message whenever layout changes while the
-  // user is already at the bottom: the composer's "will send" hold banner
-  // appearing shrinks the viewport, and a streaming reply / late-loading media
-  // grows the content — either would otherwise let the last message slide out of
-  // sight. Gated on stickToBottomRef so a user who scrolled up is left alone.
-  React.useEffect(() => {
-    const viewport = scrollViewport();
-    if (!viewport || typeof ResizeObserver === "undefined") return;
-    const content = viewport.firstElementChild;
-    const ro = new ResizeObserver(() => {
-      if (stickToBottomRef.current) scrollToBottom("auto");
-    });
-    ro.observe(viewport); // viewport shrinks when the composer banner appears
-    if (content) ro.observe(content); // content grows as messages stream in
-    return () => ro.disconnect();
-  }, [room.room_id, scrollViewport, scrollToBottom]);
-
-  React.useEffect(() => {
-    if (loading) return;
-    const initial = !didInitialScrollRef.current;
-    const shouldStick = initial || forceNextBottomRef.current || stickToBottomRef.current;
-    if (!shouldStick) {
-      didInitialScrollRef.current = true;
-      return;
-    }
-    const behavior: ScrollBehavior = initial ? "auto" : "smooth";
-    const jump = () =>
-      scrollToBottom(behavior);
-    // Double rAF runs after layout settles; on first open a delayed pass also
-    // catches late media reflow (images/audio that load taller after paint),
-    // so we land on the true last message instead of just short of it.
-    const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    const t = window.setTimeout(jump, initial ? 350 : 80);
-    didInitialScrollRef.current = true;
-    forceNextBottomRef.current = false;
-    return () => {
-      cancelAnimationFrame(raf);
-      if (t) window.clearTimeout(t);
-    };
-  }, [events.length, activeProgress, replyTo?.event_id, loading, room.room_id, scrollToBottom]);
+  const prevTimelineRef = React.useRef<{ roomId: string; firstKey: string | null }>({
+    roomId: room.room_id,
+    firstKey: null,
+  });
 
   // Auto-read: derive the latest event from someone other than me, and only
   // POST when *that event_id* changes. The previous version depended on the
@@ -1204,21 +1175,74 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
   // ----- Search filter -----
   const filteredEvents = React.useMemo(() => {
-    if (!search) return visibleEvents;
-    const s = search.toLowerCase();
-    return visibleEvents.filter((e) => {
-      const searchable = [
-        e.content.body,
-        e.content.caption,
-        e.content.transcript,
-        e.content.text,
-        e.sender_handle,
-      ]
-        .map((value) => String(value ?? "").toLowerCase())
-        .join("\n");
-      return searchable.includes(s);
-    });
-  }, [visibleEvents, search]);
+    // No active query (closed, or open-but-empty) → the normal loaded window.
+    if (!search?.trim()) return visibleEvents;
+    // Active query → server search results across the whole history, sorted
+    // chronologically so the timeline (day bands, grouping) reads top→bottom.
+    return ([...(searchResults ?? [])] as LocalEvent[]).sort((a, b) =>
+      a.created_at.localeCompare(b.created_at),
+    );
+  }, [visibleEvents, search, searchResults]);
+
+  // Fire the backend search (debounced) whenever the query changes.
+  React.useEffect(() => {
+    const q = search?.trim() ?? "";
+    if (!q) {
+      setSearchResults(null);
+      setSearchHasMore(false);
+      setSearchLoading(false);
+      searchBlockRef.current = 0;
+      return;
+    }
+    let alive = true;
+    setSearchLoading(true);
+    const t = window.setTimeout(() => {
+      searchBlockRef.current = 0;
+      api
+        .search({ q, room: room.room_id, block: 0, interval: SEARCH_INTERVAL })
+        .then((r) => {
+          if (!alive) return;
+          setSearchResults(r.results);
+          setSearchHasMore(r.has_more);
+        })
+        .catch(() => {
+          if (alive) {
+            setSearchResults([]);
+            setSearchHasMore(false);
+          }
+        })
+        .finally(() => {
+          if (alive) setSearchLoading(false);
+        });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+    };
+  }, [search, room.room_id]);
+
+  // Page in the next block of search hits.
+  const loadMoreSearch = React.useCallback(async () => {
+    const q = search?.trim() ?? "";
+    if (!q || searchLoading || !searchHasMore) return;
+    setSearchLoading(true);
+    try {
+      const next = searchBlockRef.current + 1;
+      const r = await api.search({ q, room: room.room_id, block: next, interval: SEARCH_INTERVAL });
+      searchBlockRef.current = next;
+      setSearchResults((prev) => {
+        const seen = new Set((prev ?? []).map((e) => e.event_id));
+        const merged = [...(prev ?? [])];
+        for (const e of r.results) if (!seen.has(e.event_id)) merged.push(e);
+        return merged;
+      });
+      setSearchHasMore(r.has_more);
+    } catch {
+      /* leave existing results in place */
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [search, room.room_id, searchLoading, searchHasMore]);
   // §2 — collapse attachment+text bundles: attachments sharing a `bundle_id`
   // with a text message are pinned onto that bubble instead of rendered as their
   // own rows. `displayRows` is the timeline minus those folded-in attachments;
@@ -1318,16 +1342,27 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     };
 
-    // Once the silicon has replied to the run's group (any silicon message after
-    // the anchor message), drop the status — one run = one status, and it clears
-    // the moment a reply lands. Prevents stale "working…" lingering forever.
     const runActiveRaw = !search && shouldShowActiveProgress && !holdingMessage;
     const anchorIdx =
       runActiveRaw && runAnchorKey ? displayRows.findIndex((e) => keyOf(e) === runAnchorKey) : -1;
     const repliedAfterAnchor =
       anchorIdx >= 0 &&
       displayRows.slice(anchorIdx + 1).some((e) => e.sender_kind === "silicon");
-    const runActive = runActiveRaw && !repliedAfterAnchor;
+    // The latest real (non-system) message. In a carbon↔silicon chat the status
+    // only shows while that message is the carbon's — i.e. we're awaiting a
+    // reply. Once a silicon message lands (the reply, OR any internal step like
+    // "calling manager" after it), hide the status. Observed silicon↔silicon
+    // chats fall back to clearing once a reply lands after the run's anchor.
+    let lastReal: Row | null = null;
+    for (let i = displayRows.length - 1; i >= 0; i--) {
+      if (!isSystem(displayRows[i])) {
+        lastReal = displayRows[i];
+        break;
+      }
+    }
+    const runActive =
+      runActiveRaw &&
+      (room.observed ? !repliedAfterAnchor : lastReal?.sender_kind !== "silicon");
 
     const raw: Array<{ item: Item; iso: string }> = [];
     let cur: { party: Party; events: Row[] } | null = null;
@@ -1384,7 +1419,21 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       }
     }
     return raw.map((r) => r.item);
-  }, [displayRows, search, shouldShowActiveProgress, holdingMessage, runAnchorKey]);
+  }, [displayRows, search, shouldShowActiveProgress, holdingMessage, runAnchorKey, room.observed]);
+
+  // When older history is prepended (loadOlder), `timelineItems` grows at the
+  // front. Find where the previous first item moved to and shrink firstItemIndex
+  // by that delta so Virtuoso holds the viewport in place. Appends (new
+  // messages) and mid-list changes (the progress line) leave the front intact.
+  React.useEffect(() => {
+    const firstKey = timelineItems[0]?.key ?? null;
+    const prev = prevTimelineRef.current;
+    if (prev.roomId === room.room_id && prev.firstKey && firstKey !== prev.firstKey) {
+      const movedTo = timelineItems.findIndex((it) => it.key === prev.firstKey);
+      if (movedTo > 0) setFirstItemIndex((fi) => fi - movedTo);
+    }
+    prevTimelineRef.current = { roomId: room.room_id, firstKey };
+  }, [timelineItems, room.room_id]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -1395,16 +1444,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   );
 
   // §2.7 — load the previous page of history (the API supports a `before`
-  // cursor). Prepends older events and pins the viewport so the screen doesn't
-  // jump while reading.
+  // cursor). Prepends older events; Virtuoso's firstItemIndex keeps the
+  // viewport anchored (see the prepend effect above).
   const loadOlder = React.useCallback(async () => {
     if (loadingOlder || !hasMore) return;
     const oldest = events.find((e) => !e.event_id.startsWith("temp-"));
     if (!oldest) return;
     setLoadingOlder(true);
-    const viewport = scrollViewport();
-    const prevHeight = viewport?.scrollHeight ?? 0;
-    const prevTop = viewport?.scrollTop ?? 0;
     try {
       const older = await api.events(room.room_id, oldest.event_id, 100);
       if (older.length === 0) {
@@ -1415,24 +1461,128 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         const known = new Set(prev.map((e) => e.event_id));
         const fresh: LocalEvent[] = older
           .filter((e) => !known.has(e.event_id))
+          // Loaded history is complete — mark final (matches the initial load).
           .map((e) => ({
             ...e,
+            is_final: true,
             _status: e.sender_handle === myUsername ? ("delivered" as MessageStatus) : undefined,
           }));
         return [...fresh, ...prev];
       });
       setHasMore(older.length >= 100);
-      // Keep the reader's position fixed across the prepend.
-      requestAnimationFrame(() => {
-        const vp = scrollViewport();
-        if (vp) vp.scrollTop = vp.scrollHeight - prevHeight + prevTop;
-      });
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
       setLoadingOlder(false);
     }
-  }, [loadingOlder, hasMore, events, room.room_id, myUsername, scrollViewport]);
+  }, [loadingOlder, hasMore, events, room.room_id, myUsername]);
+
+  // One timeline item's content (day band + body). Shared by the virtualized
+  // main list (Virtuoso itemContent) and the non-virtualized search list.
+  type TimelineRow = (typeof timelineItems)[number];
+  const renderTimelineItem = (item: TimelineRow): React.ReactNode => {
+    const dayBand = item.dayLabel ? (
+      <div className="py-1 text-center text-[10px] text-muted-foreground">{item.dayLabel}</div>
+    ) : null;
+    if (item.kind === "system") {
+      return (
+        <>
+          {dayBand}
+          <MessageBubble
+            event={item.event}
+            isMine={isMyEvent(item.event, myUsername)}
+            myHandle={myUsername}
+            isDirect={room.kind === "direct"}
+          />
+        </>
+      );
+    }
+    if (item.kind === "progress") {
+      if (!activeProgress) return dayBand;
+      return (
+        <>
+          {dayBand}
+          <div className="my-3">
+            <ProgressLine
+              entry={activeProgress}
+              avatarSeed={progressAvatarHandle || headerSeed}
+              avatarSrc={progressAvatarSrc}
+              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
+              staleMs={progressStaleMs}
+              onDismiss={() => {
+                clearRoomProgress(room.room_id);
+                setActiveProgress(null);
+              }}
+            />
+          </div>
+        </>
+      );
+    }
+    // A turn: consecutive messages from one party, separated by spacing.
+    return (
+      <>
+        {dayBand}
+        <div className="my-3">
+          {item.events.map((e, j) => {
+            const prev = item.events[j - 1];
+            const next = item.events[j + 1];
+            const sameAs = (a?: LocalEvent | Event) =>
+              !!a &&
+              a.sender_handle === e.sender_handle &&
+              a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
+            return (
+              <MessageBubble
+                key={e._clientId ?? e.event_id}
+                event={e}
+                isMine={isMyEvent(e, myUsername)}
+                myHandle={myUsername}
+                replyToEvent={e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined}
+                isDirect={room.kind === "direct"}
+                status={e._status}
+                senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
+                senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
+                senderAvatarKind={e.sender_kind}
+                senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
+                onSenderClick={openSenderProfile}
+                onTakeBack={readOnly ? undefined : onTakeBack}
+                showSender={!sameAs(prev)}
+                showTime={!sameAs(next)}
+                reactions={reactionsByTarget.get(e.event_id) ?? undefined}
+                onReply={readOnly ? undefined : onReply}
+                onReact={readOnly ? undefined : onReact}
+                onForward={readOnly ? undefined : onForward}
+                onDelete={
+                  readOnly || (room.kind === "direct" && peer?.kind === "silicon")
+                    ? undefined
+                    : onSelfDelete
+                }
+                pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
+              />
+            );
+          })}
+        </div>
+      </>
+    );
+  };
+
+  // The composer's "holding…" pre-send state — rendered in the Virtuoso footer.
+  const holdingNode = holdingMessage ? (
+    <div className="my-2 flex w-full items-center justify-start gap-2">
+      <div className="w-7 shrink-0">
+        <IdAvatar
+          seed={progressAvatarHandle || headerSeed}
+          src={progressAvatarSrc}
+          size={28}
+          family={peer?.kind === "silicon" ? "silicon" : "carbon"}
+        />
+      </div>
+      <span className="text-sm text-muted-foreground">
+        holding the message until you finish typing.
+      </span>
+    </div>
+  ) : null;
+
+  const searching = !!search?.trim();
 
   return (
     // `min-h-0` is the key — without it, a flex child grows to its content's
@@ -1564,165 +1714,90 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
       {/* data-private masks all message text out of PostHog session replays
           (see instrumentation-client.ts maskTextSelector). */}
-      <ScrollArea ref={scrollRootRef} className="flex-1" data-private>
-        {/* Messages bleed to the same horizontal margins as the navbar's
-            logo (left) and avatar (right) — px-6 matches the app shell. */}
-        <div className="w-full px-6 py-4">
-          {/* §2.7 — load older history (only outside an active search). */}
-          {!search && hasMore && filteredEvents.length > 0 ? (
-            <div className="flex justify-center pb-3">
-              <button
-                type="button"
-                onClick={loadOlder}
-                disabled={loadingOlder}
-                className="label-mono text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-60"
-              >
-                {loadingOlder ? "loading…" : "load earlier messages"}
-              </button>
-            </div>
-          ) : null}
-          {loading ? (
-            <div className="text-sm text-muted-foreground">loading messages…</div>
-          ) : filteredEvents.length === 0 ? (
-            <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
-              {search ? (
-                // §2c — render a search miss as a grep line.
-                <span className="font-mono">
-                  no events match{" "}
-                  <span className="text-foreground">&quot;{search}&quot;</span>
-                </span>
-              ) : (
-                // §2b — first-contact: a simple prompt with a one-click Say Hi.
-                <div className="flex flex-col items-center gap-3 py-2 text-center">
-                  <span>no messages yet - say hi.</span>
-                  {!readOnly ? (
-                    <Button size="sm" onClick={sayHi} disabled={sayingHi}>
-                      {sayingHi ? "saying hi…" : "Say Hi"}
-                    </Button>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          ) : (
-            timelineItems.map((item) => {
-              const dayBand = item.dayLabel ? (
-                <div className="py-1 text-center text-[10px] text-muted-foreground">
-                  {item.dayLabel}
-                </div>
-              ) : null;
-              // System events (markers/dividers) render full-width, outside a
-              // turn panel.
-              if (item.kind === "system") {
-                return (
-                  <React.Fragment key={item.key}>
-                    {dayBand}
-                    <MessageBubble
-                      event={item.event}
-                      isMine={isMyEvent(item.event, myUsername)}
-                      myHandle={myUsername}
-                      isDirect={room.kind === "direct"}
-                    />
-                  </React.Fragment>
-                );
-              }
-              // The active silicon run's status, anchored after the message
-              // that started the run.
-              if (item.kind === "progress") {
-                if (!activeProgress) return null;
-                return (
-                  <React.Fragment key={item.key}>
-                    {dayBand}
-                    <div className="my-3">
-                      <ProgressLine
-                        entry={activeProgress}
-                        avatarSeed={progressAvatarHandle || headerSeed}
-                        avatarSrc={progressAvatarSrc}
-                        avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
-                        staleMs={progressStaleMs}
-                        onDismiss={() => {
-                          clearRoomProgress(room.room_id);
-                          setActiveProgress(null);
-                        }}
-                      />
-                    </div>
-                  </React.Fragment>
-                );
-              }
-              // A turn: consecutive messages from one party, separated from the
-              // next turn by spacing.
-              return (
-                <React.Fragment key={item.key}>
-                  {dayBand}
-                  {/* Turn grouping: consecutive same-party messages, separated
-                      from the next turn by spacing only (no border/fill). */}
-                  <div className="my-3">
-                    {item.events.map((e, j) => {
-                      // (sender, minute) sub-grouping, computed within the panel.
-                      const prev = item.events[j - 1];
-                      const next = item.events[j + 1];
-                      const sameAs = (a?: LocalEvent | Event) =>
-                        !!a &&
-                        a.sender_handle === e.sender_handle &&
-                        a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
-                      return (
-                        <MessageBubble
-                          key={e._clientId ?? e.event_id}
-                          event={e}
-                          isMine={isMyEvent(e, myUsername)}
-                          myHandle={myUsername}
-                          replyToEvent={
-                            e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined
-                          }
-                          isDirect={room.kind === "direct"}
-                          status={e._status}
-                          senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
-                          senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
-                          senderAvatarKind={e.sender_kind}
-                          senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
-                          onSenderClick={openSenderProfile}
-                          onTakeBack={readOnly ? undefined : onTakeBack}
-                          showSender={!sameAs(prev)}
-                          showTime={!sameAs(next)}
-                          reactions={reactionsByTarget.get(e.event_id) ?? undefined}
-                          onReply={readOnly ? undefined : onReply}
-                          onReact={readOnly ? undefined : onReact}
-                          onForward={readOnly ? undefined : onForward}
-                          // No self-delete in silicon↔carbon direct chats — the
-                          // silicon has already received/acted on the message.
-                          onDelete={
-                            readOnly || (room.kind === "direct" && peer?.kind === "silicon")
-                              ? undefined
-                              : onSelfDelete
-                          }
-                          pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
-                        />
-                      );
-                    })}
-                  </div>
-                </React.Fragment>
-              );
-            })
-          )}
-          {/* Composer holding a not-yet-sent message — pre-send state, pinned at
-              the bottom (the run status itself is anchored inline above). */}
-          {holdingMessage ? (
-            <div className="my-2 flex w-full items-center justify-start gap-2">
-              <div className="w-7 shrink-0">
-                <IdAvatar
-                  seed={progressAvatarHandle || headerSeed}
-                  src={progressAvatarSrc}
-                  size={28}
-                  family={peer?.kind === "silicon" ? "silicon" : "carbon"}
-                />
+      {searching ? (
+        // Search results are a small, bounded set — a plain scroll area is fine
+        // (no virtualization needed).
+        <ScrollArea ref={scrollRootRef} className="flex-1" data-private>
+          <div className="w-full px-6 py-4">
+            {searchHasMore && filteredEvents.length > 0 ? (
+              <div className="flex justify-center pb-3">
+                <button
+                  type="button"
+                  onClick={loadMoreSearch}
+                  disabled={searchLoading}
+                  className="label-mono text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-60"
+                >
+                  {searchLoading ? "searching…" : "more results"}
+                </button>
               </div>
-              <span className="text-sm text-muted-foreground">
-                holding the message until you finish typing.
-              </span>
+            ) : null}
+            {searchLoading && filteredEvents.length === 0 ? (
+              <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
+                <span className="font-mono">
+                  searching <span className="text-foreground">&quot;{search?.trim()}&quot;</span>…
+                </span>
+              </div>
+            ) : filteredEvents.length === 0 ? (
+              <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
+                <span className="font-mono">
+                  no events match <span className="text-foreground">&quot;{search}&quot;</span>
+                </span>
+              </div>
+            ) : (
+              timelineItems.map((item) => (
+                <React.Fragment key={item.key}>{renderTimelineItem(item)}</React.Fragment>
+              ))
+            )}
+          </div>
+        </ScrollArea>
+      ) : loading ? (
+        <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">loading messages…</div>
+      ) : filteredEvents.length === 0 ? (
+        <div className="flex-1 px-6 py-4">
+          {/* §2b — first-contact prompt with a one-click Say Hi. */}
+          <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
+            <div className="flex flex-col items-center gap-3 py-2 text-center">
+              <span>no messages yet - say hi.</span>
+              {!readOnly ? (
+                <Button size="sm" onClick={sayHi} disabled={sayingHi}>
+                  {sayingHi ? "saying hi…" : "Say Hi"}
+                </Button>
+              ) : null}
             </div>
-          ) : null}
-          <div ref={endRef} />
+          </div>
         </div>
-      </ScrollArea>
+      ) : (
+        // Virtualized main timeline — only the visible rows are in the DOM, so it
+        // scales to very long histories. Virtuoso handles dynamic heights,
+        // stick-to-bottom (followOutput), and prepend anchoring (firstItemIndex).
+        <div className="min-h-0 flex-1" data-private>
+          <Virtuoso
+            ref={virtuosoRef}
+            key={room.room_id}
+            style={{ height: "100%" }}
+            data={timelineItems}
+            context={{ loadingOlder, holdingNode }}
+            firstItemIndex={firstItemIndex}
+            initialTopMostItemIndex={Math.max(0, timelineItems.length - 1)}
+            computeItemKey={(_, item) => item.key}
+            itemContent={(_, item) => (
+              <div className="px-6" style={{ display: "flow-root" }}>
+                {renderTimelineItem(item)}
+              </div>
+            )}
+            followOutput={(atBottom) => (atBottom ? "smooth" : false)}
+            atBottomStateChange={(atBottom) => {
+              stickToBottomRef.current = atBottom;
+              if (atBottom) setUnseenBelow(false);
+            }}
+            startReached={() => {
+              if (hasMore && !loadingOlder) void loadOlder();
+            }}
+            increaseViewportBy={{ top: 800, bottom: 800 }}
+            components={{ Header: ChatListHeader, Footer: ChatListFooter }}
+          />
+        </div>
+      )}
 
       {/* §1.9 — when a message arrives while scrolled up, surface a pill to
           jump back to the latest instead of silently appending below the fold. */}
@@ -1842,23 +1917,20 @@ function ProgressLine({
       </div>
     );
   }
-  // §1.1 — once the line stops advancing, stop pretending it's lively. After a
-  // soft threshold show an honest "still working" line; after a hard one offer
-  // a way out in case the silicon died without a `done` frame.
-  const stale = staleMs >= PROGRESS_STALE_SOFT_MS;
+  // §1.1 — keep the last live line going while the silicon might still be
+  // working (no "no update for Ns" countdown). Only after a long silence do we
+  // collapse to a quiet "Still working…" with a dismiss, in case it died with no
+  // `done` frame.
   const dead = staleMs >= PROGRESS_STALE_HARD_MS;
-  if (stale) {
-    const secs = Math.round(staleMs / 1000);
+  if (dead) {
     return (
       <div className="my-2 flex w-full items-start gap-2">
         <div className="w-7 shrink-0">
           <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "carbon"} />
         </div>
         <div className="min-w-0 max-w-[70%] space-y-1">
-          <span className="block text-sm text-muted-foreground">
-            {dead ? "still working - no update for a while." : `still working - no update for ${secs}s.`}
-          </span>
-          {dead && onDismiss ? (
+          <span className="block text-sm text-muted-foreground">Still working…</span>
+          {onDismiss ? (
             <button
               type="button"
               onClick={onDismiss}

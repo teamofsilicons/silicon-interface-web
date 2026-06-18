@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { GearSix, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
@@ -127,6 +127,33 @@ const OBSERVING_TAB = "__observing__";
 // Shared empty set so rooms with no resolved team return a stable reference.
 const EMPTY_SLUGS: ReadonlySet<string> = new Set<string>();
 
+// Persist which folder is drilled-into, per team, so a reload (or team switch)
+// reopens it instead of dropping back to the top-level list.
+const OPEN_FOLDER_KEY = "silicon-interface:open-folder";
+function loadOpenFolder(ownerId: string | null, teamSlug: string | null): string | null {
+  if (typeof window === "undefined" || !ownerId || !teamSlug) return null;
+  try {
+    const raw = window.localStorage.getItem(`${OPEN_FOLDER_KEY}:${ownerId}`);
+    const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    return map[teamSlug] ?? null;
+  } catch {
+    return null;
+  }
+}
+function saveOpenFolder(ownerId: string | null, teamSlug: string | null, groupId: string | null) {
+  if (typeof window === "undefined" || !ownerId || !teamSlug) return;
+  try {
+    const key = `${OPEN_FOLDER_KEY}:${ownerId}`;
+    const raw = window.localStorage.getItem(key);
+    const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    if (groupId) map[teamSlug] = groupId;
+    else delete map[teamSlug];
+    window.localStorage.setItem(key, JSON.stringify(map));
+  } catch {
+    /* storage unavailable — ignore */
+  }
+}
+
 /** Small unread-count chip shown on a team / Others / Observing tab. Inverts
  *  its colors on the active tab (which has a dark/foreground background). */
 function TabUnreadBadge({ count, active }: { count: number; active: boolean }) {
@@ -161,7 +188,13 @@ export default function ChatPage() {
 }
 
 function ChatPageInner() {
-  const router = useRouter();
+  // Same-route URL updates via the History API (Next syncs these into
+  // useSearchParams) so opening a chat / switching views never triggers a full
+  // navigation — which, once the route cache went stale, was hard-reloading the
+  // whole page instead of just swapping the open chat.
+  const navigate = React.useCallback((url: string) => {
+    window.history.pushState(null, "", url);
+  }, []);
   const search = useSearchParams();
   const selected = search.get("room");
   const teamViewSlug = search.get("team");
@@ -476,11 +509,11 @@ function ChatPageInner() {
       // accidental switches while gliding through the list, short enough to
       // feel responsive once they hold deliberately.
       hoverTimerRef.current = setTimeout(() => {
-        if (roomId !== selected) router.push(`/chat?room=${roomId}`);
+        if (roomId !== selected) navigate(`/chat?room=${roomId}`);
         hoverTimerRef.current = null;
       }, 1200);
     },
-    [router, selected],
+    [navigate, selected],
   );
   const onRoomDragLeave = React.useCallback(
     (roomId: string) => {
@@ -649,7 +682,7 @@ function ChatPageInner() {
             description: body,
             action: {
               label: "open",
-              onClick: () => router.push(`/chat?room=${encodeURIComponent(rid)}`),
+              onClick: () => navigate(`/chat?room=${encodeURIComponent(rid)}`),
             },
           });
         }
@@ -775,11 +808,11 @@ function ChatPageInner() {
   React.useEffect(() => {
     if (!selected) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) router.push("/chat");
+      if (e.key === "Escape" && !e.defaultPrevented) navigate("/chat");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, router]);
+  }, [selected, navigate]);
 
   // Opening a room clears its unread badge locally — RoomView marks it read
   // server-side, but we zero the count immediately so the sidebar matches.
@@ -912,27 +945,45 @@ function ChatPageInner() {
       groups: displayFolders,
       assignmentByRoom,
       openGroupId,
-      onOpenGroup: (groupId: string) => setOpenGroupId(groupId),
-      onCloseGroup: () => setOpenGroupId(null),
+      onOpenGroup: (groupId: string) => {
+        setOpenGroupId(groupId);
+        saveOpenFolder(ownerId, activeTeamSlug, groupId);
+      },
+      onCloseGroup: () => {
+        setOpenGroupId(null);
+        saveOpenFolder(ownerId, activeTeamSlug, null);
+      },
       onRename: (groupId: string) => {
         const f = groupStore.folders.find((x) => x.id === groupId);
         if (f) setGroupPrompt({ mode: "rename", groupId, current: f.name });
       },
       onDelete: (groupId: string) => {
         setGroupStore((prev) => deletePersonalFolder(prev, groupId));
-        setOpenGroupId((cur) => (cur === groupId ? null : cur));
+        setOpenGroupId((cur) => {
+          if (cur !== groupId) return cur;
+          saveOpenFolder(ownerId, activeTeamSlug, null);
+          return null;
+        });
       },
       onMoveRoom: (roomId: string, groupId: string | null) =>
         setGroupStore((prev) => setRoomFolder(prev, roomId, groupId)),
       onCreateGroupWithRoom: (roomId: string) =>
         setGroupPrompt({ mode: "create", seedRoomId: roomId }),
     };
-  }, [groupingActive, activeTeamSlug, displayFolders, assignmentByRoom, groupStore, openGroupId]);
+  }, [
+    groupingActive,
+    activeTeamSlug,
+    displayFolders,
+    assignmentByRoom,
+    groupStore,
+    openGroupId,
+    ownerId,
+  ]);
 
-  // Leaving a team (or its grouping context) closes any drilled-in folder.
+  // On a team switch (or reload), restore that team's last drilled-in folder.
   React.useEffect(() => {
-    setOpenGroupId(null);
-  }, [activeTeamSlug]);
+    setOpenGroupId(loadOpenFolder(ownerId, activeTeamSlug));
+  }, [activeTeamSlug, ownerId]);
 
   const confirmGroupPrompt = React.useCallback(
     (name: string) => {
@@ -974,12 +1025,12 @@ function ChatPageInner() {
             : Math.max(idx - 1, 0);
       const target = filtered[next];
       if (target && target.room_id !== selected) {
-        router.push(`/chat?room=${encodeURIComponent(target.room_id)}`);
+        navigate(`/chat?room=${encodeURIComponent(target.room_id)}`);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filtered, selected, router]);
+  }, [filtered, selected, navigate]);
 
   return (
     <>
@@ -1024,7 +1075,7 @@ function ChatPageInner() {
                   type="button"
                   onClick={() => {
                     setActiveTeamTab(team.slug);
-                    if (viewedTeam) router.push(`/chat?team=${encodeURIComponent(team.slug)}`);
+                    if (viewedTeam) navigate(`/chat?team=${encodeURIComponent(team.slug)}`);
                   }}
                   className={cn(
                     "inline-flex max-w-48 shrink-0 items-center gap-2 overflow-hidden truncate border p-0 pr-3 text-xs font-semibold leading-none transition-colors",
@@ -1055,7 +1106,7 @@ function ChatPageInner() {
                   type="button"
                   onClick={() => {
                     setActiveTeamTab(OTHERS_TAB);
-                    if (viewedTeam) router.push("/chat");
+                    if (viewedTeam) navigate("/chat");
                   }}
                   className={cn(
                     "inline-flex max-w-40 shrink-0 items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
@@ -1073,7 +1124,7 @@ function ChatPageInner() {
                   type="button"
                   onClick={() => {
                     setActiveTeamTab(OBSERVING_TAB);
-                    if (viewedTeam) router.push("/chat");
+                    if (viewedTeam) navigate("/chat");
                   }}
                   className={cn(
                     "inline-flex max-w-40 shrink-0 items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors",
@@ -1092,7 +1143,7 @@ function ChatPageInner() {
                 type="button"
                 aria-label={`${activeTeam.name} team workspace`}
                 title={`${activeTeam.name} team workspace`}
-                onClick={() => router.push(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
+                onClick={() => navigate(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)}
                 className={cn(
                   "m-2 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent",
                   viewedTeam?.slug === activeTeam.slug && "bg-secondary",
@@ -1133,7 +1184,7 @@ function ChatPageInner() {
           myHandle={myUsername}
           contacts={contacts.byPeer}
           selectedId={selected}
-          onSelect={(id) => router.push(`/chat?room=${id}`)}
+          onSelect={(id) => navigate(`/chat?room=${id}`)}
           onNew={() => setDialogOpen(true)}
           loading={loading}
           hoverRoomId={hoverRoomId}
@@ -1156,7 +1207,7 @@ function ChatPageInner() {
           onContactsChanged={contacts.refresh}
         />
       ) : viewedTeam ? (
-        <TeamPanel slug={viewedTeam.slug} onClose={() => router.push("/chat")} />
+        <TeamPanel slug={viewedTeam.slug} onClose={() => navigate("/chat")} />
       ) : (
         <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
           <div className="max-w-md space-y-3 text-center">
@@ -1174,7 +1225,7 @@ function ChatPageInner() {
         onOpenChange={setDialogOpen}
         onCreated={(room) => {
           setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
-          router.push(`/chat?room=${room.room_id}`);
+          navigate(`/chat?room=${room.room_id}`);
         }}
       />
 

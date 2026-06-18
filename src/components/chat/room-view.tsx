@@ -81,6 +81,8 @@ interface ProgressEntry {
   /** §1.6 — public handle of whoever is actually working, so the progress
    *  avatar isn't a "most recent silicon sender" guess. */
   handle?: string | null;
+  /** Carbon message this run is working on — anchors the status under it. */
+  anchorEventId?: string | null;
   /** Receipt phase shown right after sending, before real work progress:
    *  "sent" → "read" → (after a moment) the actual silicon progress. */
   receipt?: "sent" | "read";
@@ -585,6 +587,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             source: "server",
             pct: numOrNull(incoming.content.progress_pct),
             handle: incoming.sender_handle,
+            anchorEventId: incoming.content.run_anchor_event_id
+              ? String(incoming.content.run_anchor_event_id)
+              : null,
           });
         }
         return;
@@ -748,6 +753,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             source: "server",
             pct: numOrNull(f.progress_pct),
             handle: f.member_handle ?? null,
+            anchorEventId: f.run_anchor_event_id ?? null,
           });
         }
       }
@@ -1323,10 +1329,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     setRunAnchorKey((prev) => prev ?? lastRowKeyRef.current);
   }, [runActiveNow]);
 
-  // §1 — fold the flat timeline into "turn" groups: consecutive messages from
-  // the same party (carbon vs silicon) read as one block. The active run's
-  // status is inserted right after the message that started it, so a later
-  // message opens a fresh turn beneath the status instead of above it.
+  // The active run's server-stamped anchor (the carbon message it's working on),
+  // when present — preferred over the client rising-edge guess.
+  const activeAnchorId = activeProgress?.anchorEventId ?? null;
+
+  // §1 — fold the flat timeline into "turn" groups, and place each silicon run
+  // (its reply + working status) under the carbon message that triggered it.
   const timelineItems = React.useMemo(() => {
     type Party = "carbon" | "silicon";
     type Row = (typeof displayRows)[number];
@@ -1342,32 +1350,62 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     };
 
+    // §run-grouping — move each silicon reply that carries a run_anchor_event_id
+    // to sit right after the carbon message it answers, so a reply lands under
+    // its question even when newer messages were sent during the run. (No
+    // anchors → unchanged chronological order.)
+    const present = new Set(displayRows.map((e) => e.event_id));
+    const repliesByAnchor = new Map<string, Row[]>();
+    const moved = new Set<Row>();
+    for (const e of displayRows) {
+      const anchor = e.run_anchor_event_id;
+      if (e.sender_kind === "silicon" && anchor && present.has(anchor)) {
+        const list = repliesByAnchor.get(anchor) ?? [];
+        list.push(e);
+        repliesByAnchor.set(anchor, list);
+        moved.add(e);
+      }
+    }
+    let rows: Row[] = displayRows;
+    if (moved.size) {
+      rows = [];
+      for (const e of displayRows) {
+        if (moved.has(e)) continue;
+        rows.push(e);
+        const replies = repliesByAnchor.get(e.event_id);
+        if (replies) rows.push(...replies);
+      }
+    }
+
     const runActiveRaw = !search && shouldShowActiveProgress && !holdingMessage;
-    const anchorIdx =
-      runActiveRaw && runAnchorKey ? displayRows.findIndex((e) => keyOf(e) === runAnchorKey) : -1;
-    const repliedAfterAnchor =
-      anchorIdx >= 0 &&
-      displayRows.slice(anchorIdx + 1).some((e) => e.sender_kind === "silicon");
-    // The latest real (non-system) message. In a carbon↔silicon chat the status
-    // only shows while that message is the carbon's — i.e. we're awaiting a
-    // reply. Once a silicon message lands (the reply, OR any internal step like
-    // "calling manager" after it), hide the status. Observed silicon↔silicon
-    // chats fall back to clearing once a reply lands after the run's anchor.
     let lastReal: Row | null = null;
-    for (let i = displayRows.length - 1; i >= 0; i--) {
-      if (!isSystem(displayRows[i])) {
-        lastReal = displayRows[i];
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (!isSystem(rows[i])) {
+        lastReal = rows[i];
         break;
       }
     }
-    const runActive =
-      runActiveRaw &&
-      (room.observed ? !repliedAfterAnchor : lastReal?.sender_kind !== "silicon");
+    // Prefer the server anchor; fall back to the client rising-edge anchor when
+    // the backend doesn't stamp one (older server, or a cron/proactive run).
+    const useServerAnchor = !!activeAnchorId && present.has(activeAnchorId);
+    let runActive: boolean;
+    if (useServerAnchor) {
+      // Show the status until a reply for this run lands (an anchored reply).
+      runActive = runActiveRaw && !repliesByAnchor.has(activeAnchorId);
+    } else {
+      const anchorIdx =
+        runActiveRaw && runAnchorKey ? rows.findIndex((e) => keyOf(e) === runAnchorKey) : -1;
+      const repliedAfterAnchor =
+        anchorIdx >= 0 && rows.slice(anchorIdx + 1).some((e) => e.sender_kind === "silicon");
+      runActive =
+        runActiveRaw &&
+        (room.observed ? !repliedAfterAnchor : lastReal?.sender_kind !== "silicon");
+    }
 
     const raw: Array<{ item: Item; iso: string }> = [];
     let cur: { party: Party; events: Row[] } | null = null;
     let progressPlaced = false;
-    let lastIso = displayRows.length ? displayRows[0].created_at : new Date(0).toISOString();
+    let lastIso = rows.length ? rows[0].created_at : new Date(0).toISOString();
     const flush = () => {
       if (cur && cur.events.length) {
         raw.push({
@@ -1388,7 +1426,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       raw.push({ item: { kind: "progress", key: "run-progress", dayLabel: null }, iso });
       progressPlaced = true;
     };
-    for (const e of displayRows) {
+    for (const e of rows) {
       lastIso = e.created_at;
       if (isSystem(e)) {
         flush();
@@ -1402,8 +1440,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         cur.events.push(e);
       }
       // Insert the run status right after the message that started the run.
-      if (runActive && !progressPlaced && runAnchorKey && keyOf(e) === runAnchorKey) {
-        pushProgress(e.created_at);
+      if (runActive && !progressPlaced) {
+        const isAnchor = useServerAnchor
+          ? e.event_id === activeAnchorId
+          : !!runAnchorKey && keyOf(e) === runAnchorKey;
+        if (isAnchor) pushProgress(e.created_at);
       }
     }
     flush();
@@ -1419,7 +1460,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       }
     }
     return raw.map((r) => r.item);
-  }, [displayRows, search, shouldShowActiveProgress, holdingMessage, runAnchorKey, room.observed]);
+  }, [
+    displayRows,
+    search,
+    shouldShowActiveProgress,
+    holdingMessage,
+    runAnchorKey,
+    room.observed,
+    activeAnchorId,
+  ]);
 
   // When older history is prepended (loadOlder), `timelineItems` grows at the
   // front. Find where the previous first item moved to and shrink firstItemIndex
@@ -1434,6 +1483,24 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     }
     prevTimelineRef.current = { roomId: room.room_id, firstKey };
   }, [timelineItems, room.room_id]);
+
+  // Land at the bottom when a room's content first appears — `initialTopMostItemIndex`
+  // alone can miss it when items hydrate after mount (cache → server merge), so
+  // we explicitly jump once per room after load settles.
+  const didInitialBottomRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (loading || timelineItems.length === 0) return;
+    if (didInitialBottomRef.current === room.room_id) return;
+    didInitialBottomRef.current = room.room_id;
+    stickToBottomRef.current = true;
+    const jump = () => virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+    const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
+    const t = window.setTimeout(jump, 200);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t);
+    };
+  }, [room.room_id, loading, timelineItems.length]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -1786,6 +1853,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               </div>
             )}
             followOutput={(atBottom) => (atBottom ? "smooth" : false)}
+            atBottomThreshold={120}
             atBottomStateChange={(atBottom) => {
               stickToBottomRef.current = atBottom;
               if (atBottom) setUnseenBelow(false);

@@ -325,6 +325,10 @@ export interface Event {
   type: EventType;
   content: Record<string, unknown>;
   reply_to_event_id: string;
+  /** The carbon message that triggered this silicon reply's run — lets the UI
+   *  group the reply (and its progress) under the message it answers. Set
+   *  server-side; empty for carbon messages and cron/proactive silicon sends. */
+  run_anchor_event_id?: string;
   is_final: boolean;
   created_at: string;
   edited_at: string | null;
@@ -457,6 +461,8 @@ export type WsFrame =
       type: "progress";
       room_id: string;
       progress_group_id?: string;
+      /** Carbon message this run is working on — anchors the status under it. */
+      run_anchor_event_id?: string;
       state?: ProgressState;
       note?: string;
       progress_pct?: number | null;

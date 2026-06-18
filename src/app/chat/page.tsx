@@ -769,6 +769,7 @@ function ChatPageInner() {
           source: "server",
           pct: typeof f.progress_pct === "number" ? f.progress_pct : null,
           handle: f.member_handle ?? null,
+          anchorEventId: f.run_anchor_event_id ?? null,
         });
       }
     } else if (f.type === "event" && f.event.type === "m.progress" && progressRoom) {
@@ -790,6 +791,9 @@ function ChatPageInner() {
               ? f.event.content.progress_pct
               : null,
           handle: f.event.sender_handle,
+          anchorEventId: f.event.content.run_anchor_event_id
+            ? String(f.event.content.run_anchor_event_id)
+            : null,
         });
       }
     } else if (f.type === "event" && progressRoom && f.event.sender_kind === "silicon") {

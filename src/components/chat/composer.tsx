@@ -126,7 +126,7 @@ const MAX_ATTACHMENTS = 10;
 // A sane cap keeps a 5 GB drop from OOM-ing the metadata decode / hanging the
 // upload; a zero-byte guard stops empty files; and we refuse types the bubble
 // has no way to render so the user gets a clear toast instead of a broken tile.
-const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB
+const MAX_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
 
 /** HEIC/HEIF aren't renderable as <img> in most browsers — treat them as a
  *  generic file rather than a broken image (and warn so the user isn't
@@ -141,7 +141,7 @@ function isHeic(file: File): boolean {
 function validateFile(file: File): string | null {
   if (file.size === 0) return "that file is empty (0 bytes).";
   if (file.size > MAX_FILE_BYTES) {
-    return `that file is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB).`;
+    return `that file is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024 / 1024)} GB).`;
   }
   return null;
 }
@@ -1405,18 +1405,19 @@ export function Composer({
               // IME is composing so a composition-commit Enter doesn't pick an
               // emoji or send.
               if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-              // @-mention picker — a vertical list: ↑/↓ move, Tab/Enter insert,
-              // Esc dismisses. Takes the keys before the emoji/send handling.
+              // @-mention picker — a vertical list: ↑/↓ move (wrapping around at
+              // the ends), Tab/Enter insert, Esc dismisses. Takes the keys
+              // before the emoji/send handling.
               if (mentionQuery !== null && mentionResults.length > 0) {
                 const n = mentionResults.length;
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
-                  setMentionIdx((i) => Math.min(i + 1, n - 1));
+                  setMentionIdx((i) => (i + 1) % n);
                   return;
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  setMentionIdx((i) => Math.max(0, i - 1));
+                  setMentionIdx((i) => (i - 1 + n) % n);
                   return;
                 }
                 if (e.key === "Tab" || e.key === "Enter") {

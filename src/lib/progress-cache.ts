@@ -21,6 +21,8 @@ export interface CachedProgressEntry {
   pct?: number | null;
   handle?: string | null;
   receipt?: "sent" | "read";
+  /** Carbon message this run is working on — anchors the status under it. */
+  anchorEventId?: string | null;
 }
 
 // A progress line older than this is treated as dead on reopen — a silicon that

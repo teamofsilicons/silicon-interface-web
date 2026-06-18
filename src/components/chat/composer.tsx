@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   ArrowBendUpLeft,
+  ArrowsOutSimple,
   CircleNotch,
   File as FileIcon,
   FilePdf,
@@ -26,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
+import { MediaPreviewer } from "@/components/chat/media-previewer";
 import { looksLikeMarkdown } from "@/lib/markdown";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
@@ -199,6 +201,7 @@ function StagedAttachment({
   name,
   size,
   mime,
+  mediaId,
   uploadPct,
   uploadLoaded,
   onRemove,
@@ -208,6 +211,8 @@ function StagedAttachment({
   name: string;
   size: number;
   mime: string;
+  /** Set once uploaded — lets a restored row fetch a URL to preview. */
+  mediaId?: string | null;
   /** 0–100 while uploading; null/undefined when idle. */
   uploadPct?: number | null;
   /** Real bytes uploaded so far (from the XHR progress event). */
@@ -220,17 +225,38 @@ function StagedAttachment({
   const isPdf = mime.includes("pdf");
   const uploading = uploadPct !== null && uploadPct !== undefined;
 
-  // A live thumbnail is only available while we still hold the raw File; a
-  // restored row falls back to its type icon.
-  const thumbUrl = React.useMemo(
-    () => (file && (isImage || isVideo) ? URL.createObjectURL(file) : null),
-    [file, isImage, isVideo],
+  // A blob URL for the raw file (when we still hold it) — drives both the
+  // thumbnail and the in-place preview. A restored row fetches a URL on click.
+  const fileUrl = React.useMemo(
+    () => (file ? URL.createObjectURL(file) : null),
+    [file],
   );
   React.useEffect(() => {
     return () => {
-      if (thumbUrl) URL.revokeObjectURL(thumbUrl);
+      if (fileUrl) URL.revokeObjectURL(fileUrl);
     };
-  }, [thumbUrl]);
+  }, [fileUrl]);
+
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [remoteUrl, setRemoteUrl] = React.useState<string | null>(null);
+  const previewUrl = fileUrl ?? remoteUrl;
+
+  const openPreview = async () => {
+    if (previewUrl) {
+      setPreviewOpen(true);
+      return;
+    }
+    if (!mediaId) return;
+    try {
+      const r = await api.mediaDetail(mediaId);
+      if (r.download_url) {
+        setRemoteUrl(r.download_url);
+        setPreviewOpen(true);
+      }
+    } catch {
+      toast.error("couldn't open attachment");
+    }
+  };
 
   return (
     <div className="relative flex items-center gap-3 border bg-card px-3 py-2">
@@ -241,27 +267,38 @@ function StagedAttachment({
           style={{ width: `${uploadPct}%` }}
         />
       )}
-      <div className="h-12 w-12 shrink-0 overflow-hidden border bg-muted">
-        {isImage && thumbUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element -- local blob URL
-          <img src={thumbUrl} alt="" className="h-full w-full object-cover" />
-        ) : isVideo && thumbUrl ? (
-          // Muted poster of the first frame — no controls, just the still.
-          <video src={thumbUrl} muted className="h-full w-full object-cover" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-            {isPdf ? <FilePdf className="h-5 w-5" /> : isAudio ? <Microphone className="h-5 w-5" /> : <FileIcon className="h-5 w-5" />}
+      {/* The thumbnail + name is a button that opens an in-place preview. */}
+      <button
+        type="button"
+        onClick={openPreview}
+        title={`preview ${name}`}
+        className="group flex min-w-0 flex-1 items-center gap-3 text-left"
+      >
+        <div className="relative h-12 w-12 shrink-0 overflow-hidden border bg-muted">
+          {isImage && fileUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element -- local blob URL
+            <img src={fileUrl} alt="" className="h-full w-full object-cover" />
+          ) : isVideo && fileUrl ? (
+            <video src={fileUrl} muted className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+              {isPdf ? <FilePdf className="h-5 w-5" /> : isAudio ? <Microphone className="h-5 w-5" /> : <FileIcon className="h-5 w-5" />}
+            </div>
+          )}
+          {/* Hover affordance — it's clickable to expand. */}
+          <div className="absolute inset-0 hidden place-items-center bg-black/35 group-hover:grid">
+            <ArrowsOutSimple className="h-4 w-4 text-white" />
           </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <FileName name={name} className="text-xs font-medium" />
-        <div className="label-mono text-[10px] text-muted-foreground">
-          {uploading
-            ? `${formatBytes(uploadLoaded ?? (size * (uploadPct ?? 0)) / 100)} / ${formatBytes(size)} (${uploadPct}%)`
-            : formatBytes(size)}
         </div>
-      </div>
+        <div className="min-w-0 flex-1">
+          <FileName name={name} className="text-xs font-medium" />
+          <div className="label-mono text-[10px] text-muted-foreground">
+            {uploading
+              ? `${formatBytes(uploadLoaded ?? (size * (uploadPct ?? 0)) / 100)} / ${formatBytes(size)} (${uploadPct}%)`
+              : formatBytes(size)}
+          </div>
+        </div>
+      </button>
       <Button
         size="icon"
         variant="ghost"
@@ -271,6 +308,15 @@ function StagedAttachment({
       >
         <X className="h-3.5 w-3.5" />
       </Button>
+      {previewUrl && (
+        <MediaPreviewer
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
+          url={previewUrl}
+          mime={mime}
+          filename={name}
+        />
+      )}
     </div>
   );
 }
@@ -1304,6 +1350,7 @@ export function Composer({
               name={a.name}
               size={a.size}
               mime={a.mime}
+              mediaId={a.mediaId}
               uploadPct={a.status === "uploading" ? (a.pct ?? 0) : null}
               uploadLoaded={a.loaded}
               onRemove={() => removeAttachment(a.id)}

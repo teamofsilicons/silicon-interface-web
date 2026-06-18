@@ -1475,16 +1475,17 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         }
         cur.events.push(e);
       }
-      // Insert the run status right after the message that started the run.
-      if (runActive && !progressPlaced) {
-        const isAnchor = useServerAnchor
-          ? e.event_id === activeAnchorId
-          : !!runAnchorKey && keyOf(e) === runAnchorKey;
-        if (isAnchor) pushProgress(e.created_at);
+      // Insert the run status right after the carbon message it's answering —
+      // but ONLY when the server told us which one (run_anchor_event_id). With
+      // no server anchor (cron/proactive, or a run with no unanswered carbon),
+      // the client rising-edge guess lands mid-list after reply reordering, so
+      // we let it fall through to the bottom instead.
+      if (runActive && !progressPlaced && useServerAnchor && e.event_id === activeAnchorId) {
+        pushProgress(e.created_at);
       }
     }
     flush();
-    // Anchor not found (e.g. scrolled out of the loaded window) → bottom.
+    // No server anchor (or it's out of the loaded window) → pin to the bottom.
     if (runActive && !progressPlaced) pushProgress(lastIso);
     // Day band before the first item of each new local calendar day.
     let prevDay: string | null = null;

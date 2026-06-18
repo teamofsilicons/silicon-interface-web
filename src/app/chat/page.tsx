@@ -163,6 +163,25 @@ function loadSidebarWidth(): number {
   return Number.isFinite(v) && v >= SB_MIN && v <= SB_MAX ? v : SB_DEFAULT;
 }
 
+// Persist the sidebar filters (team selection, unread, kinds) so a reload keeps
+// whatever the user was filtered to.
+const FILTERS_STORAGE = "silicon-interface:chat-filters";
+function loadFilters(): ChatFilters {
+  if (typeof window === "undefined") return EMPTY_FILTERS;
+  try {
+    const raw = window.localStorage.getItem(FILTERS_STORAGE);
+    if (!raw) return EMPTY_FILTERS;
+    const f = JSON.parse(raw) as Partial<ChatFilters>;
+    return {
+      unread: !!f.unread,
+      kinds: Array.isArray(f.kinds) ? f.kinds.filter((k) => k === "carbon" || k === "silicon") : [],
+      teams: Array.isArray(f.teams) ? f.teams.filter((t) => typeof t === "string") : [],
+    };
+  } catch {
+    return EMPTY_FILTERS;
+  }
+}
+
 // Suspense wrapper so `useSearchParams()` (reads ?room=…) doesn't bail
 // static prerender.
 export default function ChatPage() {
@@ -244,7 +263,7 @@ function ChatPageInner() {
   }, []);
   const workingRoomIds = React.useMemo(() => new Set(Object.keys(workingRooms)), [workingRooms]);
   const [dialogOpen, setDialogOpen] = React.useState(false);
-  const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
+  const [filters, setFilters] = React.useState<ChatFilters>(loadFilters);
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
   // Sidebar search — filters the conversation list by display name, handle,
   // or last message body.
@@ -434,6 +453,15 @@ function ChatPageInner() {
       .filter(Boolean);
     if (slugs.length) setFilters((f) => ({ ...f, teams: slugs }));
   }, [teamsParam]);
+
+  // Persist the sidebar filters so a reload restores them.
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem(FILTERS_STORAGE, JSON.stringify(filters));
+    } catch {
+      /* quota / unavailable — non-fatal */
+    }
+  }, [filters]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).

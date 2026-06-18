@@ -4,7 +4,9 @@ import * as React from "react";
 import { Copy, FileText, ImageSquare, LinkSimple, MicrophoneStage, SquaresFour } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
-import { NotePencil } from "@phosphor-icons/react/dist/ssr";
+import { NotePencil, UserPlus } from "@phosphor-icons/react/dist/ssr";
+
+import { SiliconInviteDialog } from "./silicon-invite-dialog";
 
 import { api } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -81,6 +83,13 @@ export function ProfileDrawer({
   const [profile, setProfile] = React.useState<CarbonPublic | SiliconPublic | null>(null);
   const [profileLoading, setProfileLoading] = React.useState(false);
   const [tab, setTab] = React.useState<TabId>("all");
+  const [inviteOpen, setInviteOpen] = React.useState(false);
+
+  // For a silicon profile we can offer "invite people to this silicon" when we
+  // know its owner team (the invite API is scoped to that team).
+  const siliconProfile =
+    counterpart?.kind === "silicon" ? (profile as SiliconPublic | null) : null;
+  const canInviteToSilicon = !!siliconProfile?.owner_team_slug && !!siliconProfile?.silicon_id;
 
   React.useEffect(() => {
     if (!open || !counterpart) return;
@@ -169,6 +178,7 @@ export function ProfileDrawer({
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] w-full max-w-md overflow-x-hidden overflow-y-auto">
         <DialogHeader className="sr-only">
@@ -250,11 +260,23 @@ export function ProfileDrawer({
             </p>
           </div>
         )}
-        {!contact && onEditContact && (
-          <div className="mt-4 flex justify-center border-t pt-3">
-            <Button size="sm" onClick={onEditContact} className="gap-1.5">
-              <NotePencil className="h-3.5 w-3.5" /> Save contact
-            </Button>
+        {(onEditContact || canInviteToSilicon) && (
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 border-t pt-3">
+            {!contact && onEditContact && (
+              <Button size="sm" onClick={onEditContact} className="gap-1.5">
+                <NotePencil className="h-3.5 w-3.5" /> Save contact
+              </Button>
+            )}
+            {canInviteToSilicon && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setInviteOpen(true)}
+                className="gap-1.5"
+              >
+                <UserPlus className="h-3.5 w-3.5" /> Invite people
+              </Button>
+            )}
           </div>
         )}
 
@@ -305,6 +327,16 @@ export function ProfileDrawer({
         </div>
       </DialogContent>
     </Dialog>
+    {canInviteToSilicon && siliconProfile && (
+      <SiliconInviteDialog
+        open={inviteOpen}
+        onOpenChange={setInviteOpen}
+        teamSlug={siliconProfile.owner_team_slug!}
+        siliconId={siliconProfile.silicon_id}
+        siliconName={siliconProfile.name}
+      />
+    )}
+    </>
   );
 }
 

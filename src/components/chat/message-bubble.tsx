@@ -102,9 +102,10 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
     api
       .mediaDetail(mediaId)
       .then((r) => {
+        // Cache before the alive check so a fast scroll still warms it.
+        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
         if (!alive) return;
         setUrl(r.download_url ?? null);
-        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
       })
       .catch(() => {});
     return () => {

@@ -1901,7 +1901,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             startReached={() => {
               if (hasMore && !loadingOlder) void loadOlder();
             }}
-            increaseViewportBy={{ top: 800, bottom: 800 }}
+            increaseViewportBy={{ top: 1400, bottom: 1400 }}
             components={{ Header: ChatListHeader, Footer: ChatListFooter }}
           />
         </div>

@@ -18,6 +18,7 @@ import { track } from "@/lib/analytics";
 import { searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
 import { flushDraft, getDraft, setDraft } from "@/lib/drafts";
+import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
 import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -158,13 +159,33 @@ interface QueuedTextSend {
 /** One staged attachment, uploading in the background until ready to send. */
 interface StagedFile {
   id: string;
-  file: File;
+  /** The raw File while it's being uploaded; null for an attachment restored
+   *  from a persisted draft (we only kept its metadata + media_id). */
+  file: File | null;
+  /** Display name + size, kept independent of `file` so restored rows render. */
+  name: string;
+  size: number;
   status: "uploading" | "ready" | "error";
   /** 0–100 while uploading; null once done. */
   pct: number | null;
   loaded: number | null;
   mediaId: string | null;
   mime: string;
+}
+
+/** Rebuild staged rows from a room's persisted (already-uploaded) draft. */
+function restoreStagedAttachments(roomId: string): StagedFile[] {
+  return getDraftAttachments(roomId).map((a) => ({
+    id: a.id,
+    file: null,
+    name: a.name,
+    size: a.size,
+    status: "ready" as const,
+    pct: null,
+    loaded: null,
+    mediaId: a.mediaId,
+    mime: a.mime,
+  }));
 }
 
 /**
@@ -175,25 +196,34 @@ interface StagedFile {
  */
 function StagedAttachment({
   file,
+  name,
+  size,
+  mime,
   uploadPct,
   uploadLoaded,
   onRemove,
 }: {
-  file: File;
+  /** Raw File while uploading; null for a draft-restored (already-uploaded) row. */
+  file: File | null;
+  name: string;
+  size: number;
+  mime: string;
   /** 0–100 while uploading; null/undefined when idle. */
   uploadPct?: number | null;
   /** Real bytes uploaded so far (from the XHR progress event). */
   uploadLoaded?: number | null;
   onRemove: () => void;
 }) {
-  const isImage = file.type.startsWith("image/");
-  const isVideo = file.type.startsWith("video/");
-  const isAudio = file.type.startsWith("audio/");
-  const isPdf = file.type.includes("pdf");
+  const isImage = mime.startsWith("image/");
+  const isVideo = mime.startsWith("video/");
+  const isAudio = mime.startsWith("audio/");
+  const isPdf = mime.includes("pdf");
   const uploading = uploadPct !== null && uploadPct !== undefined;
 
+  // A live thumbnail is only available while we still hold the raw File; a
+  // restored row falls back to its type icon.
   const thumbUrl = React.useMemo(
-    () => (isImage || isVideo ? URL.createObjectURL(file) : null),
+    () => (file && (isImage || isVideo) ? URL.createObjectURL(file) : null),
     [file, isImage, isVideo],
   );
   React.useEffect(() => {
@@ -225,11 +255,11 @@ function StagedAttachment({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <FileName name={file.name} className="text-xs font-medium" />
+        <FileName name={name} className="text-xs font-medium" />
         <div className="label-mono text-[10px] text-muted-foreground">
           {uploading
-            ? `${formatBytes(uploadLoaded ?? (file.size * (uploadPct ?? 0)) / 100)} / ${formatBytes(file.size)} (${uploadPct}%)`
-            : formatBytes(file.size)}
+            ? `${formatBytes(uploadLoaded ?? (size * (uploadPct ?? 0)) / 100)} / ${formatBytes(size)} (${uploadPct}%)`
+            : formatBytes(size)}
         </div>
       </div>
       <Button
@@ -441,7 +471,9 @@ export function Composer({
   // Multiple attachments can be staged at once; each uploads in the background
   // and is sent as its own message. `xhrRefs` lets us abort a specific in-flight
   // upload when its chip is removed.
-  const [attachments, setAttachments] = React.useState<StagedFile[]>([]);
+  const [attachments, setAttachments] = React.useState<StagedFile[]>(() =>
+    restoreStagedAttachments(roomId),
+  );
   // Mirror so `attachFiles` can read the current count without side effects in a
   // state updater (StrictMode invokes updaters twice).
   const attachmentsRef = React.useRef<StagedFile[]>([]);
@@ -532,6 +564,7 @@ export function Composer({
   const uploadOne = React.useCallback(
     async (stage: StagedFile) => {
       const { id, file } = stage;
+      if (!file) return; // restored attachment — already uploaded, nothing to do
       const ref: React.MutableRefObject<XMLHttpRequest | null> = { current: null };
       xhrRefs.current.set(id, ref);
       try {
@@ -622,6 +655,8 @@ export function Composer({
         staged.push({
           id: newClientId(),
           file,
+          name: file.name,
+          size: file.size,
           status: "uploading",
           pct: null,
           loaded: null,
@@ -721,10 +756,35 @@ export function Composer({
   React.useEffect(() => {
     setText(getDraft(roomId));
     setEmojiQuery(null);
+    // Restore any uploaded attachments staged in this room's draft.
+    setAttachments(restoreStagedAttachments(roomId));
     return () => {
       flushDraft(roomId);
     };
   }, [roomId]);
+
+  // Persist the room's uploaded attachments so a chat-switch / refresh keeps
+  // them. Skip the render where roomId just changed (the effect above restores
+  // there) so we never write the outgoing room's files under the new room's key.
+  const persistRoomRef = React.useRef(roomId);
+  React.useEffect(() => {
+    if (persistRoomRef.current !== roomId) {
+      persistRoomRef.current = roomId;
+      return;
+    }
+    setDraftAttachments(
+      roomId,
+      attachments
+        .filter((a) => a.status === "ready" && a.mediaId)
+        .map((a) => ({
+          id: a.id,
+          mediaId: a.mediaId as string,
+          mime: a.mime,
+          name: a.name,
+          size: a.size,
+        })),
+    );
+  }, [attachments, roomId]);
 
   // #5 — Typing beacon. POSTs `activity('typing', true)` on the first
   // character and `false` after 3s of idle. Survives across rapid keystrokes
@@ -1047,7 +1107,7 @@ export function Composer({
             content: {
               media_id: a.mediaId,
               mime: a.mime,
-              filename: a.file.name,
+              filename: a.name,
               ...(bundleId ? { bundle_id: bundleId } : {}),
             },
           });
@@ -1241,6 +1301,9 @@ export function Composer({
             <StagedAttachment
               key={a.id}
               file={a.file}
+              name={a.name}
+              size={a.size}
+              mime={a.mime}
               uploadPct={a.status === "uploading" ? (a.pct ?? 0) : null}
               uploadLoaded={a.loaded}
               onRemove={() => removeAttachment(a.id)}

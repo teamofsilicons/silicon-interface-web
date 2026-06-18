@@ -137,11 +137,16 @@ export function MediaAttachment({
     const poll = async () => {
       try {
         const r = await api.mediaDetail(mediaId);
+        // Warm the cache BEFORE the alive check: when scrolling fast, Virtuoso
+        // unmounts the row before this resolves. If we bailed first, the dims
+        // were never cached, so the next scroll re-fetched and the bubble
+        // re-snapped to its real aspect — the "keeps resizing" jank. Caching
+        // here means the next mount seeds dims synchronously and never resizes.
+        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
         if (!alive) return;
         errors = 0;
         setMedia(r.media);
         setUrl(r.download_url);
-        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
         // Keep polling only while the object is still being produced and we
         // don't yet have a usable URL. Terminal states (ready/infected/failed)
         // — or any state that already yielded a URL — stop the loop.

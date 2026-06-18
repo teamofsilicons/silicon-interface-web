@@ -74,7 +74,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[95vh] w-[min(96vw,1100px)] max-w-none overflow-hidden p-0">
+      <DialogContent className="max-h-[95vh] w-[min(96vw,1100px)] max-w-none gap-0 overflow-hidden p-0">
         {/* Required for a11y — Radix throws a console error if there is no
             DialogTitle. We don't want it visible, so wrap in sr-only. */}
         <DialogHeader className="sr-only">

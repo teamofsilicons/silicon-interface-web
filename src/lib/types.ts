@@ -74,6 +74,9 @@ export interface SiliconPublic {
   profile_photo_url: string | null;
   profile_ascii_url?: string | null;
   tagline: string;
+  /** Owner team — lets the profile offer "invite people to this silicon". */
+  owner_team_slug?: string;
+  owner_team_name?: string;
 }
 
 export interface RoomPeer {

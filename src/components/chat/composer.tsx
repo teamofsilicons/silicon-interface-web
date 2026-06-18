@@ -1219,7 +1219,9 @@ export function Composer({
         </div>
       )}
       {attachments.length > 0 && (
-        <div className="flex flex-col gap-1.5">
+        // Inset to line up with the text box (past the 44px attach/send buttons
+        // + 8px gap on each side), so attachments are as wide as the chat box.
+        <div className="flex flex-col gap-1.5 px-[52px]">
           {attachments.map((a) => (
             <StagedAttachment
               key={a.id}

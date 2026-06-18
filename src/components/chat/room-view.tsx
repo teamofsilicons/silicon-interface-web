@@ -346,16 +346,28 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // carry richer name/photo data), then any remaining team members, deduped by
   // kind+handle. Self is never mentionable.
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
+    // The team roster only carries a member's display name ("Head of Tech
+    // Silicon"); the real @-mention id (e.g. "head-of-tech-silicon-tos") lives
+    // on RoomPeer.id. Build a name/handle → id index from the peers we know
+    // across all rooms so the roster can resolve to the actual id.
+    const idByLabel = new Map<string, string>();
+    const indexPeer = (p: Room["peers"][number]) => {
+      if (p.name) idByLabel.set(`${p.kind}:${p.name.toLowerCase()}`, p.id);
+      if (p.handle) idByLabel.set(`${p.kind}:${p.handle.toLowerCase()}`, p.id);
+    };
+    for (const r of allRooms) for (const p of r.peers) indexPeer(p);
+    for (const p of room.peers) indexPeer(p);
+
     const seen = new Map<string, MentionCandidate>();
     const add = (c: MentionCandidate) => {
-      if (myUsername && c.handle === myUsername) return;
       const key = `${c.kind}:${c.handle}`;
       if (!seen.has(key)) seen.set(key, c);
     };
+    // Room peers first — their `id` is the canonical @-mention handle.
     for (const p of room.peers) {
       add({
         kind: p.kind,
-        handle: p.handle,
+        handle: p.id,
         name: p.name,
         photoUrl: p.profile_photo_url,
         asciiUrl: p.profile_ascii_url,
@@ -363,15 +375,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     }
     for (const m of teamRoster) {
       if ((m.member_kind !== "carbon" && m.member_kind !== "silicon") || !m.member_handle) continue;
+      if (myUsername && m.member_handle === myUsername) continue;
+      const id =
+        idByLabel.get(`${m.member_kind}:${m.member_handle.toLowerCase()}`) ?? m.member_handle;
       add({
         kind: m.member_kind,
-        handle: m.member_handle,
+        handle: id,
         name: m.member_handle,
         photoUrl: m.member_photo_url,
       });
     }
     return [...seen.values()];
-  }, [room.peers, teamRoster, myUsername]);
+  }, [room.peers, allRooms, teamRoster, myUsername]);
   const contactForSender = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
@@ -2048,6 +2063,16 @@ function meaningfulProgressNote(note: string, state: ProgressState): string {
   const text = collapsePathMentions(note.trim());
   if (!text) return "";
   const normalized = text.toLowerCase().replace(/[.…]+$/g, "").trim();
+  // Internal tool-call chatter ("called tool: reply", "calling tool: …") is a
+  // mechanic, not a user-facing status — fall back to the plain state label.
+  if (
+    normalized.startsWith("called tool") ||
+    normalized.startsWith("calling tool") ||
+    normalized.startsWith("tool call") ||
+    normalized.startsWith("tool:")
+  ) {
+    return "";
+  }
   if (state === "thinking" && (normalized === "thinking" || normalized.startsWith("thought for "))) {
     return "";
   }

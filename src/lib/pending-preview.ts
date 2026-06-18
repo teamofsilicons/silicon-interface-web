@@ -57,6 +57,15 @@ export function updatePendingPreview(roomId: string, clientId: string, text: str
   }
 }
 
+/** Drop a room's pending preview regardless of which message set it — used when
+ *  a real event lands for the room (the waiting message is now superseded). */
+export function dropPendingPreview(roomId: string): void {
+  if (cache.get(roomId)) {
+    cache.set(roomId, null);
+    emit();
+  }
+}
+
 export function failPendingPreview(roomId: string, clientId: string): void {
   const prev = cache.get(roomId) ?? null;
   if (prev && prev.clientId === clientId && prev.status !== "failed") {

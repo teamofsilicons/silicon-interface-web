@@ -25,6 +25,7 @@ import {
   loadCachedMemberships,
   saveCachedMemberships,
 } from "@/lib/sidebar-cache";
+import { dropPendingPreview } from "@/lib/pending-preview";
 import {
   createPersonalFolder,
   deletePersonalFolder,
@@ -678,6 +679,9 @@ function ChatPageInner() {
           };
         }),
       );
+      // A real event landed for this room — clear any "waiting" sidebar
+      // preview so it doesn't linger beside the now-current last message.
+      if (preview !== null) dropPendingPreview(rid);
     } else if (f.type === "read_receipt") {
       // Someone read up to f.event_id. If that reaches my own latest message,
       // flip its sidebar tick to "read". (My own auto-read only ever advances

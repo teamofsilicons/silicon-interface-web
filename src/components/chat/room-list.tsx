@@ -535,18 +535,10 @@ function RoomRow({
               )}
             >
               {pending ? (
-                <span
-                  className={cn(
-                    "flex min-w-0 items-center gap-1 align-middle",
-                    pending.status === "failed" && "text-destructive",
-                  )}
-                >
-                  {pending.status === "failed" ? (
-                    <WarningCircle className="h-3 w-3 shrink-0" />
-                  ) : (
-                    <Clock className="h-3 w-3 shrink-0" />
-                  )}
-                  <span className="min-w-0 truncate">{pending.text}</span>
+                // Status (stopwatch / warning) rides in the receipt slot on the
+                // right, like the ticks — here we just show the text.
+                <span className={cn("min-w-0 truncate", pending.status === "failed" && "text-destructive")}>
+                  {pending.text}
                 </span>
               ) : draft ? (
                 <span className="italic">
@@ -563,6 +555,18 @@ function RoomRow({
               >
                 {unread > 99 ? "99+" : unread}
               </span>
+            ) : pending ? (
+              // Outgoing message still waiting / in flight — show the stopwatch
+              // (or a warning if it failed) where the read-receipt tick goes.
+              pending.status === "failed" ? (
+                <WarningCircle
+                  weight="bold"
+                  className="h-4 w-4 shrink-0 text-destructive"
+                  aria-label="failed to send"
+                />
+              ) : (
+                <Clock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="sending" />
+              )
             ) : mineLast ? (
               r.last_event?.read ? (
                 <Checks

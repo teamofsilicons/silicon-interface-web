@@ -179,7 +179,10 @@ export function ProfileDrawer({
 
   return (
     <>
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    {/* Hide the drawer while the invite dialog is up so the two don't stack
+        (the drawer's avatar + close button were bleeding through). Closing the
+        invite dialog brings the drawer back. */}
+    <Dialog open={open && !inviteOpen} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] w-full max-w-md overflow-x-hidden overflow-y-auto">
         <DialogHeader className="sr-only">
           <DialogTitle>{displayName}</DialogTitle>

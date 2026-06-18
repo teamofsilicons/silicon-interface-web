@@ -16,7 +16,7 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
       <TimezoneSync />
       <div className="flex h-screen flex-col overflow-hidden">
         <AppHeader active="chat" />
-        {/* Head-only: warns in the 7 days before a payment deadline, then "Expired". */}
+        {/* Head-only: escalating payment-deadline banner over the final 15 days. */}
         <PaymentBanner />
         <div className="flex min-h-0 flex-1 overflow-hidden">{children}</div>
       </div>

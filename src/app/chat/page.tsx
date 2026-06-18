@@ -113,6 +113,7 @@ import { CommandMenu } from "@/components/chat/command-menu";
 import { KeymapCheatsheet } from "@/components/chat/keymap-cheatsheet";
 import {
   TeamFilterBar,
+  TeamSlider,
   EMPTY_FILTERS,
   OTHERS_TAB,
   OBSERVING_TAB,
@@ -873,79 +874,114 @@ function ChatPageInner() {
     return list;
   }, [rooms, filters, sidebarQuery, roomTeams]);
 
-  // Personal grouping applies only inside a real team tab and only when not
-  // searching — the Others tab and any search fall back to the flat list.
-  const groupingActive = !!activeTeamSlug && sidebarQuery.trim() === "";
+  // Folders aggregate across the teams currently in view: the selected teams,
+  // or — when no team is selected — ALL teams (so folders still show by
+  // default). Only-Others / only-Observing selections have no team folders.
+  const relevantTeams = React.useMemo(() => {
+    if (selectedTeamSlugs.length > 0) {
+      return teams.filter((t) => selectedTeamSlugs.includes(t.slug));
+    }
+    if (wantOthers || wantObserving) return [];
+    return teams;
+  }, [selectedTeamSlugs, wantOthers, wantObserving, teams]);
 
-  const { groupSections, ungroupedRooms, displayFolders, assignmentByRoom } = React.useMemo(() => {
-    if (!groupingActive || !activeTeamSlug) {
-      return {
-        groupSections: undefined as GroupSection[] | undefined,
-        ungroupedRooms: undefined as Room[] | undefined,
-        displayFolders: [] as DisplayFolder[],
-        assignmentByRoom: {} as Record<string, string>,
+  // Grouping shows whenever we have teams in view and aren't searching.
+  const groupingActive = relevantTeams.length > 0 && sidebarQuery.trim() === "";
+
+  const { groupSections, ungroupedRooms, displayFolders, assignmentByRoom } =
+    React.useMemo(() => {
+      if (!groupingActive) {
+        return {
+          groupSections: undefined as GroupSection[] | undefined,
+          ungroupedRooms: undefined as Room[] | undefined,
+          displayFolders: [] as DisplayFolder[],
+          assignmentByRoom: {} as Record<string, string>,
+          folderTeam: {} as Record<string, string>,
+        };
+      }
+      // Merge every relevant team's folders (team-authored + personal) and their
+      // silicon→folder assignments. Folder ids are unique across teams.
+      const folders: DisplayFolder[] = [];
+      const folderIds = new Set<string>();
+      const folderTeam: Record<string, string> = {};
+      const assignAll: Record<string, string> = {};
+      for (const team of relevantTeams) {
+        const cfg = team.silicon_folders;
+        for (const f of cfg?.folders ?? []) {
+          if (folderIds.has(f.id)) continue;
+          folders.push({ id: f.id, name: f.name, source: "team" });
+          folderIds.add(f.id);
+          folderTeam[f.id] = team.slug;
+        }
+        Object.assign(assignAll, cfg?.assignments ?? {});
+      }
+      for (const team of relevantTeams) {
+        const personal = groupStore.folders
+          .filter((f) => f.teamSlug === team.slug)
+          .sort((a, b) => a.order - b.order);
+        for (const f of personal) {
+          if (folderIds.has(f.id)) continue;
+          folders.push({ id: f.id, name: f.name, source: "personal" });
+          folderIds.add(f.id);
+          folderTeam[f.id] = team.slug;
+        }
+      }
+
+      // Override wins; else a silicon peer's team-folder default; else ungrouped.
+      const resolve = (room: Room): string | null => {
+        const o = groupStore.overrides[room.room_id];
+        if (o !== undefined) return o === "" || !folderIds.has(o) ? null : o;
+        const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
+        if (peer && peer.kind === "silicon") {
+          const fid = assignAll[peer.id];
+          if (fid && folderIds.has(fid)) return fid;
+        }
+        return null;
       };
-    }
-    // Team folders + assignments authored in Glass (silicon_id → folderId).
-    const teamCfg = activeTeam?.silicon_folders;
-    const teamFolders: DisplayFolder[] = (teamCfg?.folders ?? []).map((f) => ({
-      id: f.id,
-      name: f.name,
-      source: "team" as const,
-    }));
-    const teamAssign = teamCfg?.assignments ?? {};
-    const personalFolders: DisplayFolder[] = groupStore.folders
-      .filter((f) => f.teamSlug === activeTeamSlug)
-      .sort((a, b) => a.order - b.order)
-      .map((f) => ({ id: f.id, name: f.name, source: "personal" as const }));
-    const folders = [...teamFolders, ...personalFolders]; // team first, then personal
-    const folderIds = new Set(folders.map((f) => f.id));
 
-    // Override wins; else a silicon peer's team-folder default; else ungrouped.
-    const resolve = (room: Room): string | null => {
-      const o = groupStore.overrides[room.room_id];
-      if (o !== undefined) return o === "" || !folderIds.has(o) ? null : o;
-      const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
-      if (peer && peer.kind === "silicon") {
-        const fid = teamAssign[peer.id];
-        if (fid && folderIds.has(fid)) return fid;
+      const byRoom: Record<string, string> = {};
+      const byFolder = new Map<string, Room[]>();
+      folders.forEach((f) => byFolder.set(f.id, []));
+      const ungrouped: Room[] = [];
+      for (const r of filtered) {
+        const fid = resolve(r);
+        if (fid) {
+          byFolder.get(fid)!.push(r);
+          byRoom[r.room_id] = fid;
+        } else {
+          ungrouped.push(r);
+        }
       }
-      return null;
-    };
+      const sections: GroupSection[] = folders.map((group) => ({
+        group,
+        rooms: byFolder.get(group.id) ?? [],
+      }));
+      return {
+        groupSections: sections,
+        ungroupedRooms: ungrouped,
+        displayFolders: folders,
+        assignmentByRoom: byRoom,
+        folderTeam,
+      };
+    }, [groupingActive, relevantTeams, groupStore, filtered]);
 
-    const byRoom: Record<string, string> = {};
-    const byFolder = new Map<string, Room[]>();
-    folders.forEach((f) => byFolder.set(f.id, []));
-    const ungrouped: Room[] = [];
-    for (const r of filtered) {
-      const fid = resolve(r);
-      if (fid) {
-        byFolder.get(fid)!.push(r);
-        byRoom[r.room_id] = fid;
-      } else {
-        ungrouped.push(r);
-      }
-    }
-    const sections: GroupSection[] = folders.map((group) => ({
-      group,
-      rooms: byFolder.get(group.id) ?? [],
-    }));
-    return { groupSections: sections, ungroupedRooms: ungrouped, displayFolders: folders, assignmentByRoom: byRoom };
-  }, [groupingActive, activeTeamSlug, activeTeam, groupStore, filtered]);
+  // Persistence key for the drilled-in folder: the single selected team, or a
+  // shared key when folders are aggregated across teams.
+  const openFolderKey = activeTeamSlug ?? "__all__";
 
   const groupControls = React.useMemo(() => {
-    if (!groupingActive || !activeTeamSlug) return undefined;
+    if (!groupingActive) return undefined;
     return {
       groups: displayFolders,
       assignmentByRoom,
       openGroupId,
       onOpenGroup: (groupId: string) => {
         setOpenGroupId(groupId);
-        saveOpenFolder(ownerId, activeTeamSlug, groupId);
+        saveOpenFolder(ownerId, openFolderKey, groupId);
       },
       onCloseGroup: () => {
         setOpenGroupId(null);
-        saveOpenFolder(ownerId, activeTeamSlug, null);
+        saveOpenFolder(ownerId, openFolderKey, null);
       },
       onRename: (groupId: string) => {
         const f = groupStore.folders.find((x) => x.id === groupId);
@@ -955,7 +991,7 @@ function ChatPageInner() {
         setGroupStore((prev) => deletePersonalFolder(prev, groupId));
         setOpenGroupId((cur) => {
           if (cur !== groupId) return cur;
-          saveOpenFolder(ownerId, activeTeamSlug, null);
+          saveOpenFolder(ownerId, openFolderKey, null);
           return null;
         });
       },
@@ -966,18 +1002,18 @@ function ChatPageInner() {
     };
   }, [
     groupingActive,
-    activeTeamSlug,
     displayFolders,
     assignmentByRoom,
     groupStore,
     openGroupId,
     ownerId,
+    openFolderKey,
   ]);
 
-  // On a team switch (or reload), restore that team's last drilled-in folder.
+  // On a team/filter switch (or reload), restore that view's drilled-in folder.
   React.useEffect(() => {
-    setOpenGroupId(loadOpenFolder(ownerId, activeTeamSlug));
-  }, [activeTeamSlug, ownerId]);
+    setOpenGroupId(loadOpenFolder(ownerId, openFolderKey));
+  }, [openFolderKey, ownerId]);
 
   const confirmGroupPrompt = React.useCallback(
     (name: string) => {
@@ -987,15 +1023,18 @@ function ChatPageInner() {
         return;
       }
       // create a personal folder; seed it with the room when opened from a
-      // chat's "New group…".
-      if (!activeTeamSlug) return;
+      // chat's "New group…". The folder's team is the seed room's team (when
+      // creating from a chat) or the single selected team / first team in view.
       const seedRoomId = groupPrompt.seedRoomId;
+      const seedTeam = seedRoomId ? [...roomTeams(seedRoomId)][0] : undefined;
+      const teamSlug = seedTeam ?? activeTeamSlug ?? relevantTeams[0]?.slug;
+      if (!teamSlug) return;
       setGroupStore((prev) => {
-        const { store, id } = createPersonalFolder(prev, activeTeamSlug, name);
+        const { store, id } = createPersonalFolder(prev, teamSlug, name);
         return seedRoomId ? setRoomFolder(store, seedRoomId, id) : store;
       });
     },
-    [groupPrompt, activeTeamSlug],
+    [groupPrompt, activeTeamSlug, relevantTeams, roomTeams],
   );
 
   // §7c — vim-style room navigation: j/k move through the visible list (and
@@ -1056,6 +1095,16 @@ function ChatPageInner() {
           aria-label="resize sidebar"
           className="absolute right-0 top-0 z-10 hidden h-full w-1.5 cursor-col-resize transition-colors hover:bg-border md:block"
         />
+        {/* Teams slider — above the search, acts as a multi-select filter. */}
+        <TeamSlider
+          filters={filters}
+          onChange={setFilters}
+          teams={teams.map((t) => ({ slug: t.slug, name: t.name, logo_url: t.logo_url }))}
+          hasOthers={hasOtherRooms}
+          hasObserving={hasObservedRooms}
+          unread={unreadByTab}
+          onOpenTeamSettings={(slug) => navigate(`/chat?team=${encodeURIComponent(slug)}`)}
+        />
         {/* Search + new chat. */}
         <div className="flex h-[52px] items-stretch border-b">
           <div className="flex flex-1 items-center gap-2 pl-6 pr-3 transition-colors focus-within:bg-accent/30">
@@ -1077,19 +1126,7 @@ function ChatPageInner() {
             <Plus className="h-4 w-4" />
           </button>
         </div>
-        <TeamFilterBar
-          filters={filters}
-          onChange={setFilters}
-          teams={teams.map((t) => ({ slug: t.slug, name: t.name, logo_url: t.logo_url }))}
-          hasOthers={hasOtherRooms}
-          hasObserving={hasObservedRooms}
-          unread={unreadByTab}
-          onOpenTeamSettings={
-            activeTeam
-              ? () => navigate(`/chat?team=${encodeURIComponent(activeTeam.slug)}`)
-              : undefined
-          }
-        />
+        <TeamFilterBar filters={filters} onChange={setFilters} />
         <RoomList
           rooms={filtered}
           myHandle={myUsername}

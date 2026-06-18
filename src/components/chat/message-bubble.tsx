@@ -9,8 +9,6 @@ import {
   Copy,
   DotsThree,
   DownloadSimple,
-  File as FileIcon,
-  FilePdf,
   ImageSquare,
   MusicNote,
   Share,
@@ -22,6 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
+import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { cn, messageTime } from "@/lib/utils";
@@ -32,7 +31,8 @@ import { downloadAsset, MediaPreviewer } from "./media-previewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
-import { FileName } from "@/components/chat/file-name";
+import { AttachmentCard } from "@/components/chat/attachment-card";
+import { fileGlyph, isPreviewable } from "@/components/chat/file-icon";
 import { LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
 import { RemoteBrowserCard } from "@/components/chat/remote-browser-card";
@@ -82,19 +82,25 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
   const isImage = mime.startsWith("image/");
   const isVideo = mime.startsWith("video/");
   const isVisual = isImage || isVideo;
-  const Icon = isVisual ? ImageSquare : mime.includes("pdf") ? FilePdf : FileIcon;
+  const Icon = isVisual ? ImageSquare : fileGlyph(filename, mime);
 
   // Fetch the presigned URL once on mount so visual cards can show a real
   // thumbnail and so a click can preview in place without a fetch round-trip.
-  const [url, setUrl] = React.useState<string | null>(null);
+  // Seed from the session cache so scrolling back to a pin paints instantly.
+  const [url, setUrl] = React.useState<string | null>(
+    () => getCachedMedia(mediaId)?.download_url ?? null,
+  );
   const [previewOpen, setPreviewOpen] = React.useState(false);
   React.useEffect(() => {
     if (!mediaId) return;
+    if (getCachedMedia(mediaId)?.download_url) return; // already seeded
     let alive = true;
     api
       .mediaDetail(mediaId)
       .then((r) => {
-        if (alive) setUrl(r.download_url ?? null);
+        if (!alive) return;
+        setUrl(r.download_url ?? null);
+        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
       })
       .catch(() => {});
     return () => {
@@ -102,51 +108,37 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
     };
   }, [mediaId]);
 
+  const canPreview = isPreviewable(filename, mime);
   const open = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!mediaId) return;
-    // Preview in place. If the URL hasn't landed yet, fetch it before opening
-    // so the previewer never mounts with an empty source.
-    if (url) {
-      setPreviewOpen(true);
-      return;
+    // Make sure we have the presigned URL, then either preview in place
+    // (image/video/audio/pdf/text) or download (zip, docx, …).
+    let href = url;
+    if (!href) {
+      try {
+        href = (await api.mediaDetail(mediaId)).download_url ?? null;
+        if (href) setUrl(href);
+      } catch {
+        toast.error("couldn't open attachment");
+        return;
+      }
     }
-    try {
-      const r = await api.mediaDetail(mediaId);
-      if (!r.download_url) return;
-      setUrl(r.download_url);
-      setPreviewOpen(true);
-    } catch {
-      toast.error("couldn't open attachment");
-    }
+    if (!href) return;
+    if (canPreview) setPreviewOpen(true);
+    else downloadAsset(href, filename);
   };
 
   return (
     <>
-      <button
-        type="button"
+      <AttachmentCard
+        glyph={Icon}
+        filename={filename}
+        thumbnailUrl={isVisual ? url : null}
+        isVideo={isVideo}
+        tilt={tilt}
         onClick={open}
-        title={filename}
-        style={{ transform: `rotate(${tilt}deg)` }}
-        className="pointer-events-auto flex w-32 flex-col overflow-hidden border bg-card text-left text-foreground shadow-md transition-transform hover:-translate-y-0.5 hover:rotate-0 hover:shadow-lg"
-      >
-        {/* Preview: a real thumbnail for images/video, else a big type icon. */}
-        <div className="flex h-20 w-full items-center justify-center overflow-hidden bg-muted text-muted-foreground">
-          {isImage && url ? (
-            // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL
-            <img src={url} alt="" className="h-full w-full object-cover" />
-          ) : isVideo && url ? (
-            <video src={url} muted className="h-full w-full object-cover" />
-          ) : (
-            <Icon className="h-8 w-8" weight="thin" />
-          )}
-        </div>
-        {/* Footer: small type-glyph + middle-truncated filename. */}
-        <div className="flex items-center gap-1 border-t px-2 py-1.5">
-          <Icon className="h-3 w-3 shrink-0 text-muted-foreground" weight="regular" />
-          <FileName name={filename} tailChars={8} className="text-[11px]" />
-        </div>
-      </button>
+      />
       {url && (
         <MediaPreviewer
           open={previewOpen}

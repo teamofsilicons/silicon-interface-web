@@ -16,6 +16,7 @@ import {
 } from "@/lib/notifications";
 import type { Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
+import { readRoomEventSnippet, saveRoomEventSnippet } from "@/lib/room-snippet";
 import {
   setPendingPreview,
   updatePendingPreview,
@@ -169,7 +170,6 @@ function ChatListFooter({ context }: { context?: ChatListContext }) {
 }
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const MAX_PROGRESS_LINE_CHARS = 64;
-const ROOM_SNIPPET_LIMIT = 40;
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
@@ -2366,39 +2366,6 @@ function formatActivities(
   // §1.10 — agree the verb in number: "@a is typing…" vs "@a & @b are typing…".
   const aux = handles.length === 1 ? "is" : "are";
   return `${who} ${aux} ${verb}…`;
-}
-
-function roomSnippetKey(roomId: string): string {
-  return `silicon-interface:room-snippet:${roomId}`;
-}
-
-function readRoomEventSnippet(roomId: string): LocalEvent[] | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(roomSnippetKey(roomId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { events?: Event[] };
-    if (!Array.isArray(parsed.events)) return null;
-    return parsed.events.filter((event) => event && typeof event.event_id === "string");
-  } catch {
-    return null;
-  }
-}
-
-function saveRoomEventSnippet(roomId: string, events: LocalEvent[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    const durable = events
-      .filter((event) => !event.event_id.startsWith("temp-") && event.type !== "m.progress")
-      .slice(-ROOM_SNIPPET_LIMIT)
-      .map(({ _clientId, _status, ...event }) => event);
-    window.localStorage.setItem(
-      roomSnippetKey(roomId),
-      JSON.stringify({ savedAt: Date.now(), events: durable }),
-    );
-  } catch {
-    /* Keep chat usable when localStorage is unavailable or full. */
-  }
 }
 
 function mergeServerEvents(

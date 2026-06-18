@@ -16,6 +16,7 @@ import { roomDisplay } from "@/lib/peers";
 import { playReceived, playReceivedSilicon } from "@/lib/sounds";
 import type { Contact, Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, setRoomProgress } from "@/lib/progress-cache";
+import { appendRoomEventSnippet } from "@/lib/room-snippet";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
@@ -681,6 +682,11 @@ function ChatPageInner() {
         return;
       }
       const isOpen = selectedRef.current === rid;
+      // For a CLOSED room, fold the incoming event into its cached snippet so
+      // it's already there when the user opens the chat — no ~1s wait for the
+      // api.events fetch to surface a message that already arrived over the WS.
+      // (When the room is open, RoomView owns and persists the snippet itself.)
+      if (!isOpen) appendRoomEventSnippet(rid, ev);
       const preview = eventPreview(ev);
       const countableIncoming = isCountableEvent(ev) && !mine && !isOpen;
       // Observer rooms (inter-silicon chats I only watch) never raise a
@@ -729,6 +735,7 @@ function ChatPageInner() {
                     preview,
                     at: ev.created_at,
                     sender_handle: ev.sender_handle,
+                    sender_kind: ev.sender_kind ?? null,
                     type: ev.type,
                     read: false,
                   }
@@ -782,8 +789,17 @@ function ChatPageInner() {
     // reopened or refreshed mid-task can restore its progress line — the room
     // view is unmounted while closed and never sees these frames.
     const progressRoom = "room_id" in f ? f.room_id : null;
+    // Mirror the chat's progress gating: a run's status is only shown while the
+    // silicon hasn't answered yet. Once the room's last real message is from a
+    // silicon, the chat hides the progress line — so the sidebar must too, or a
+    // stray trailing frame would leave a "working…" preview with nothing behind
+    // it in the chat.
+    const runAnswered =
+      !!progressRoom &&
+      roomsRef.current.find((r) => r.room_id === progressRoom)?.last_event?.sender_kind ===
+        "silicon";
     if (f.type === "progress" && progressRoom) {
-      if (f.state === "done") {
+      if (f.state === "done" || runAnswered) {
         markRoomWorking(progressRoom, false);
         clearRoomProgress(progressRoom);
       } else if (f.state && f.progress_group_id) {
@@ -802,7 +818,7 @@ function ChatPageInner() {
       }
     } else if (f.type === "event" && f.event.type === "m.progress" && progressRoom) {
       const state = String(f.event.content.state || "thinking");
-      if (state === "done") {
+      if (state === "done" || runAnswered) {
         markRoomWorking(progressRoom, false);
         clearRoomProgress(progressRoom);
       } else {

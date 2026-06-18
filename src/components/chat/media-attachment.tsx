@@ -5,17 +5,17 @@ import {
   ArrowsOutSimple,
   CircleNotch,
   DownloadSimple,
-  File,
-  FilePdf,
   ShieldWarning,
   WarningCircle,
 } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
+import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import type { MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { FileName } from "./file-name";
+import { AttachmentCard } from "./attachment-card";
+import { fileGlyph, isPreviewable } from "./file-icon";
 import { MediaPreviewer, downloadAsset } from "./media-previewer";
 import { SiliconAudio } from "./silicon-audio";
 
@@ -50,7 +50,10 @@ export function MediaAttachment({
   localDurationMs?: number | null;
   localPeaks?: number[] | null;
 }) {
-  const [url, setUrl] = React.useState<string | null>(localUrl ?? null);
+  // Seed from the session cache so a re-mounted (scrolled-back-to) attachment
+  // paints instantly with the right dimensions — no spinner, no aspect snap.
+  const seeded = localUrl ? null : getCachedMedia(mediaId);
+  const [url, setUrl] = React.useState<string | null>(localUrl ?? seeded?.download_url ?? null);
   const [media, setMedia] = React.useState<MediaObject | null>(
     localUrl
       ? ({
@@ -70,7 +73,7 @@ export function MediaAttachment({
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         } as MediaObject)
-      : null,
+      : (seeded?.media ?? null),
   );
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
@@ -125,6 +128,7 @@ export function MediaAttachment({
         errors = 0;
         setMedia(r.media);
         setUrl(r.download_url);
+        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
         // Keep polling only while the object is still being produced and we
         // don't yet have a usable URL. Terminal states (ready/infected/failed)
         // — or any state that already yielded a URL — stop the loop.
@@ -382,30 +386,24 @@ export function MediaAttachment({
     );
   }
 
-  // PDF — a clean, clearly-clickable document card. Clicking opens the
-  // fullscreen previewer; download lives in the message's options menu.
-  if (isPdf && !isDev) {
-    return (
-      <>
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => setPreviewOpen(true)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") setPreviewOpen(true);
-          }}
-          aria-label={`preview ${filename}`}
-          className="group flex w-60 max-w-full cursor-pointer items-center gap-3 bg-card px-3 py-3 text-foreground transition-colors hover:bg-accent"
-        >
-          <FilePdf className="h-9 w-9 shrink-0" weight="light" />
-          <div className="min-w-0 flex-1">
-            <FileName name={filename} className="text-sm font-medium" />
-            <div className="truncate text-[11px] text-muted-foreground">
-              {media?.size ? `${formatBytes(media.size)} · ` : ""}click to preview
-            </div>
-          </div>
-          <ArrowsOutSimple className="h-4 w-4 shrink-0 opacity-50 transition-opacity group-hover:opacity-100" />
-        </div>
+  // Everything else (PDF, markdown/text, archives, docs, unknown types) — the
+  // SAME card used for attachment pins, so standalone files look consistent.
+  // Previewable types open the in-place previewer; the rest download directly.
+  const Glyph = fileGlyph(filename, m);
+  const sizeLabel = media?.size ? formatBytes(media.size) : null;
+  const canPreview = !isDev && isPreviewable(filename, m);
+  return (
+    <>
+      <AttachmentCard
+        glyph={Glyph}
+        filename={filename}
+        sizeLabel={sizeLabel}
+        onClick={() => {
+          if (canPreview) setPreviewOpen(true);
+          else if (url) downloadAsset(url, filename);
+        }}
+      />
+      {canPreview && (
         <MediaPreviewer
           open={previewOpen}
           onOpenChange={setPreviewOpen}
@@ -413,24 +411,8 @@ export function MediaAttachment({
           mime={m}
           filename={filename}
         />
-      </>
-    );
-  }
-
-  // Fallback: file chip with download. Used for unknown types or any asset
-  // served via a dev placeholder URL. Same `text-foreground` rationale as
-  // the PDF chip — pin the ink color so the chip stays readable inside a
-  // primary-colored "mine" bubble.
-  return (
-    <div className="flex w-60 max-w-full items-center gap-2 bg-card px-3 py-2 text-xs text-foreground">
-      <File className="h-4 w-4 shrink-0" />
-      <FileName name={filename} className="flex-1" />
-      {!isDev && (
-        <IconChip onClick={() => downloadAsset(url, filename)} label="download">
-          <DownloadSimple />
-        </IconChip>
       )}
-    </div>
+    </>
   );
 }
 

@@ -142,6 +142,9 @@ export interface RoomLastEvent {
   at: string;
   /** Sender handle, when applicable (system events have null). */
   sender_handle: string | null;
+  /** Who sent it — lets the sidebar mirror the chat's progress gating (a run's
+   *  status is hidden once the silicon has replied). */
+  sender_kind?: "carbon" | "silicon" | "system" | null;
   /** The Event.type, so the sidebar can prefix or icon-decorate appropriately. */
   type: string;
   /** True when someone other than the sender has read up to this event —

@@ -21,6 +21,8 @@ import { toast } from "sonner";
 
 import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
+import { usePdfThumbnail } from "@/lib/pdf-thumb";
+import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { cn, messageTime } from "@/lib/utils";
@@ -81,6 +83,7 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
   const filename = String(content.filename ?? content.caption ?? "file");
   const isImage = mime.startsWith("image/");
   const isVideo = mime.startsWith("video/");
+  const isPdf = mime.includes("pdf") || filename.toLowerCase().endsWith(".pdf");
   const isVisual = isImage || isVideo;
   const Icon = isVisual ? ImageSquare : fileGlyph(filename, mime);
 
@@ -108,6 +111,13 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
     };
   }, [mediaId]);
 
+  // Mini first-page preview for PDFs, rendered once the presigned URL lands.
+  const pdfThumb = usePdfThumbnail(isPdf ? url : null, mediaId, isPdf);
+  const thumbnailUrl = isVisual ? url : isPdf ? pdfThumb : null;
+  // Content peek for text/markdown/code files.
+  const textLike = !isVisual && !isPdf && isTextLike(filename, mime);
+  const textPeek = useTextSnippet(textLike ? url : null, mediaId, textLike);
+
   const canPreview = isPreviewable(filename, mime);
   const open = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -134,8 +144,9 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
       <AttachmentCard
         glyph={Icon}
         filename={filename}
-        thumbnailUrl={isVisual ? url : null}
+        thumbnailUrl={thumbnailUrl}
         isVideo={isVideo}
+        textPreview={textPeek}
         tilt={tilt}
         onClick={open}
       />

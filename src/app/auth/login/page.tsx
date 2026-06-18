@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { consumePostAuthRedirect } from "@/lib/post-auth-redirect";
 import { track } from "@/lib/analytics";
 import { toastError } from "@/lib/errors";
 import { useResendCooldown } from "@/lib/use-resend";
@@ -186,7 +187,9 @@ function LoginPageInner() {
         } catch {
           toast.success("welcome back");
         }
-        router.replace("/chat");
+        // Return an invitee to the invite (or other pending target) instead of
+        // dumping them on /chat.
+        router.replace(consumePostAuthRedirect() ?? "/chat");
       } catch (e) {
         // Mirror the failure into the OTP field's aria-live region, then
         // re-throw so `wrap` still surfaces the toast for sighted users.

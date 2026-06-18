@@ -6,6 +6,7 @@ import { Check, UploadSimple } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { consumePostAuthRedirect } from "@/lib/post-auth-redirect";
 import { track } from "@/lib/analytics";
 import { toastError } from "@/lib/errors";
 import { generateAndStoreAvatar } from "@/lib/avatar";
@@ -295,7 +296,8 @@ function OnboardingInner() {
       return;
     }
     if (step === SCREENS.length - 1) {
-      router.replace("/chat");
+      // A new user who came in via an invite returns there to finish joining.
+      router.replace(consumePostAuthRedirect() ?? "/chat");
       return;
     }
     setStep((s) => s + 1);

@@ -20,6 +20,7 @@ export function AttachmentCard({
   filename,
   thumbnailUrl,
   isVideo,
+  textPreview,
   sizeLabel,
   tilt,
   onClick,
@@ -30,6 +31,9 @@ export function AttachmentCard({
   /** Presigned URL for a real image/video thumbnail; falls back to the glyph. */
   thumbnailUrl?: string | null;
   isVideo?: boolean;
+  /** A head of the file's text content — shown as a document-style peek when
+   *  there's no image/video thumbnail (markdown / text / code files). */
+  textPreview?: string | null;
   sizeLabel?: string | null;
   /** Degrees of rotation (pins only). Omit for a flat standalone card. */
   tilt?: number;
@@ -49,8 +53,9 @@ export function AttachmentCard({
         className,
       )}
     >
-      {/* Preview: a real thumbnail for images/video, else a big type glyph. */}
-      <div className="flex h-24 w-full items-center justify-center overflow-hidden bg-muted text-muted-foreground">
+      {/* Preview: a real thumbnail for images/video, a content peek for text/md,
+          else a big type glyph. */}
+      <div className="relative flex h-24 w-full items-center justify-center overflow-hidden bg-muted text-muted-foreground">
         {thumbnailUrl ? (
           isVideo ? (
             <video src={thumbnailUrl} muted className="h-full w-full object-cover" />
@@ -58,6 +63,15 @@ export function AttachmentCard({
             // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL
             <img src={thumbnailUrl} alt="" className="h-full w-full object-cover" />
           )
+        ) : textPreview ? (
+          <>
+            {/* tiny document-style peek of the file's text, fading out at the
+                bottom so a clipped last line doesn't look broken. */}
+            <pre className="absolute inset-0 overflow-hidden whitespace-pre-wrap break-words bg-card p-2 text-left font-mono text-[5px] leading-[1.5] text-foreground/80">
+              {textPreview}
+            </pre>
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-b from-transparent to-card" />
+          </>
         ) : (
           <Glyph className="h-9 w-9 transition-transform group-hover:scale-110" weight="thin" />
         )}

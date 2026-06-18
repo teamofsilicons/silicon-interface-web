@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
 import { FileName } from "@/components/chat/file-name";
+import { MarkdownView } from "@/components/chat/markdown-view";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
 /** Upload to a presigned URL via XHR (fetch can't report upload progress).
@@ -120,6 +121,18 @@ const SILICON_EMPTY_HOLD_MS = 10_000;
 // "wait 1 more minute" extends the post-empty hold by this much.
 const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
+
+// Show a live markdown preview only once the draft has a block-level markdown
+// construct (heading, list, blockquote, fenced code, table) or a link/image —
+// a stray "*" in a normal sentence shouldn't pop a preview.
+const MD_BLOCK_RE = /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```|\|.*\|)/;
+function looksLikeMarkdown(s: string): boolean {
+  if (!s || s.length < 2) return false;
+  if (s.includes("```")) return true;
+  if (MD_BLOCK_RE.test(s)) return true;
+  if (/\[[^\]]+\]\([^)]+\)/.test(s)) return true; // [text](url) / ![alt](src)
+  return false;
+}
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
 const MAX_ATTACHMENTS = 10;
 
@@ -876,10 +889,24 @@ export function Composer({
         body,
         replyToEventId: replyTo?.event_id,
       };
-      delayedTextQueueRef.current = [item];
-      setQueuedTextCount(1);
+      // Append to the held batch (don't replace), so a follow-up sent while an
+      // earlier message is still held merges in AND restarts the 5s window —
+      // every send re-enters the hold, instead of the second send flushing
+      // immediately and skipping the hold for the rest of the burst.
+      const isFirst = delayedTextQueueRef.current.length === 0;
+      delayedTextQueueRef.current = [...delayedTextQueueRef.current, item];
+      const queue = delayedTextQueueRef.current;
+      setQueuedTextCount(queue.length);
+      // Back to the open merge window (not "holding…") — the restarted timer
+      // re-decides whether to hold once it elapses.
       setQueuePaused(false);
-      onOptimisticAdd(clientId, buildQueuedPayload([item]));
+      onHoldStateChange?.(false);
+      if (isFirst) {
+        onOptimisticAdd(clientId, buildQueuedPayload(queue));
+      } else {
+        // Grow the existing pending bubble to show the merged text.
+        onOptimisticUpdate?.(queue[0].clientId, buildQueuedPayload(queue));
+      }
       clearDelayTimer();
       delayTimerRef.current = setTimeout(() => {
         delayTimerRef.current = null;
@@ -903,6 +930,7 @@ export function Composer({
       onClearReply,
       onHoldStateChange,
       onOptimisticAdd,
+      onOptimisticUpdate,
       replyTo,
     ],
   );
@@ -1051,16 +1079,10 @@ export function Composer({
     // Text only — optimistic, doesn't block the input.
     if (!body) return;
     if (delayTextForSilicon) {
-      if (delayedTextQueueRef.current.length) {
-        void flushDelayedTextQueue({
-          clientId: newClientId(),
-          body,
-          replyToEventId: replyTo?.event_id,
-        });
-        onClearReply?.();
-      } else {
-        queueDelayedTextSend(body);
-      }
+      // Every send (first or follow-up) enters the hold: it merges into the
+      // held batch and restarts the 5s window. The batch goes out once the
+      // window elapses with no new send / typing, or via "send now".
+      queueDelayedTextSend(body);
       setText("");
       persistDraft("");
       return;
@@ -1328,6 +1350,18 @@ export function Composer({
               </button>
             </>
           )}
+        </div>
+      )}
+      {/* Live markdown preview — appears once the draft contains markdown, so
+          you can see how it'll render as you write it. */}
+      {looksLikeMarkdown(text) && (
+        <div className="border bg-card">
+          <div className="label-mono border-b px-2 py-1 text-[10px] text-muted-foreground">
+            markdown preview
+          </div>
+          <div className="max-h-40 overflow-y-auto px-3 py-2">
+            <MarkdownView source={text} />
+          </div>
         </div>
       )}
       {/* One bordered field. Controls stay fixed-height at the bottom while

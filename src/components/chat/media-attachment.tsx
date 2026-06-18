@@ -11,6 +11,8 @@ import {
 
 import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
+import { usePdfThumbnail } from "@/lib/pdf-thumb";
+import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import type { MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -77,6 +79,17 @@ export function MediaAttachment({
   );
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
+
+  // Mini first-page preview for PDF attachments. Declared at the top (before the
+  // status/loading early returns) to keep the Hook order stable.
+  const isPdfAttachment =
+    (mime || "").toLowerCase().includes("pdf") ||
+    (filenameProp || "").toLowerCase().endsWith(".pdf");
+  const pdfThumb = usePdfThumbnail(isPdfAttachment ? url : null, mediaId, isPdfAttachment);
+  // Content peek for text/markdown/code attachments (only matters for the file
+  // card; images/video/audio render their own rich inline preview).
+  const textLikeAttachment = isTextLike(filenameProp, mime);
+  const textPeek = useTextSnippet(textLikeAttachment ? url : null, mediaId, textLikeAttachment);
 
   // §6.2 — Pending media (e.g. an in-flight TTS render) reports `status:
   // "pending"` with a null `download_url`. Rather than show an inert
@@ -177,7 +190,6 @@ export function MediaAttachment({
   const isImage = m.startsWith("image/") || media?.kind === "image";
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/") || media?.kind === "voice" || media?.kind === "tts_output";
-  const isPdf = m.includes("pdf");
   const isDev = !!url && (url.includes("dev-download.local") || url.includes("dev-upload.local"));
 
   // Decide the placeholder shape *before* the URL is known, so the bubble
@@ -397,6 +409,8 @@ export function MediaAttachment({
       <AttachmentCard
         glyph={Glyph}
         filename={filename}
+        thumbnailUrl={pdfThumb}
+        textPreview={textPeek}
         sizeLabel={sizeLabel}
         onClick={() => {
           if (canPreview) setPreviewOpen(true);

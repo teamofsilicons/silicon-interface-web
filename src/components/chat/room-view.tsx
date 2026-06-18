@@ -1514,34 +1514,37 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   React.useEffect(() => {
     const firstKey = timelineItems[0]?.key ?? null;
     const prev = prevTimelineRef.current;
-    if (prev.roomId === room.room_id && prev.firstKey && firstKey !== prev.firstKey) {
+    // Only anchor real loadOlder prepends — i.e. after the room's initial bottom
+    // landing. The cache → server merge also grows the front, but we deliberately
+    // jump to the bottom for that one, so anchoring it would fight the jump and
+    // produce the open-time "jumps up then settles" glitch.
+    const initialDone = didInitialBottomRef.current === room.room_id;
+    if (initialDone && prev.roomId === room.room_id && prev.firstKey && firstKey !== prev.firstKey) {
       const movedTo = timelineItems.findIndex((it) => it.key === prev.firstKey);
       if (movedTo > 0) setFirstItemIndex((fi) => fi - movedTo);
     }
     prevTimelineRef.current = { roomId: room.room_id, firstKey };
   }, [timelineItems, room.room_id]);
 
-  // Land at the bottom when a room's content first appears — `initialTopMostItemIndex`
-  // alone can miss it when items hydrate after mount (cache → server merge), so
-  // we explicitly jump once per room after load settles.
+  // Land at the bottom once per room — AFTER the server load settles. Doing it
+  // on the cached render instead caused a visible "loads → jumps → settles"
+  // glitch: the cache painted + scrolled, then the server merge (prepended
+  // history, progress placement) reflowed and `followOutput` smooth-scrolled
+  // back down. The cached paint already opens at the bottom via
+  // `initialTopMostItemIndex`; here we just snap to the true bottom (instantly,
+  // no animation) once `hydrated` flips, and only if the user is still parked
+  // there.
   const didInitialBottomRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (loading || timelineItems.length === 0) return;
+    if (!hydrated || timelineItems.length === 0) return;
     if (didInitialBottomRef.current === room.room_id) return;
     didInitialBottomRef.current = room.room_id;
-    stickToBottomRef.current = true;
-    const jump = () => virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+    if (!stickToBottomRef.current) return;
+    const jump = () =>
+      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    // The 200ms safety jump is only to catch late-hydrating content — if the
-    // user has already scrolled up by then, don't yank them back down.
-    const t = window.setTimeout(() => {
-      if (stickToBottomRef.current) jump();
-    }, 200);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.clearTimeout(t);
-    };
-  }, [room.room_id, loading, timelineItems.length]);
+    return () => cancelAnimationFrame(raf);
+  }, [room.room_id, hydrated, timelineItems.length]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {

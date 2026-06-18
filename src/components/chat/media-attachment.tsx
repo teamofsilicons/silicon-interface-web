@@ -15,6 +15,7 @@ import { api } from "@/lib/api";
 import type { MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+import { FileName } from "./file-name";
 import { MediaPreviewer, downloadAsset } from "./media-previewer";
 import { SiliconAudio } from "./silicon-audio";
 
@@ -398,7 +399,7 @@ export function MediaAttachment({
         >
           <FilePdf className="h-9 w-9 shrink-0" weight="light" />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">{filename}</div>
+            <FileName name={filename} className="text-sm font-medium" />
             <div className="truncate text-[11px] text-muted-foreground">
               {media?.size ? `${formatBytes(media.size)} · ` : ""}click to preview
             </div>
@@ -423,7 +424,7 @@ export function MediaAttachment({
   return (
     <div className="flex w-60 max-w-full items-center gap-2 bg-card px-3 py-2 text-xs text-foreground">
       <File className="h-4 w-4 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{filename}</span>
+      <FileName name={filename} className="flex-1" />
       {!isDev && (
         <IconChip onClick={() => downloadAsset(url, filename)} label="download">
           <DownloadSimple />

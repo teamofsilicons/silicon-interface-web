@@ -23,6 +23,31 @@ export function relativeTime(iso: string | Date): string {
   return d.toLocaleDateString();
 }
 
+// Sidebar conversation-list timestamps:
+//   • under a minute        → "just now"
+//   • under an hour         → "8m"
+//   • later today           → clock time ("3:42 PM")
+//   • earlier this week     → weekday ("Mon")
+//   • older                 → short date ("12 Jun")
+export function sidebarTime(iso: string | Date): string {
+  const d = typeof iso === "string" ? new Date(iso) : iso;
+  const ms = d.getTime();
+  if (Number.isNaN(ms)) return "";
+  const now = new Date();
+  const diff = (now.getTime() - ms) / 1000;
+  if (diff < 0) return "just now"; // clock-skew clamp
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  // Calendar-day delta so "today/this week" track real day boundaries, not a
+  // rolling 24h window (an 11pm message is still "today" at 1am the next day
+  // only if it's the same date — otherwise it reads as a weekday).
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const daysAgo = Math.round((startOf(now) - startOf(d)) / 86_400_000);
+  if (daysAgo <= 0) return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (daysAgo < 7) return d.toLocaleDateString(undefined, { weekday: "short" });
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
 // Message-timeline timestamps: relative only within the first hour, then the
 // message's own clock time. Older days are disambiguated by the date band the
 // timeline renders at each day boundary, so the time alone is never ambiguous.

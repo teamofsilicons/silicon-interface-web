@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { DownloadSimple } from "@phosphor-icons/react/dist/ssr";
+import { CircleNotch, DownloadSimple } from "@phosphor-icons/react/dist/ssr";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -10,6 +10,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
+
+import { MarkdownView } from "./markdown-view";
 
 interface Props {
   open: boolean;
@@ -29,10 +32,43 @@ interface Props {
  */
 export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Props) {
   const m = (mime || "").toLowerCase();
+  const name = (filename || "").toLowerCase();
   const isImage = m.startsWith("image/");
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/");
   const isPdf = m.includes("pdf");
+  // Markdown / plain-text: render inline. Detect by mime or extension, since
+  // .md is often served as application/octet-stream or text/plain.
+  const isMarkdown =
+    m.includes("markdown") || /\.(md|markdown|mdx)$/.test(name);
+  const isText =
+    isMarkdown ||
+    m.startsWith("text/") ||
+    /\.(txt|text|log|csv|json)$/.test(name);
+
+  // Fetch text content lazily when a text/markdown file is previewed.
+  const [text, setText] = React.useState<string | null>(null);
+  const [textError, setTextError] = React.useState(false);
+  React.useEffect(() => {
+    if (!open || !isText || !url) return;
+    let alive = true;
+    setText(null);
+    setTextError(false);
+    fetch(url, { mode: "cors" })
+      .then((r) => {
+        if (!r.ok) throw new Error(`status ${r.status}`);
+        return r.text();
+      })
+      .then((t) => {
+        if (alive) setText(t);
+      })
+      .catch(() => {
+        if (alive) setTextError(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, isText, url]);
 
   const label = filename?.trim() || "preview";
 
@@ -59,7 +95,13 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             <DownloadSimple /> download
           </Button>
         </div>
-        <div className="flex max-h-[82vh] min-h-[40vh] items-center justify-center overflow-auto bg-card">
+        <div
+          className={cn(
+            "flex max-h-[82vh] min-h-[40vh] overflow-auto bg-card",
+            // Text is top-left aligned and scrolls; media is centered.
+            isText ? "items-start justify-start" : "items-center justify-center",
+          )}
+        >
           {isImage && (
             // eslint-disable-next-line @next/next/no-img-element -- presigned/public S3
             <img
@@ -81,7 +123,26 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
               className="h-[80vh] w-full border-0"
             />
           )}
-          {!isImage && !isVideo && !isAudio && !isPdf && (
+          {isText && (
+            <div className="w-full p-6">
+              {textError ? (
+                <p className="text-sm text-muted-foreground">
+                  couldn&rsquo;t load the file — use the download button.
+                </p>
+              ) : text === null ? (
+                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <CircleNotch className="h-4 w-4 animate-spin" /> loading…
+                </p>
+              ) : isMarkdown ? (
+                <MarkdownView source={text} className="mx-auto max-w-3xl" />
+              ) : (
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                  {text}
+                </pre>
+              )}
+            </div>
+          )}
+          {!isImage && !isVideo && !isAudio && !isPdf && !isText && (
             <p className="p-12 text-sm text-muted-foreground">
               no inline preview available - use the download button.
             </p>

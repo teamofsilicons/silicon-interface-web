@@ -23,7 +23,7 @@ import { roomDisplay } from "@/lib/peers";
 import { contactKey } from "@/lib/use-contacts";
 import { useDraft } from "@/lib/drafts";
 import { usePendingPreview } from "@/lib/pending-preview";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, sidebarTime } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -525,7 +525,7 @@ function RoomRow({
                 unread > 0 ? "font-medium text-foreground" : "text-muted-foreground",
               )}
             >
-              {relativeTime(r.last_event?.at ?? r.updated_at)}
+              {sidebarTime(r.last_event?.at ?? r.updated_at)}
             </span>
           </div>
           {/* Last-message preview (one line, type-aware) + unread

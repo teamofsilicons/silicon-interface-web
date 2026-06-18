@@ -32,6 +32,7 @@ import { downloadAsset, MediaPreviewer } from "./media-previewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
+import { FileName } from "@/components/chat/file-name";
 import { LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
 import { RemoteBrowserCard } from "@/components/chat/remote-browser-card";
@@ -140,10 +141,10 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
             <Icon className="h-8 w-8" weight="thin" />
           )}
         </div>
-        {/* Footer: small type-glyph + truncated filename. */}
+        {/* Footer: small type-glyph + middle-truncated filename. */}
         <div className="flex items-center gap-1 border-t px-2 py-1.5">
           <Icon className="h-3 w-3 shrink-0 text-muted-foreground" weight="regular" />
-          <span className="min-w-0 truncate text-[11px]">{filename}</span>
+          <FileName name={filename} tailChars={8} className="text-[11px]" />
         </div>
       </button>
       {url && (

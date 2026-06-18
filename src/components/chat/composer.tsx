@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
+import { FileName } from "@/components/chat/file-name";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
 /** Upload to a presigned URL via XHR (fetch can't report upload progress).
@@ -222,9 +223,7 @@ function StagedAttachment({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-xs font-medium" title={file.name}>
-          {file.name}
-        </div>
+        <FileName name={file.name} className="text-xs font-medium" />
         <div className="label-mono text-[10px] text-muted-foreground">
           {uploading
             ? `${formatBytes(uploadLoaded ?? (file.size * (uploadPct ?? 0)) / 100)} / ${formatBytes(file.size)} (${uploadPct}%)`

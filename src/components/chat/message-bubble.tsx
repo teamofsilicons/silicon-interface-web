@@ -891,6 +891,7 @@ function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
             <div className="break-words">
               <MarkdownView
                 source={body}
+                compact
                 className={cn("text-sm", isMine && "text-primary-foreground")}
               />
               {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}

@@ -1919,6 +1919,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               align: "end",
             }}
             computeItemKey={(_, item) => item.key}
+            // A rough average row height so Virtuoso estimates scroll offsets
+            // well before each row is measured — cuts the blank flashes during
+            // fast scrolling through not-yet-measured rows.
+            defaultItemHeight={96}
             itemContent={(_, item) => (
               <div className="px-6" style={{ display: "flow-root" }}>
                 {renderTimelineItem(item)}

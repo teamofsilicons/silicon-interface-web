@@ -297,10 +297,15 @@ export function MediaAttachment({
         />
       );
     }
+    // A file/pdf/zip whose URL hasn't resolved yet: render the SAME fixed-size
+    // card we'll show once it loads (no "loading…" text, no size snap). The
+    // glyph + filename need no URL; the thumbnail/preview fills in or the click
+    // fetches the URL on demand.
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-        <CircleNotch className="h-3 w-3 animate-spin" /> loading…
-      </span>
+      <AttachmentCard
+        glyph={fileGlyph(filenameProp || caption || "", m)}
+        filename={filenameProp?.trim() || caption?.trim() || "file"}
+      />
     );
   }
 

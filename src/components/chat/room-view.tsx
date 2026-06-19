@@ -33,7 +33,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import {
   Composer,
@@ -134,38 +133,21 @@ const PROGRESS_STALE_HARD_MS = 100_000;
 // Backend search: hits per block (page) and the debounce before firing a query.
 const SEARCH_INTERVAL = 40;
 const SEARCH_DEBOUNCE_MS = 280;
-// Virtuoso's first-item index starts high so prepending older history can
-// decrement it (keeping the scroll position anchored) without going negative.
-const VIRTUOSO_FIRST_ITEM_BASE = 1_000_000;
 
-// Context + header/footer for the virtualized timeline. Header shows the
-// load-earlier indicator (loading is auto-triggered by startReached); footer
-// carries the composer's "holding…" state and the bottom padding.
-type ChatListContext = { loadingOlder: boolean; holdingNode: React.ReactNode };
-function ChatListHeader({ context }: { context?: ChatListContext }) {
-  // Keep a CONSTANT height whether or not we're loading: toggling the
-  // "loading earlier…" line used to grow/shrink the header at the top of the
-  // list, which shoved the whole timeline up and down as you scrolled into
-  // history. Always reserve the row and just fade the text in/out.
+// The "loading earlier…" indicator at the top of the timeline. Constant height
+// (just fades in/out) so toggling it never shoves the list up/down.
+function ChatListHeader({ loadingOlder }: { loadingOlder: boolean }) {
   return (
     <div className="flex justify-center pb-2 pt-4">
       <span
         className={cn(
           "label-mono text-[11px] text-muted-foreground transition-opacity",
-          context?.loadingOlder ? "opacity-100" : "opacity-0",
+          loadingOlder ? "opacity-100" : "opacity-0",
         )}
       >
         loading earlier…
       </span>
     </div>
-  );
-}
-function ChatListFooter({ context }: { context?: ChatListContext }) {
-  return (
-    <>
-      {context?.holdingNode ? <div className="px-6">{context.holdingNode}</div> : null}
-      <div className="h-4" />
-    </>
   );
 }
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
@@ -343,19 +325,19 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   );
 
   const sectionRef = React.useRef<HTMLElement>(null);
-  // The search path still uses a plain ScrollArea (small result sets); the main
-  // timeline is virtualized with Virtuoso.
+  // The main timeline is a plain scroll container (like WhatsApp/Slack/Telegram
+  // web): the browser's native scroll-anchoring keeps the viewport steady when
+  // content above it loads (images) or is prepended (older history), so nothing
+  // shifts — and there are no virtualization blank-flashes. The window is small
+  // (a page at a time), so the DOM node count stays bounded.
   const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
-  const virtuosoRef = React.useRef<VirtuosoHandle>(null);
-  // Tracks whether the user is parked at the bottom (set by Virtuoso's
-  // atBottomStateChange) — gates the "stick to bottom" behavior.
+  const scrollerRef = React.useRef<HTMLDivElement | null>(null);
+  // Tracks whether the user is parked at the bottom — gates "stick to bottom".
   const stickToBottomRef = React.useRef(true);
-  // Virtuoso prepend anchoring: `firstItemIndex` shrinks as older history is
-  // prepended, so the viewport stays put instead of jumping. Reset per room.
-  const [firstItemIndex, setFirstItemIndex] = React.useState(VIRTUOSO_FIRST_ITEM_BASE);
 
   const scrollToBottom = React.useCallback((behavior: "auto" | "smooth" = "auto") => {
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior });
+    const el = scrollerRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior });
   }, []);
 
   const requestBottomStick = React.useCallback(
@@ -837,18 +819,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     return () => window.clearInterval(id);
   }, [activeProgress]);
 
-  // ----- Scroll anchoring (Virtuoso) + auto-read -----
-  // Reset the prepend anchor + bottom-stick when the room changes (Virtuoso is
-  // keyed by room, so it remounts and starts at the bottom).
+  // ----- Scroll + auto-read -----
+  // Reset bottom-stick when the room changes (we start at the bottom).
   React.useEffect(() => {
-    setFirstItemIndex(VIRTUOSO_FIRST_ITEM_BASE);
     stickToBottomRef.current = true;
   }, [room.room_id]);
-
-  const prevTimelineRef = React.useRef<{ roomId: string; firstKey: string | null }>({
-    roomId: room.room_id,
-    firstKey: null,
-  });
 
   // Auto-read: derive the latest event from someone other than me, and only
   // POST when *that event_id* changes. The previous version depended on the
@@ -1517,57 +1492,35 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     activeAnchorId,
   ]);
 
-  // When older history is prepended (loadOlder), `timelineItems` grows at the
-  // front. Find where the previous first item moved to and shrink firstItemIndex
-  // by that delta so Virtuoso holds the viewport in place. Appends (new
-  // messages) and mid-list changes (the progress line) leave the front intact.
-  React.useEffect(() => {
-    const firstKey = timelineItems[0]?.key ?? null;
-    const prev = prevTimelineRef.current;
-    // Only anchor real loadOlder prepends — i.e. after the room's initial bottom
-    // landing. The cache → server merge also grows the front, but we deliberately
-    // jump to the bottom for that one, so anchoring it would fight the jump and
-    // produce the open-time "jumps up then settles" glitch.
-    const initialDone = didInitialBottomRef.current === room.room_id;
-    if (initialDone && prev.roomId === room.room_id && prev.firstKey && firstKey !== prev.firstKey) {
-      const movedTo = timelineItems.findIndex((it) => it.key === prev.firstKey);
-      if (movedTo > 0) setFirstItemIndex((fi) => fi - movedTo);
+  // Keep the viewport pinned to the bottom across content changes when the user
+  // is parked there. Native scroll-anchoring handles content ABOVE the viewport
+  // (images loading, older history prepended) — but appending below it doesn't
+  // move the anchor, so we explicitly stick to the bottom for new messages /
+  // progress. Runs as a layout effect so there's no flash before the scroll.
+  React.useLayoutEffect(() => {
+    if (stickToBottomRef.current) {
+      const el = scrollerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     }
-    prevTimelineRef.current = { roomId: room.room_id, firstKey };
-  }, [timelineItems, room.room_id]);
+  }, [timelineItems]);
 
-  // Land at the bottom once per room — AFTER the server load settles. Doing it
-  // on the cached render instead caused a visible "loads → jumps → settles"
-  // glitch: the cache painted + scrolled, then the server merge (prepended
-  // history, progress placement) reflowed and `followOutput` smooth-scrolled
-  // back down. The cached paint already opens at the bottom via
-  // `initialTopMostItemIndex`; here we just snap to the true bottom (instantly,
-  // no animation) once `hydrated` flips, and only if the user is still parked
-  // there.
+  // Land at the bottom once per room, after the server load settles, then a few
+  // re-snaps as late content (images / pdf thumbs) grows the layout.
   const didInitialBottomRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!hydrated || timelineItems.length === 0) return;
     if (didInitialBottomRef.current === room.room_id) return;
     didInitialBottomRef.current = room.room_id;
-    // Snap to the true bottom once server data is in, then re-snap as late
-    // content (images / pdf thumbs / markdown) grows the layout. The FIRST
-    // snaps are unconditional — Virtuoso reports atBottom=false during the
-    // unsettled initial render, which would otherwise (via stickToBottomRef)
-    // cancel the very jump that puts us at the bottom. Later retries defer to
-    // the ref so a user who scrolls up in the first second isn't yanked back.
     stickToBottomRef.current = true;
-    const jump = () =>
-      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+    const jump = () => {
+      const el = scrollerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    };
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    const eager = [80, 200].map((ms) => window.setTimeout(jump, ms));
-    const guarded = [450, 800].map((ms) =>
-      window.setTimeout(() => {
-        if (stickToBottomRef.current) jump();
-      }, ms),
-    );
+    const timers = [80, 250, 600].map((ms) => window.setTimeout(jump, ms));
     return () => {
       cancelAnimationFrame(raf);
-      [...eager, ...guarded].forEach((t) => window.clearTimeout(t));
+      timers.forEach((t) => window.clearTimeout(t));
     };
   }, [room.room_id, hydrated, timelineItems.length]);
 
@@ -1906,40 +1859,33 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         // Virtualized main timeline — only the visible rows are in the DOM, so it
         // scales to very long histories. Virtuoso handles dynamic heights,
         // stick-to-bottom (followOutput), and prepend anchoring (firstItemIndex).
-        <div className="min-h-0 flex-1" data-private>
-          <Virtuoso
-            ref={virtuosoRef}
-            key={room.room_id}
-            style={{ height: "100%" }}
-            data={timelineItems}
-            context={{ loadingOlder, holdingNode }}
-            firstItemIndex={firstItemIndex}
-            initialTopMostItemIndex={{
-              index: Math.max(0, timelineItems.length - 1),
-              align: "end",
-            }}
-            computeItemKey={(_, item) => item.key}
-            // A rough average row height so Virtuoso estimates scroll offsets
-            // well before each row is measured — cuts the blank flashes during
-            // fast scrolling through not-yet-measured rows.
-            defaultItemHeight={96}
-            itemContent={(_, item) => (
-              <div className="px-6" style={{ display: "flow-root" }}>
-                {renderTimelineItem(item)}
-              </div>
-            )}
-            followOutput={(atBottom) => (atBottom ? "smooth" : false)}
-            atBottomThreshold={120}
-            atBottomStateChange={(atBottom) => {
-              stickToBottomRef.current = atBottom;
-              if (atBottom) setUnseenBelow(false);
-            }}
-            startReached={() => {
-              if (hasMore && !loadingOlder) void loadOlder();
-            }}
-            increaseViewportBy={{ top: 1400, bottom: 1400 }}
-            components={{ Header: ChatListHeader, Footer: ChatListFooter }}
-          />
+        // Plain scroll container — native scroll-anchoring (overflowAnchor)
+        // keeps the viewport steady when content above loads or is prepended,
+        // so nothing shifts and there are no virtualization blank-flashes.
+        <div
+          key={room.room_id}
+          ref={scrollerRef}
+          data-private
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden [overflow-anchor:auto]"
+          onScroll={() => {
+            const el = scrollerRef.current;
+            if (!el) return;
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            stickToBottomRef.current = atBottom;
+            if (atBottom) setUnseenBelow(false);
+            // Prefetch older history a buffer BEFORE the top, so the prepend
+            // lands while there's still content above to anchor against.
+            if (el.scrollTop < 600 && hasMore && !loadingOlder) void loadOlder();
+          }}
+        >
+          <ChatListHeader loadingOlder={loadingOlder} />
+          {timelineItems.map((item) => (
+            <div key={item.key} className="px-6" style={{ display: "flow-root" }}>
+              {renderTimelineItem(item)}
+            </div>
+          ))}
+          {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
+          <div className="h-4" />
         </div>
       )}
 

@@ -219,11 +219,13 @@ async function buildInviteCard({ qr, siliconId, siliconName, link, code }: Build
   const wordW = ctx.measureText(wordmark).width;
   const eyebrowGap = logo ? 16 : 0;
   const eyebrowX = (W - (logoW + eyebrowGap + wordW)) / 2;
-  const eyebrowY = 96;
-  if (logo) ctx.drawImage(logo, eyebrowX, eyebrowY - logoH + 6, logoW, logoH);
+  const eyebrowY = 96; // optical midline shared by the mark and the wordmark
+  if (logo) ctx.drawImage(logo, eyebrowX, eyebrowY - logoH / 2, logoW, logoH);
   ctx.fillStyle = INK;
   ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
   ctx.fillText(wordmark, eyebrowX + logoW + eyebrowGap, eyebrowY);
+  ctx.textBaseline = "alphabetic"; // restore for the rest of the card
 
   // QR.
   const qrSize = 570;

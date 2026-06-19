@@ -350,6 +350,15 @@ export interface Event {
   /** Human's local wall-clock time, e.g. "4:13pm (utc+5:30 - user's timezone)".
    *  Only populated for silicon fetches; null for carbon requesters. */
   display_time?: string | null;
+  /** Dimensions/metadata of attached media, so the bubble reserves its exact
+   *  size before the media loads (no timeline shift while scrolling). */
+  media_meta?: {
+    width: number | null;
+    height: number | null;
+    duration_ms: number | null;
+    kind: "file" | "image" | "voice" | "tts_output";
+    mime: string;
+  } | null;
 }
 
 export interface MediaObject {

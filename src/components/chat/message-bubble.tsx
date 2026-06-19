@@ -912,6 +912,8 @@ function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
             mime={c.mime ? String(c.mime) : undefined}
             caption={c.caption ? String(c.caption) : undefined}
             showCaption={false}
+            width={event.media_meta?.width ?? null}
+            height={event.media_meta?.height ?? null}
           />
           {/* The text rides with the image as a normal message line, not a
               tiny grey caption. */}
@@ -933,6 +935,8 @@ function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
             filename={c.filename ? String(c.filename) : undefined}
             caption={c.caption ? String(c.caption) : undefined}
             showCaption={false}
+            width={event.media_meta?.width ?? null}
+            height={event.media_meta?.height ?? null}
           />
           {/* New-format messages carry the filename separately, so the caption
               is the user's typed text — render it as a normal message line.

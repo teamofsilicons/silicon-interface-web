@@ -36,10 +36,17 @@ export function MediaAttachment({
   localUrl,
   localDurationMs,
   localPeaks,
+  width,
+  height,
 }: {
   mediaId: string;
   mime?: string;
   caption?: string;
+  /** Pixel dimensions from the event (media_meta) — used to reserve the exact
+   *  bubble aspect from the FIRST render so the timeline never shifts when the
+   *  image/video actually loads. Falls back to the fetched media dims. */
+  width?: number | null;
+  height?: number | null;
   /** The attachment's real filename, kept separate from `caption` (the typed
    *  message text). Used as the label on file/PDF chips and downloads. Legacy
    *  messages omit it — there we fall back to `caption`. */
@@ -203,6 +210,14 @@ export function MediaAttachment({
     (mime || "").toLowerCase().startsWith("image/") ||
     (mime || "").toLowerCase().startsWith("video/");
 
+  // Authoritative dimensions: prefer the event's media_meta (known from the
+  // very first render) over the lazily-fetched media object, so the reserved
+  // aspect is correct before any pixels load — the timeline never shifts.
+  const knownW = width ?? media?.width ?? null;
+  const knownH = height ?? media?.height ?? null;
+  const aspectFrom = (fallback: string) =>
+    knownW && knownH && knownW > 0 && knownH > 0 ? `${knownW} / ${knownH}` : fallback;
+
   if (failed) return <span className="text-xs text-destructive">attachment unavailable</span>;
 
   // §6.1 — Branch on the server's moderation/processing status *before* trying
@@ -259,10 +274,7 @@ export function MediaAttachment({
     if (probablyVisual) {
       // #22 — Reserve the *exact* aspect from media.width/height so loading
       // never reflows the bubble.
-      const aspect =
-        media?.width && media?.height && media.width > 0 && media.height > 0
-          ? `${media.width} / ${media.height}`
-          : "4 / 3";
+      const aspect = aspectFrom("4 / 3");
       return (
         <div
           className="flex w-72 max-w-full items-center justify-center bg-card"
@@ -302,10 +314,7 @@ export function MediaAttachment({
   // server knows the real dimensions (#22), we use the actual aspect ratio
   // instead of the 4/3 fallback — zero layout shift.
   if (isImage && !isDev) {
-    const imgAspect =
-      media?.width && media?.height && media.width > 0 && media.height > 0
-        ? `${media.width} / ${media.height}`
-        : "4 / 3";
+    const imgAspect = aspectFrom("4 / 3");
     return (
       <>
         <figure className="space-y-1">
@@ -352,10 +361,7 @@ export function MediaAttachment({
   // bubble; the inline player handles its own controls. Real dims (#22)
   // override the 16/9 fallback.
   if (isVideo && !isDev) {
-    const vidAspect =
-      media?.width && media?.height && media.width > 0 && media.height > 0
-        ? `${media.width} / ${media.height}`
-        : "16 / 9";
+    const vidAspect = aspectFrom("16 / 9");
     return (
       <>
         <div

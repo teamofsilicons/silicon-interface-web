@@ -697,6 +697,7 @@ Rooms and messages:
   rooms show <room>       Show a room, its members, and recent events.
   rooms direct <kind> <handle-or-id>
   messages list <room> [--limit 50] [--before event_id]
+  messages sync [--after event_id] [--limit 200] [--no-cursor]
   messages send <room> <text...> [--reply-to event_id]
   send <room> <text...>   Alias for messages send.
   dm <carbon|silicon> <handle-or-id> [text...]
@@ -996,6 +997,24 @@ async function cmdMessages(ctx, args) {
     });
     return;
   }
+  if (sub === "sync") {
+    const { options } = parseOptions(rest, ["noCursor"]);
+    const page = await api.syncEvents(ctx, {
+      after: typeof options.after === "string" ? options.after : "",
+      limit: numberOption(options.limit, 200, { min: 1, max: 500 }),
+    });
+    if (!options.noCursor) {
+      for (const frame of page.frames || []) {
+        const eventId = eventIdFromFrame(frame);
+        if (eventId) updateCursor(eventId);
+      }
+    }
+    printResult(ctx, page, (value) => {
+      for (const frame of value.frames || []) console.log(frameLine(frame));
+      if (value.has_more) console.error(`more events available after ${value.next || options.after || ""}`);
+    });
+    return;
+  }
   if (sub === "send") {
     await sendMessage(ctx, rest);
     return;
@@ -1138,8 +1157,7 @@ function waitForSocketClose(socket) {
 
 async function roomIdsForListen(ctx, target) {
   if (!target || target === "all") {
-    const rooms = await api.rooms(ctx);
-    return rooms.map((room) => room.room_id);
+    return [];
   }
   return [roomArg(ctx, target)];
 }
@@ -1190,7 +1208,10 @@ async function runDurableListen(
         });
         if (missed && print) console.error(`backfilled ${missed} missed event(s).`);
       }
-      if (print) console.error(`listening to ${roomIds.length} room(s). Ctrl+C to stop.`);
+      if (print) {
+        const scope = target === "all" ? "all subscribed rooms" : `${roomIds.length} room(s)`;
+        console.error(`listening to ${scope}. Ctrl+C to stop.`);
+      }
       await waitForSocketClose(socket);
       activeSocket = null;
       if (once) break;

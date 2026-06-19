@@ -67,6 +67,13 @@ backfill missed persisted events. The cursor is stored in:
 <silicon>/.silicon-interface/state.json
 ```
 
+Automation that owns its own cursor can use one-shot sync without advancing the
+CLI cursor:
+
+```bash
+pnpm si --json events sync --after <event_id> --limit 500 --no-cursor
+```
+
 For unattended silicons, run:
 
 ```bash

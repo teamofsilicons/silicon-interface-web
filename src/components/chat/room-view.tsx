@@ -1539,24 +1539,25 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (!hydrated || timelineItems.length === 0) return;
     if (didInitialBottomRef.current === room.room_id) return;
     didInitialBottomRef.current = room.room_id;
-    if (!stickToBottomRef.current) return;
-    // Snap to the true bottom once server data is in, then re-snap a couple of
-    // times as late content (images / pdf thumbs / markdown) grows the layout —
-    // otherwise the first jump lands above the final bottom. Instant + gated on
-    // stick-to-bottom, so it's invisible when already there and never yanks a
-    // user who has since scrolled up.
-    const jump = () => {
-      if (stickToBottomRef.current) {
-        virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
-      }
-    };
+    // Snap to the true bottom once server data is in, then re-snap as late
+    // content (images / pdf thumbs / markdown) grows the layout. The FIRST
+    // snaps are unconditional — Virtuoso reports atBottom=false during the
+    // unsettled initial render, which would otherwise (via stickToBottomRef)
+    // cancel the very jump that puts us at the bottom. Later retries defer to
+    // the ref so a user who scrolls up in the first second isn't yanked back.
+    stickToBottomRef.current = true;
+    const jump = () =>
+      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    const t1 = window.setTimeout(jump, 150);
-    const t2 = window.setTimeout(jump, 450);
+    const eager = [80, 200].map((ms) => window.setTimeout(jump, ms));
+    const guarded = [450, 800].map((ms) =>
+      window.setTimeout(() => {
+        if (stickToBottomRef.current) jump();
+      }, ms),
+    );
     return () => {
       cancelAnimationFrame(raf);
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
+      [...eager, ...guarded].forEach((t) => window.clearTimeout(t));
     };
   }, [room.room_id, hydrated, timelineItems.length]);
 
@@ -1903,7 +1904,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             data={timelineItems}
             context={{ loadingOlder, holdingNode }}
             firstItemIndex={firstItemIndex}
-            initialTopMostItemIndex={Math.max(0, timelineItems.length - 1)}
+            initialTopMostItemIndex={{
+              index: Math.max(0, timelineItems.length - 1),
+              align: "end",
+            }}
             computeItemKey={(_, item) => item.key}
             itemContent={(_, item) => (
               <div className="px-6" style={{ display: "flow-root" }}>

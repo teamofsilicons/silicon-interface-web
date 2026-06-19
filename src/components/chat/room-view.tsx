@@ -334,6 +334,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
   // Tracks whether the user is parked at the bottom — gates "stick to bottom".
   const stickToBottomRef = React.useRef(true);
+  // Set just before older history is prepended; the layout effect reads it to
+  // restore the viewport so loading a page doesn't jump the user.
+  const pendingPrependRef = React.useRef<{ height: number; top: number } | null>(null);
 
   const scrollToBottom = React.useCallback((behavior: "auto" | "smooth" = "auto") => {
     const el = scrollerRef.current;
@@ -1498,10 +1501,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // move the anchor, so we explicitly stick to the bottom for new messages /
   // progress. Runs as a layout effect so there's no flash before the scroll.
   React.useLayoutEffect(() => {
-    if (stickToBottomRef.current) {
-      const el = scrollerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+    const el = scrollerRef.current;
+    if (!el) return;
+    // Older history was just prepended → keep the same content under the
+    // viewport (new height was added above, so shift scrollTop by the delta).
+    const p = pendingPrependRef.current;
+    if (p) {
+      pendingPrependRef.current = null;
+      el.scrollTop = el.scrollHeight - p.height + p.top;
+      return;
     }
+    // Otherwise, if parked at the bottom, follow new messages / progress.
+    if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [timelineItems]);
 
   // Land at the bottom once per room, after the server load settles, then a few
@@ -1546,6 +1557,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         setHasMore(false);
         return;
       }
+      // Snapshot scroll metrics right before the prepend so the layout effect
+      // can restore the exact viewport (older messages add height ABOVE).
+      const el = scrollerRef.current;
+      pendingPrependRef.current = el
+        ? { height: el.scrollHeight, top: el.scrollTop }
+        : null;
       setEvents((prev) => {
         const known = new Set(prev.map((e) => e.event_id));
         const fresh: LocalEvent[] = older

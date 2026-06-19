@@ -170,6 +170,11 @@ function ChatListFooter({ context }: { context?: ChatListContext }) {
 }
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const MAX_PROGRESS_LINE_CHARS = 64;
+// Initial window + pagination page size. Matches ROOM_SNIPPET_LIMIT so the
+// cached paint and the first server fetch cover the same recent messages — a
+// near-identical list, so hydration doesn't reflow/glitch. Older history loads
+// a page at a time as you scroll up.
+const PAGE_SIZE = 30;
 
 // Receipt progression is monotonic — pending → sent → delivered → read. The WS
 // echo ("delivered") and read_receipts ("read") often land BEFORE the HTTP send
@@ -518,7 +523,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     deltaBufferRef.current.clear();
     firstContactRef.current = false;
     api
-      .events(roomId, undefined, 100)
+      .events(roomId, undefined, PAGE_SIZE)
       .then((evs) => {
         if (!mounted) return;
         setEvents((prev) => {
@@ -528,7 +533,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           const finalized = evs.map((e) => ({ ...e, is_final: true }));
           return mergeServerEvents(pending, finalized, myUsername);
         });
-        setHasMore(evs.length >= 100); // §2.7 — a full window may have older history
+        setHasMore(evs.length >= PAGE_SIZE); // a full window may have older history
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
         setLoading(false);
       })
@@ -569,8 +574,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const prevReadyRef = React.useRef(socket.ready);
   React.useEffect(() => {
     if (socket.ready && !prevReadyRef.current) {
+      // Same window as the initial load — this effect also fires on the FIRST
+      // connect of a fresh page load, so refetching a larger window here would
+      // reflow the just-rendered list ("loads again a few seconds in"). A
+      // PAGE_SIZE window merges near-identically and still recovers frames
+      // missed during a short drop.
       api
-        .events(room.room_id, undefined, 100)
+        .events(room.room_id, undefined, PAGE_SIZE)
         .then((evs) => {
           setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
           // §1.7 — after a (re)connect, resync the progress line from the cache
@@ -1578,7 +1588,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (!oldest) return;
     setLoadingOlder(true);
     try {
-      const older = await api.events(room.room_id, oldest.event_id, 100);
+      const older = await api.events(room.room_id, oldest.event_id, PAGE_SIZE);
       if (older.length === 0) {
         setHasMore(false);
         return;
@@ -1595,7 +1605,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           }));
         return [...fresh, ...prev];
       });
-      setHasMore(older.length >= 100);
+      setHasMore(older.length >= PAGE_SIZE);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {

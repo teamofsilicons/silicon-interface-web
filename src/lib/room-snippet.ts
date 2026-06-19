@@ -7,7 +7,10 @@ import type { Event } from "./types";
  * appends incoming websocket events for *closed* rooms so the newly-arrived
  * message is already in the cache when the user opens the chat (no ~1s gap).
  */
-const ROOM_SNIPPET_LIMIT = 40;
+// Keep this in lockstep with the room view's initial page size: the cached
+// snippet and the first server fetch must cover the same recent messages so
+// the cache → server hydration is a near-identical list (no reflow / glitch).
+const ROOM_SNIPPET_LIMIT = 30;
 
 function roomSnippetKey(roomId: string): string {
   return `silicon-interface:room-snippet:${roomId}`;

@@ -351,7 +351,7 @@ export function MessageBubble({
           )}
         </div>
       )}
-      <div className={cn("max-w-[70%] space-y-1", isMine && "items-end")}>
+      <div className={cn("min-w-0 max-w-[70%] space-y-1", isMine && "items-end")}>
         {/* Sender label on the first received bubble of a run only. Skipped
             entirely in a direct (1-on-1) room since the peer is implicit. */}
         {!isMine && showSender && !isDirect && (
@@ -384,7 +384,7 @@ export function MessageBubble({
             // visible asymmetry around media attachments). `group` lives on the
             // message column wrapper so hovering anywhere on the block (bubble,
             // padding, label, time) reveals the actions — not just the text.
-            "relative p-3 text-sm shadow-sm",
+            "relative min-w-0 max-w-full p-3 text-sm shadow-sm",
             copyFlash && "copy-flash",
             redacted
               ? "border bg-muted text-muted-foreground italic"
@@ -888,11 +888,11 @@ function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
         <div className="space-y-1">
           {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />}
           {asMarkdown ? (
-            <div className="break-words">
+            <div className="min-w-0 max-w-full break-words">
               <MarkdownView
                 source={body}
                 compact
-                className={cn("text-sm", isMine && "text-primary-foreground")}
+                className={cn("min-w-0 max-w-full text-sm", isMine && "text-primary-foreground")}
               />
               {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
             </div>

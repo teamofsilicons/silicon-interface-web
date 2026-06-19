@@ -1701,7 +1701,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className="relative flex min-h-0 flex-1 flex-col bg-background"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background"
     >
       {/* Header — clicking anywhere on the left side opens the profile. */}
       {/* Header — fixed height so clicking search doesn't shift the row when
@@ -1883,7 +1883,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           key={room.room_id}
           ref={scrollerRef}
           data-private
-          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden [overflow-anchor:auto]"
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden [overflow-anchor:auto]"
           onScroll={() => {
             const el = scrollerRef.current;
             if (!el) return;

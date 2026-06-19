@@ -1540,10 +1540,24 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (didInitialBottomRef.current === room.room_id) return;
     didInitialBottomRef.current = room.room_id;
     if (!stickToBottomRef.current) return;
-    const jump = () =>
-      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+    // Snap to the true bottom once server data is in, then re-snap a couple of
+    // times as late content (images / pdf thumbs / markdown) grows the layout —
+    // otherwise the first jump lands above the final bottom. Instant + gated on
+    // stick-to-bottom, so it's invisible when already there and never yanks a
+    // user who has since scrolled up.
+    const jump = () => {
+      if (stickToBottomRef.current) {
+        virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+      }
+    };
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    return () => cancelAnimationFrame(raf);
+    const t1 = window.setTimeout(jump, 150);
+    const t2 = window.setTimeout(jump, 450);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
   }, [room.room_id, hydrated, timelineItems.length]);
 
   const openSenderProfile = React.useCallback(

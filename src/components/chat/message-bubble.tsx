@@ -304,9 +304,12 @@ export function MessageBubble({
     }
   }
 
-  // We tighten the vertical gap between consecutive bubbles in the same
-  // (sender, minute) group so they read as a single block.
-  const inGroupGap = !showSender && !showTime;
+  // Vertical rhythm: a larger top margin ONLY on the first bubble of a group
+  // (where the avatar/handle shows) to separate it from the previous turn;
+  // every other bubble keeps a uniform tight margin. Using my-1.5 on both the
+  // first AND last bubble of a group (the old `!showSender && !showTime`) made
+  // the gap after the first and before the last bubble bigger than the gaps
+  // between middle bubbles — visibly inconsistent.
 
   // Message actions are reached via the 3-dot button (and the hover reply/react
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
@@ -320,8 +323,8 @@ export function MessageBubble({
         // `group` on the full-width row so hovering anywhere in the row —
         // bubble, avatar gutter, or the empty space beside it — reveals the
         // actions, not just the bubble itself.
-        "group flex w-full gap-2",
-        inGroupGap ? "my-0.5" : "my-1.5",
+        "group flex w-full gap-2 mb-0.5",
+        showSender ? "mt-1.5" : "mt-0.5",
         isMine ? "justify-end" : "justify-start",
       )}
     >

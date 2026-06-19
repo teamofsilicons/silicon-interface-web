@@ -97,7 +97,10 @@ export function TeamSlider({
     });
 
   const selectedTeams = teams.filter((t) => filters.teams.includes(t.slug));
-  const singleSelected = selectedTeams.length === 1 ? selectedTeams[0] : null;
+  // Open settings directly when the target is unambiguous — either there's only
+  // one team at all, or exactly one team is selected. Otherwise ask which.
+  const settingsTarget =
+    teams.length === 1 ? teams[0] : selectedTeams.length === 1 ? selectedTeams[0] : null;
 
   return (
     <div className="flex items-stretch border-b">
@@ -143,12 +146,12 @@ export function TeamSlider({
       </div>
 
       {onOpenTeamSettings && teams.length > 0 ? (
-        singleSelected ? (
+        settingsTarget ? (
           <button
             type="button"
-            aria-label={`${singleSelected.name} team workspace`}
-            title={`${singleSelected.name} team workspace`}
-            onClick={() => onOpenTeamSettings(singleSelected.slug)}
+            aria-label={`${settingsTarget.name} team workspace`}
+            title={`${settingsTarget.name} team workspace`}
+            onClick={() => onOpenTeamSettings(settingsTarget.slug)}
             className="m-2 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent"
           >
             <GearSix className="h-4 w-4" />

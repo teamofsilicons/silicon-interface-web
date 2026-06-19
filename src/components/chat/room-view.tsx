@@ -2445,5 +2445,11 @@ function mergeServerEvents(
     return { ...ev, _status: mine ? ("delivered" as MessageStatus) : undefined };
   });
   const localOnly = prev.filter((e) => !serverIds.has(e.event_id));
-  return [...merged, ...localOnly];
+  // Keep strict chronological order. Appending localOnly (e.g. older history
+  // loaded via loadOlder, or optimistic temps) to the end scrambled the array,
+  // which broke loadOlder's "oldest = events[0]" cursor and stalled pagination.
+  // ULID / ISO created_at sorts lexicographically = chronologically.
+  return [...merged, ...localOnly].sort((a, b) =>
+    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
+  );
 }

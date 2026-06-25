@@ -4,16 +4,21 @@ import * as React from "react";
 import { Pulse } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
+import { loadLastReactivity, saveLastReactivity } from "@/lib/reactivity-cache";
 import { cn } from "@/lib/utils";
+
+import { ReactivityGraph } from "./reactivity-graph";
 
 /**
  * The Reactivity KPI — a Silicon-trigger count Glass returns, polled every 2s.
- * The number eases toward each new value so it reads as live progress.
+ * The number eases toward each new value so it reads as live progress. On open
+ * it seeds from the last value we showed (localStorage) and climbs from there,
+ * so reactivity feels like it's continuing rather than restarting at zero.
  */
 export function ReactivityKpi({ slug, className }: { slug: string; className?: string }) {
-  const [target, setTarget] = React.useState(0);
-  const [display, setDisplay] = React.useState(0);
-  const displayRef = React.useRef(0);
+  const [target, setTarget] = React.useState(() => loadLastReactivity(slug) ?? 0);
+  const [display, setDisplay] = React.useState(() => loadLastReactivity(slug) ?? 0);
+  const displayRef = React.useRef(display);
 
   // Poll Glass every 2 seconds.
   React.useEffect(() => {
@@ -21,7 +26,9 @@ export function ReactivityKpi({ slug, className }: { slug: string; className?: s
     const tick = async () => {
       try {
         const r = await api.teamReactivity(slug);
-        if (alive) setTarget(r.value);
+        if (!alive) return;
+        setTarget(r.value);
+        saveLastReactivity(slug, r.value);
       } catch {
         /* keep the last value */
       }
@@ -81,6 +88,7 @@ export function ReactivityKpi({ slug, className }: { slug: string; className?: s
         </span>
       </div>
       <p className="mt-1 text-xs text-[var(--terminal-accent)]">silicon triggers · live</p>
+      <ReactivityGraph slug={slug} className="mt-4" />
     </div>
   );
 }

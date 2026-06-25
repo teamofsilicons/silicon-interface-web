@@ -30,6 +30,26 @@ import type {
   TeamRole,
 } from "./types";
 
+export type ReactivityBucket = "hour" | "day" | "month";
+
+export interface ReactivityPoint {
+  /** ISO timestamp of the bucket start (UTC). */
+  t: string;
+  /** Triggers in this bucket. */
+  count: number;
+  /** Running total through this bucket. */
+  cumulative: number;
+}
+
+export interface ReactivitySeries {
+  bucket: ReactivityBucket;
+  /** Cumulative total before the window opened (line starts here, not zero). */
+  baseline: number;
+  points: ReactivityPoint[];
+  /** Grand cumulative total at the end of the window. */
+  total: number;
+}
+
 class ApiError extends Error {
   constructor(public status: number, public body: unknown, message: string) {
     super(message);
@@ -201,6 +221,11 @@ export const api = {
   teamMembers: (slug: string) => call<TeamMembership[]>("GET", `/api/v1/teams/${slug}/members`),
   teamSilicons: (slug: string) => call<Silicon[]>("GET", `/api/v1/teams/${slug}/silicons`),
   teamReactivity: (slug: string) => call<{ value: number }>("GET", `/api/v1/teams/${slug}/reactivity`),
+  teamReactivitySeries: (slug: string, bucket: ReactivityBucket = "hour") =>
+    call<ReactivitySeries>(
+      "GET",
+      `/api/v1/teams/${slug}/reactivity/series?bucket=${bucket}`,
+    ),
   teamStructure: (slug: string) =>
     call<{ svg: string; dsl?: string }>("GET", `/api/v1/teams/${slug}/structure`),
   teamInvites: (slug: string) => call<Invite[]>("GET", `/api/v1/teams/${slug}/invites`),

@@ -15,6 +15,7 @@ const VIEW_W = 320;
 const VIEW_H = 96;
 const PAD_Y = 8;
 const REFRESH_MS = 15000;
+const GROW_MS = 750;
 
 /** Bucket switcher — rendered top-right of the KPI card. */
 export function ReactivityBucketToggle({
@@ -83,8 +84,9 @@ function tickLabels(points: ReactivityPoint[], bucket: ReactivityBucket): string
 }
 
 /**
- * Cumulative reactivity over time. Full-width line, no animation — it just
- * reflects the latest series, refreshing live as new points are polled.
+ * Cumulative reactivity over time. The line grows up from the ground on first
+ * load and on every bucket switch; live polls just refresh the data in place
+ * without re-animating.
  */
 export function ReactivityGraph({
   slug,
@@ -96,13 +98,23 @@ export function ReactivityGraph({
   className?: string;
 }) {
   const [points, setPoints] = React.useState<ReactivityPoint[]>([]);
+  // Bumps only when a fresh dataset should animate in (initial load / bucket
+  // change) — never on a routine poll refresh.
+  const [growSeq, setGrowSeq] = React.useState(0);
+  const grownBucket = React.useRef<ReactivityBucket | null>(null);
+  const groupRef = React.useRef<SVGGElement>(null);
 
   React.useEffect(() => {
     let alive = true;
     const tick = async () => {
       try {
         const r = await api.teamReactivitySeries(slug, bucket);
-        if (alive) setPoints(r.points);
+        if (!alive) return;
+        setPoints(r.points);
+        if (grownBucket.current !== bucket) {
+          grownBucket.current = bucket;
+          setGrowSeq((s) => s + 1);
+        }
       } catch {
         /* keep whatever we last drew */
       }
@@ -115,63 +127,63 @@ export function ReactivityGraph({
     };
   }, [slug, bucket]);
 
+  // Grow the line up from the baseline whenever growSeq advances.
+  React.useEffect(() => {
+    if (growSeq === 0) return;
+    const g = groupRef.current;
+    if (!g || typeof g.animate !== "function") return;
+    const anim = g.animate(
+      [{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }],
+      { duration: GROW_MS, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+    return () => anim.cancel();
+  }, [growSeq]);
+
   const paths = React.useMemo(() => buildPaths(points), [points]);
   const ticks = React.useMemo(() => tickLabels(points, bucket), [points, bucket]);
 
-  const baseline = points.length ? points[0].cumulative : 0;
-  const peak = points.length ? points[points.length - 1].cumulative : 0;
-  const delta = peak - baseline;
-
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
-      <div className="relative">
-        {/* Activity added across the visible window. */}
-        {paths && delta > 0 && (
-          <div className="absolute left-0 top-0 font-mono text-[10px] text-[var(--terminal-accent)]">
-            ▲ {delta.toLocaleString()}
-          </div>
-        )}
-        <svg
-          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
-          preserveAspectRatio="none"
-          className="h-24 w-full"
-          role="img"
-          aria-label="Cumulative reactivity over time"
-        >
-          <defs>
-            <linearGradient id="reactivity-fill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--terminal-accent)" stopOpacity="0.22" />
-              <stop offset="100%" stopColor="var(--terminal-accent)" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          {paths ? (
-            <>
-              <path d={paths.area} fill="url(#reactivity-fill)" stroke="none" />
-              <path
-                d={paths.line}
-                fill="none"
-                stroke="var(--terminal-accent)"
-                strokeWidth={1.5}
-                strokeLinejoin="round"
-                strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
-              />
-            </>
-          ) : (
-            // Flat full-width baseline while empty / loading.
-            <line
-              x1={0}
-              y1={VIEW_H / 2}
-              x2={VIEW_W}
-              y2={VIEW_H / 2}
+      <svg
+        viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+        preserveAspectRatio="none"
+        className="h-24 w-full"
+        role="img"
+        aria-label="Cumulative reactivity over time"
+      >
+        <defs>
+          <linearGradient id="reactivity-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--terminal-accent)" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="var(--terminal-accent)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {paths ? (
+          <g ref={groupRef} style={{ transformBox: "fill-box", transformOrigin: "bottom" }}>
+            <path d={paths.area} fill="url(#reactivity-fill)" stroke="none" />
+            <path
+              d={paths.line}
+              fill="none"
               stroke="var(--terminal-accent)"
-              strokeOpacity={0.25}
-              strokeWidth={1}
+              strokeWidth={1.5}
+              strokeLinejoin="round"
+              strokeLinecap="round"
               vectorEffect="non-scaling-stroke"
             />
-          )}
-        </svg>
-      </div>
+          </g>
+        ) : (
+          // Flat full-width baseline while empty / loading.
+          <line
+            x1={0}
+            y1={VIEW_H / 2}
+            x2={VIEW_W}
+            y2={VIEW_H / 2}
+            stroke="var(--terminal-accent)"
+            strokeOpacity={0.25}
+            strokeWidth={1}
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
+      </svg>
 
       <div className="flex justify-between font-mono text-[10px] text-[var(--terminal-accent)] opacity-60">
         {ticks.length ? (

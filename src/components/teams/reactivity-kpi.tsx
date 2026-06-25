@@ -3,11 +3,11 @@
 import * as React from "react";
 import { Pulse } from "@phosphor-icons/react/dist/ssr";
 
-import { api } from "@/lib/api";
+import { api, type ReactivityBucket } from "@/lib/api";
 import { loadLastReactivity, saveLastReactivity } from "@/lib/reactivity-cache";
 import { cn } from "@/lib/utils";
 
-import { ReactivityGraph } from "./reactivity-graph";
+import { ReactivityBucketToggle, ReactivityGraph } from "./reactivity-graph";
 
 /**
  * The Reactivity KPI — a Silicon-trigger count Glass returns, polled every 2s.
@@ -19,6 +19,7 @@ export function ReactivityKpi({ slug, className }: { slug: string; className?: s
   const [target, setTarget] = React.useState(() => loadLastReactivity(slug) ?? 0);
   const [display, setDisplay] = React.useState(() => loadLastReactivity(slug) ?? 0);
   const displayRef = React.useRef(display);
+  const [bucket, setBucket] = React.useState<ReactivityBucket>("hour");
 
   // Poll Glass every 2 seconds.
   React.useEffect(() => {
@@ -71,8 +72,11 @@ export function ReactivityKpi({ slug, className }: { slug: string; className?: s
         className,
       )}
     >
-      <div className="label-mono flex items-center gap-2 text-[var(--terminal-accent)]">
-        <Pulse className="h-3.5 w-3.5" weight="fill" /> reactivity
+      <div className="flex items-start justify-between gap-4">
+        <div className="label-mono flex items-center gap-2 text-[var(--terminal-accent)]">
+          <Pulse className="h-3.5 w-3.5" weight="fill" /> reactivity
+        </div>
+        <ReactivityBucketToggle bucket={bucket} onChange={setBucket} />
       </div>
       <div className="mt-2 flex items-baseline gap-2">
         <span className="font-mono text-4xl font-bold tabular-nums">
@@ -88,7 +92,7 @@ export function ReactivityKpi({ slug, className }: { slug: string; className?: s
         </span>
       </div>
       <p className="mt-1 text-xs text-[var(--terminal-accent)]">silicon triggers · live</p>
-      <ReactivityGraph slug={slug} className="mt-4" />
+      <ReactivityGraph slug={slug} bucket={bucket} className="mt-4" />
     </div>
   );
 }

@@ -282,6 +282,9 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
         }
         if (window.Quark.fitMain) window.Quark.fitMain();
         else if (window.Quark.fit) window.Quark.fit();
+        // Tell the parent we've actually rendered, so it can lift the cover that
+        // hides Quark's internal "Loading rough.js…" flash during init.
+        try { window.parent.postMessage({ type: "quark:ready" }, "*"); } catch (e) {}
       }
       function apply() {
         if (window.Quark) {
@@ -297,14 +300,41 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
 </html>`;
   }, [dsl]);
 
+  const iframeRef = React.useRef<HTMLIFrameElement>(null);
+  const [ready, setReady] = React.useState(false);
+
+  // Keep an opaque cover over the iframe until Quark signals it has rendered, so
+  // its internal "Loading rough.js…" flash never reaches the user. A timeout
+  // fallback lifts the cover anyway (e.g. if Quark genuinely fails to load, so
+  // its own error message becomes visible).
+  React.useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.source === iframeRef.current?.contentWindow && e.data?.type === "quark:ready") {
+        setReady(true);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    const fallback = window.setTimeout(() => setReady(true), 6000);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.clearTimeout(fallback);
+    };
+  }, []);
+
   return (
-    <div className="h-[min(70vh,760px)] min-h-[420px] overflow-hidden border bg-card">
+    <div className="relative h-[min(70vh,760px)] min-h-[420px] overflow-hidden border bg-card">
       <iframe
+        ref={iframeRef}
         title="team structure"
         srcDoc={srcDoc}
         className="h-full w-full"
         sandbox="allow-scripts allow-same-origin"
       />
+      {!ready && (
+        <div className="absolute inset-0 grid place-items-center bg-card">
+          <Spinner className="text-lg" />
+        </div>
+      )}
     </div>
   );
 }

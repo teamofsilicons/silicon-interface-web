@@ -212,6 +212,8 @@ export interface TeamMembership {
   member_kind: Kind;
   member_id: number;
   member_handle: string | null;
+  /** Stable public id (carbon_id / silicon_id) — matches RoomPeer.id. */
+  member_public_id: string | null;
   member_photo_url: string | null;
   role: TeamRole;
   joined_at: string;

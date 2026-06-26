@@ -2,7 +2,8 @@
 
 import type { Contact, Room, Team } from "./types";
 
-const VERSION = 2;
+// v3: membership map is keyed by carbon_id/silicon_id (was name/handle in v≤2).
+const VERSION = 3;
 const PREFIX = "silicon-interface:sidebar-cache";
 
 interface SidebarCache {
@@ -41,7 +42,7 @@ function read(ownerId: string): SidebarCache | null {
   try {
     const parsed = JSON.parse(raw) as Partial<SidebarCache>;
     if (
-      (parsed.version !== VERSION && parsed.version !== 1) ||
+      parsed.version !== VERSION ||
       parsed.ownerId !== ownerId ||
       !Array.isArray(parsed.rooms) ||
       !Array.isArray(parsed.contacts)

@@ -317,9 +317,11 @@ function ChatPageInner() {
 
   // A direct chat started by id carries no team_slug from the backend, so it
   // would land in "Others" even when its peer is on one of my teams. Load each
-  // of my teams' rosters and build `${kind}:${handle}` → set-of-team-slugs, so a
-  // room can be placed under every team its peers belong to (a person can be on
-  // several). `membershipsLoaded` lets the auto-tab effect wait for this rather
+  // of my teams' rosters and build `${kind}:${public_id}` → set-of-team-slugs
+  // (keyed by carbon_id/silicon_id, not name, so renames and name collisions
+  // don't misfile chats), so a room can be placed under every team its peers
+  // belong to (a person can be on several). `membershipsLoaded` lets the
+  // auto-tab effect wait for this rather
   // than stranding a fresh room in Others before the rosters arrive.
   // Hydrate the membership map from cache synchronously so a direct chat is
   // placed in the right team tab on first paint, rather than flashing in
@@ -356,8 +358,8 @@ function ChatPageInner() {
       const map = new Map<string, Set<string>>();
       for (const { slug, rows } of results) {
         for (const m of rows) {
-          if (!m.member_handle) continue;
-          const key = `${m.member_kind}:${m.member_handle}`;
+          if (!m.member_public_id) continue;
+          const key = `${m.member_kind}:${m.member_public_id}`;
           let set = map.get(key);
           if (!set) {
             set = new Set();
@@ -383,7 +385,7 @@ function ChatPageInner() {
       const slugs = new Set<string>();
       if (r.team_slug) slugs.add(r.team_slug);
       for (const p of r.peers) {
-        const s = peerTeams.get(`${p.kind}:${p.handle}`);
+        const s = peerTeams.get(`${p.kind}:${p.id}`);
         if (s) for (const slug of s) slugs.add(slug);
       }
       m.set(r.room_id, slugs);

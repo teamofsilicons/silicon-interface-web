@@ -861,11 +861,22 @@ function VoiceTranscript({ text }: { text: string }) {
 }
 
 function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
-  const c = event.content;
-  // #17 — forwarded chip rendered at the top of the bubble body. Telegram
-  // style: "Forwarded from @alice".
-  const forwarded = (c as { forward_from?: { sender_handle?: string } }).forward_from;
+  // #17 — forwarded chip rendered above the bubble body for *every* message
+  // type (text, images, files, voice…), not just text. Telegram style:
+  // "Forwarded from @alice".
+  const forwarded = (event.content as { forward_from?: { sender_handle?: string } }).forward_from;
   const forwardedFrom = forwarded?.sender_handle ?? null;
+  if (!forwardedFrom) return <BodyContent event={event} isMine={isMine} />;
+  return (
+    <div className="space-y-1">
+      <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />
+      <BodyContent event={event} isMine={isMine} />
+    </div>
+  );
+}
+
+function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
+  const c = event.content;
   switch (event.type) {
     case "m.text": {
       // §2.8 — a silicon can emit an empty/whitespace m.text; don't render a
@@ -886,7 +897,6 @@ function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
       const asMarkdown = looksLikeMarkdown(body);
       return (
         <div className="space-y-1">
-          {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />}
           {asMarkdown ? (
             <div className="min-w-0 max-w-full break-words">
               <MarkdownView

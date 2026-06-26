@@ -1,0 +1,7 @@
+# The web (Next.js) deploy doesn't need any of these. The Electron desktop
+# build artifacts in desktop/dist are multi-GB and blow past Vercel's 100 MB
+# per-file upload limit, so exclude the whole desktop wrapper. node_modules and
+# .next are installed/built in the cloud.
+desktop
+node_modules
+.next

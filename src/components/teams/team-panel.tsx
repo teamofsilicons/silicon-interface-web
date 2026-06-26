@@ -1021,16 +1021,19 @@ function InviteesSection({ slug }: { slug: string }) {
 
 function InviteSection({ slug }: { slug: string }) {
   const [invites, setInvites] = React.useState<Invite[]>([]);
+  const [emailInvites, setEmailInvites] = React.useState<Invite[]>([]);
   const [email, setEmail] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(5);
   const [busy, setBusy] = React.useState(false);
   const [linksOpen, setLinksOpen] = React.useState(false);
+  const [invitationsOpen, setInvitationsOpen] = React.useState(false);
   const [newInviteOpen, setNewInviteOpen] = React.useState(false);
   const [newInvite, setNewInvite] = React.useState<Invite | null>(null);
 
   const loadInvites = React.useCallback(async () => {
     const rows = await api.teamInvites(slug);
     setInvites(rows.filter((i) => i.channel === "link"));
+    setEmailInvites(rows.filter((i) => i.channel === "email"));
   }, [slug]);
 
   React.useEffect(() => {
@@ -1066,6 +1069,7 @@ function InviteSection({ slug }: { slug: string }) {
     await api.createInvite(slug, { channel: "email", email_target: email });
     toast.success(`invite sent to ${email}`);
     setEmail("");
+    await loadInvites();
   });
 
   const disableInvite = make(async (invite: Invite) => {
@@ -1246,6 +1250,63 @@ function InviteSection({ slug }: { slug: string }) {
             <Button variant="outline" onClick={inviteByEmail} disabled={busy} className="h-11 w-full">
               {busy ? <CircleNotch className="animate-spin" /> : <Envelope />} send invite
             </Button>
+
+            <div className="border border-dashed bg-background/50 p-4 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="text-muted-foreground">
+                  {emailInvites.length > 0
+                    ? `${emailInvites.length} email invitation${emailInvites.length === 1 ? "" : "s"} sent.`
+                    : "Email invitations you send will appear here."}
+                </span>
+                {emailInvites.length > 0 ? (
+                  <Dialog open={invitationsOpen} onOpenChange={setInvitationsOpen}>
+                    <DialogTrigger asChild>
+                      <Button variant="link" size="sm" className="h-auto p-0 text-xs">
+                        View all invitations
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="w-[calc(100vw-2rem)] max-w-lg overflow-hidden">
+                      <DialogHeader>
+                        <DialogTitle>Email invitations</DialogTitle>
+                        <DialogDescription>
+                          Everyone you&apos;ve invited by email, and who has accepted.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <ul className="max-h-[60vh] divide-y overflow-y-auto border">
+                        {emailInvites.map((inv) => {
+                          const accepted = !!inv.claimed_at || inv.uses > 0;
+                          return (
+                            <li
+                              key={inv.id}
+                              className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+                            >
+                              <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                                {inv.email_target || "—"}
+                              </span>
+                              {accepted ? (
+                                <span className="shrink-0 text-xs font-medium text-foreground">
+                                  accepted
+                                  {inv.claimed_at ? (
+                                    <span className="text-muted-foreground">
+                                      {" "}
+                                      · {relativeTime(inv.claimed_at)}
+                                    </span>
+                                  ) : null}
+                                </span>
+                              ) : (
+                                <span className="shrink-0 text-xs text-muted-foreground">
+                                  {inv.is_active ? "pending" : "expired"}
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </DialogContent>
+                  </Dialog>
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       </div>

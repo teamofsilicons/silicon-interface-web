@@ -70,8 +70,11 @@ type Tier = "info" | "warn" | "urgent" | "critical";
 export function PaymentBanner() {
   const router = useRouter();
   const { teams } = useTeams();
-  // Seed from cache so the banner shows instantly on reload.
-  const [rows, setRows] = React.useState<TeamPayment[]>(() => readCache());
+  // Seed from cache so the banner shows instantly on reload (dropping any stale
+  // $0 rows so they don't flash before the re-fetch).
+  const [rows, setRows] = React.useState<TeamPayment[]>(() =>
+    readCache().filter((r) => r.payment.amount_cents > 0),
+  );
   const [index, setIndex] = React.useState(0);
   const [, setDay] = React.useState(() => new Date().toDateString());
 
@@ -92,7 +95,8 @@ export function PaymentBanner() {
         headTeams.map(async (t) => {
           try {
             const b = await api.teamBilling(t.slug);
-            return b.payment && b.payment.state !== "ok"
+            // Nothing owed ($0.00) ⇒ no banner, even if state isn't "ok".
+            return b.payment && b.payment.state !== "ok" && b.payment.amount_cents > 0
               ? { ...t, payment: b.payment }
               : null;
           } catch {

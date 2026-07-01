@@ -4,10 +4,13 @@ import { env } from "./env";
 import { authStore } from "./auth";
 import type {
   Announcement,
+  ArchitectMessage,
   AuthSession,
   BillingAddon,
   BillingCycle,
   BillingData,
+  BrowserProfile,
+  BrowserProfileSetupSession,
   Carbon,
   CarbonPublic,
   Contact,
@@ -22,12 +25,16 @@ import type {
   LoginStartResponse,
   MediaObject,
   Room,
+  SetupSession,
+  SetupSessionInit,
   Silicon,
   SiliconPublic,
   TakeBackPolicy,
   Team,
   TeamMembership,
   TeamRole,
+  TeamServer,
+  TeamServerCreate,
 } from "./types";
 
 export type ReactivityBucket = "hour" | "day" | "month";
@@ -505,6 +512,76 @@ export const api = {
   costSummary: () =>
     call<{ rows: unknown[]; grand_total_cents: number }>("GET", "/api/v1/cost/summary"),
   costRecent: () => call<unknown[]>("GET", "/api/v1/cost/recent"),
+
+  // -------- team servers (heads) --------
+  teamServers: (slug: string) => call<TeamServer[]>("GET", `/api/v1/teams/${slug}/servers`),
+  createTeamServer: (slug: string, data: TeamServerCreate) =>
+    call<TeamServer>("POST", `/api/v1/teams/${slug}/servers`, data),
+  deleteTeamServer: (slug: string, id: number) =>
+    call<void>("DELETE", `/api/v1/teams/${slug}/servers/${id}`),
+
+  // -------- team setup / provisioning (heads) --------
+  // The architect chat that authors the Quark structure DSL (Gemini).
+  teamArchitect: (slug: string, history: ArchitectMessage[], current_code?: string) =>
+    call<{ code: string; question: string }>(
+      "POST",
+      `/api/v1/teams/${slug}/architect`,
+      { history, current_code },
+    ),
+  // Save the edited structure DSL; optionally create/prune Silicons to match.
+  saveTeamStructure: (slug: string, dsl: string, materialize = false) =>
+    call<{ dsl: string; created: string[]; removed: string[] }>(
+      "PATCH",
+      `/api/v1/teams/${slug}/structure`,
+      { dsl, materialize },
+    ),
+  createSetupSession: (slug: string, data: Partial<SetupSessionInit> = {}) =>
+    call<SetupSession>("POST", `/api/v1/teams/${slug}/setup-sessions`, data),
+  setupSession: (sessionId: string) =>
+    call<SetupSession>("GET", `/api/v1/setup-sessions/${sessionId}`),
+  patchSetupSession: (sessionId: string, patch: Partial<SetupSessionInit> & { step?: string }) =>
+    call<SetupSession>("PATCH", `/api/v1/setup-sessions/${sessionId}`, patch),
+
+  // -------- browser profiles (heads; Steel) --------
+  teamBrowserProfiles: (slug: string) =>
+    call<{ configured: boolean; profiles: BrowserProfile[]; assigned?: Record<string, unknown>; error?: string }>(
+      "GET",
+      `/api/v1/teams/${slug}/browser-profiles`,
+    ),
+  teamBrowserProfileSetup: (slug: string, name?: string) =>
+    call<{ token: string; profile_name: string; expires_in_seconds: number }>(
+      "POST",
+      `/api/v1/teams/${slug}/browser-profiles/setup`,
+      { name },
+    ),
+  assignTeamBrowserProfile: (slug: string, profile_id: string, name?: string) =>
+    call<{ assigned: number; profile_id: string }>(
+      "PUT",
+      `/api/v1/teams/${slug}/browser-profile`,
+      { profile_id, name },
+    ),
+  // Token-authed remote-viewer flow (same endpoints silicon-cli uses).
+  browserProfileSetupStart: (token: string) =>
+    call<BrowserProfileSetupSession>(
+      "POST",
+      "/api/v1/browser-profiles/setup/start",
+      { token },
+      { auth: false },
+    ),
+  browserProfileSetupFinish: (token: string, session_id: string, before_profile_ids: string[]) =>
+    call<{ profile: BrowserProfile; assigned: number }>(
+      "POST",
+      "/api/v1/browser-profiles/setup/finish",
+      { token, session_id, before_profile_ids },
+      { auth: false },
+    ),
 };
+
+/** WebSocket URL for the provisioning channel (carbon JWT auth). */
+export function provisionWsUrl(sessionId: string): string {
+  const token = authStore.getAccess() ?? "";
+  const q = new URLSearchParams({ session_id: sessionId, token });
+  return `${env.wsBase}/ws/glass/provision/?${q.toString()}`;
+}
 
 export { ApiError };

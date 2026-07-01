@@ -206,6 +206,91 @@ export interface Team {
 
 export type TeamRole = "member" | "head";
 
+// --- Team provisioning (Create Team wizard) --------------------------------
+export interface TeamServer {
+  id: number;
+  hostname: string;
+  port: number;
+  username: string;
+  secret_kind: "password" | "pem";
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TeamServerCreate {
+  hostname: string;
+  port?: number;
+  username: string;
+  secret_kind: "password" | "pem";
+  secret: string; // plaintext PEM body or password; write-only, never returned
+  notes?: string;
+}
+
+/** A turn in the architect chat that authors the Quark structure DSL. */
+export interface ArchitectMessage {
+  role: "user" | "model";
+  text: string;
+}
+
+export type SetupStep =
+  | "basics"
+  | "server"
+  | "architecture"
+  | "brains"
+  | "brain_login"
+  | "install"
+  | "done";
+
+export type SetupStatus =
+  | "pending"
+  | "connecting"
+  | "connected"
+  | "running"
+  | "error"
+  | "done";
+
+export interface SetupSessionInit {
+  server_id?: number;
+  brain?: string; // claude | codex | both
+  browser_profile_id?: string;
+  backup_enabled?: boolean;
+}
+
+export interface SetupSession {
+  session_id: string;
+  team: string | null;
+  step: SetupStep | string;
+  status: SetupStatus | string;
+  brain: string;
+  browser_profile_id: string;
+  backup_enabled: boolean;
+  error: string;
+  chat_history: { role: string; text: string; ts?: string }[];
+  progress: Record<string, unknown>;
+  server: { id: number; hostname: string; port: number; username: string; secret_kind: string } | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface BrowserProfile {
+  id: string;
+  name?: string;
+  status?: string;
+  [k: string]: unknown;
+}
+
+export interface BrowserProfileSetupSession {
+  team: { slug: string; name: string };
+  target: string;
+  silicon_id: string;
+  profile_name: string;
+  session_id: string;
+  viewer_url: string;
+  debug_url: string;
+  before_profile_ids: string[];
+}
+
 export interface TeamMembership {
   id: number;
   team: number;

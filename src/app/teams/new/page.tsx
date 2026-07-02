@@ -795,34 +795,99 @@ function BrainLoginStep({
   const brain = session.brain || "claude";
   const tools = brain === "codex" ? ["codex"] : brain === "both" ? ["claude", "codex"] : ["claude"];
 
+  // The server has to be prepared (silicon-cli + runtime) before a brain can be
+  // signed in, so this step runs the PREPARE phase first, then opens the terminal.
+  const [phase, setPhase] = React.useState<"preparing" | "ready" | "failed">("preparing");
+  const [prepLog, setPrepLog] = React.useState("");
+  const [failure, setFailure] = React.useState("");
+  const termOpenedRef = React.useRef(false);
+
   const onFrame = React.useCallback((f: ProvisionFrame) => {
     if (f.type === "terminal.output") termRef.current?.write(f.data);
     else if (f.type === "terminal.closed") termRef.current?.write("\r\n[session closed]\r\n");
-    else if (f.type === "error") toastError(f.detail);
+    else if (f.type === "assistant") setPrepLog((l) => l + f.text + "\n");
+    else if (f.type === "command.output") setPrepLog((l) => l + f.data);
+    else if (f.type === "phase.done" && f.phase === "prepare") {
+      if (f.ok) setPhase("ready");
+      else {
+        setPhase("failed");
+        setFailure(f.summary || "Couldn't prepare the server.");
+      }
+    } else if (f.type === "error") {
+      setFailure(f.detail);
+      setPhase("failed");
+    }
   }, []);
 
   const { ready, send } = useProvisionSocket({ sessionId: session.session_id, onFrame });
 
+  const runPrepare = React.useCallback(() => {
+    setPhase("preparing");
+    setFailure("");
+    setPrepLog("");
+    send({ type: "prepare", context: { brain, runtime: "docker" } });
+  }, [send, brain]);
+
+  const startedRef = React.useRef(false);
   React.useEffect(() => {
-    if (ready) send({ type: "terminal_open", cols: 100, rows: 28 });
-  }, [ready, send]);
+    if (ready && !startedRef.current) {
+      startedRef.current = true;
+      runPrepare();
+    }
+  }, [ready, runPrepare]);
+
+  // Open the PTY once the server is prepared.
+  React.useEffect(() => {
+    if (phase === "ready" && !termOpenedRef.current) {
+      termOpenedRef.current = true;
+      send({ type: "terminal_open", cols: 100, rows: 28 });
+    }
+  }, [phase, send]);
 
   const runLogin = (tool: string) => {
-    const cmd = tool === "codex" ? "codex login --device-auth\n" : "claude\n";
-    send({ type: "terminal_input", data: cmd });
+    send({ type: "terminal_input", data: `silicon docker login ${tool}\n` });
     termRef.current?.focus();
   };
+
+  if (phase !== "ready") {
+    return (
+      <Card
+        title="Preparing your server"
+        subtitle="Installing the Silicon toolchain so you can sign your brain(s) in. Just a moment."
+        wide
+      >
+        {failure && (
+          <ErrorBanner
+            message={failure}
+            onRetry={() => {
+              startedRef.current = true;
+              runPrepare();
+            }}
+          />
+        )}
+        <LogView text={prepLog} className="h-[380px]" />
+        <div className="mt-4 flex items-center justify-between">
+          <Button variant="ghost" size="sm" onClick={onBack}>
+            Back
+          </Button>
+          <span className="label-mono text-muted-foreground">
+            {phase === "failed" ? "preparation failed" : ready ? "preparing…" : "connecting…"}
+          </span>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card
       title="Sign your brains in"
-      subtitle="Click a login button below, then follow the prompts right in the terminal. Device-code logins print a URL and a code — open the URL, paste the code, done."
+      subtitle="Click a login button, then follow the prompts right in the terminal. Device-code logins print a URL and a code — open the URL, paste the code, then type `exit`."
       wide
     >
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="label-mono text-muted-foreground">start:</span>
         {tools.map((t) => (
-          <Button key={t} variant="outline" size="sm" onClick={() => runLogin(t)} disabled={!ready}>
+          <Button key={t} variant="outline" size="sm" onClick={() => runLogin(t)}>
             <TerminalIcon className="mr-1 h-4 w-4" /> {t} login
           </Button>
         ))}
@@ -842,9 +907,7 @@ function BrainLoginStep({
           <Button variant="ghost" size="sm" onClick={onBack}>
             Back
           </Button>
-          <span className="label-mono text-muted-foreground">
-            {ready ? "terminal live" : "connecting…"}
-          </span>
+          <span className="label-mono text-muted-foreground">terminal live</span>
         </div>
         <Button onClick={onDone}>
           {tools.length > 1 ? "Both signed in" : "I'm signed in"} <ArrowRight />

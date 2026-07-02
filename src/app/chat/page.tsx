@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import { useSearchParams } from "next/navigation";
-import { MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { MagnifyingGlass, Plus, UsersThree } from "@phosphor-icons/react/dist/ssr";
+import Link from "next/link";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -1147,12 +1148,20 @@ function ChatPageInner() {
               className="h-full w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
           </div>
+          <Link
+            href="/teams/new"
+            aria-label="create team"
+            title="create team"
+            className="m-2 ml-0 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent"
+          >
+            <UsersThree className="h-4 w-4" />
+          </Link>
           <button
             type="button"
             onClick={() => setDialogOpen(true)}
             aria-label="new chat"
             title="new chat"
-            className="m-2 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent"
+            className="m-2 ml-0 grid h-8 w-8 shrink-0 self-center place-items-center border border-border text-foreground transition-colors hover:bg-accent"
           >
             <Plus className="h-4 w-4" />
           </button>

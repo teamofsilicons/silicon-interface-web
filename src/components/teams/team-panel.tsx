@@ -27,7 +27,11 @@ import type {
   Invitee,
   Team,
   TeamMembership,
+  TeamServer,
 } from "@/lib/types";
+import { toastError } from "@/lib/errors";
+import { useProvisionSocket, type ProvisionFrame } from "@/lib/use-provision";
+import { RemoteTerminal, type RemoteTerminalHandle } from "./remote-terminal";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,7 +66,7 @@ export function TeamPanel({
   );
 }
 
-type TeamPanelTab = "overview" | "structure" | "members" | "crons" | "invites" | "settings" | "billing";
+type TeamPanelTab = "overview" | "structure" | "members" | "crons" | "server" | "invites" | "settings" | "billing";
 
 function TeamPanelBody({
   slug,
@@ -123,6 +127,7 @@ function TeamPanelBody({
     { id: "structure", label: "Structure" },
     { id: "members", label: "Members" },
     { id: "crons", label: "Crons" },
+    { id: "server", label: "Server", headOnly: true },
     { id: "invites", label: "Invites", headOnly: true },
     { id: "settings", label: "Settings", headOnly: true },
     { id: "billing", label: "Billing", headOnly: true },
@@ -189,6 +194,7 @@ function TeamPanelBody({
         )}
         {tab === "members" && <MembersSection members={members} />}
         {tab === "crons" && <CronsSection slug={slug} />}
+        {tab === "server" && head && <ServerSection slug={slug} />}
         {tab === "invites" && head && (
           <div className="space-y-6">
             <InviteSection slug={slug} />
@@ -1582,5 +1588,235 @@ function Toggle({
         />
       </span>
     </button>
+  );
+}
+
+// --- Server tab: manage team servers + a live remote terminal --------------
+function ServerSection({ slug }: { slug: string }) {
+  const [servers, setServers] = React.useState<TeamServer[] | null>(null);
+  const [adding, setAdding] = React.useState(false);
+  const [terminalFor, setTerminalFor] = React.useState<TeamServer | null>(null);
+
+  const load = React.useCallback(() => {
+    void api
+      .teamServers(slug)
+      .then(setServers)
+      .catch((e) => {
+        toastError(e);
+        setServers([]);
+      });
+  }, [slug]);
+
+  React.useEffect(load, [load]);
+
+  const remove = async (id: number) => {
+    try {
+      await api.deleteTeamServer(slug, id);
+      if (terminalFor?.id === id) setTerminalFor(null);
+      load();
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
+  if (terminalFor) {
+    return (
+      <ServerTerminal
+        slug={slug}
+        server={terminalFor}
+        onBack={() => setTerminalFor(null)}
+      />
+    );
+  }
+
+  return (
+    <Section title="servers">
+      {servers === null ? (
+        <div className="flex justify-center py-8"><Spinner /></div>
+      ) : servers.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No servers yet. Add one to open a live terminal to it.
+        </p>
+      ) : (
+        <ul className="divide-y border">
+          {servers.map((s) => (
+            <li key={s.id} className="flex items-center justify-between gap-3 px-3 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">
+                  {s.username}@{s.hostname}
+                  <span className="text-muted-foreground">:{s.port}</span>
+                </div>
+                <div className="label-mono">{s.secret_kind}</div>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button size="sm" variant="outline" onClick={() => setTerminalFor(s)}>
+                  Open terminal
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => remove(s.id)}>
+                  Remove
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {adding ? (
+        <AddServerForm slug={slug} onDone={() => { setAdding(false); load(); }} onCancel={() => setAdding(false)} />
+      ) : (
+        <Button size="sm" variant="outline" className="mt-3" onClick={() => setAdding(true)}>
+          Add a server
+        </Button>
+      )}
+    </Section>
+  );
+}
+
+function AddServerForm({
+  slug,
+  onDone,
+  onCancel,
+}: {
+  slug: string;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [hostname, setHostname] = React.useState("");
+  const [port, setPort] = React.useState("22");
+  const [username, setUsername] = React.useState("ubuntu");
+  const [secretKind, setSecretKind] = React.useState<"pem" | "password">("pem");
+  const [secret, setSecret] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  const readPem = (file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setSecret(String(reader.result || ""));
+    reader.readAsText(file);
+  };
+
+  const save = async () => {
+    if (!hostname.trim() || !secret.trim()) return;
+    setBusy(true);
+    try {
+      await api.createTeamServer(slug, {
+        hostname: hostname.trim(),
+        port: Number(port) || 22,
+        username: username.trim(),
+        secret_kind: secretKind,
+        secret,
+      });
+      onDone();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 space-y-3 border p-3">
+      <div className="grid gap-3 sm:grid-cols-[1fr_auto_1fr]">
+        <div>
+          <Label htmlFor="s-host">Host</Label>
+          <Input id="s-host" value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="203.0.113.4" />
+        </div>
+        <div className="w-20">
+          <Label htmlFor="s-port">Port</Label>
+          <Input id="s-port" value={port} onChange={(e) => setPort(e.target.value)} inputMode="numeric" />
+        </div>
+        <div>
+          <Label htmlFor="s-user">User</Label>
+          <Input id="s-user" value={username} onChange={(e) => setUsername(e.target.value)} />
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <Button size="sm" variant={secretKind === "pem" ? "default" : "outline"} onClick={() => setSecretKind("pem")}>
+          PEM key
+        </Button>
+        <Button size="sm" variant={secretKind === "password" ? "default" : "outline"} onClick={() => setSecretKind("password")}>
+          Password
+        </Button>
+      </div>
+      {secretKind === "pem" ? (
+        <>
+          <label className="flex cursor-pointer items-center gap-2 border bg-background px-3 py-2 text-sm">
+            {secret ? "PEM loaded ✓" : "Upload .pem key"}
+            <input type="file" accept=".pem,.key,text/plain" className="sr-only" onChange={(e) => readPem(e.target.files?.[0] ?? null)} />
+          </label>
+          <textarea
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            rows={3}
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+            className="w-full resize-y border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-ring"
+          />
+        </>
+      ) : (
+        <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="password" />
+      )}
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+        <Button size="sm" onClick={save} disabled={busy || !hostname.trim() || !secret.trim()}>
+          {busy ? <Spinner /> : "Save server"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ServerTerminal({
+  slug,
+  server,
+  onBack,
+}: {
+  slug: string;
+  server: TeamServer;
+  onBack: () => void;
+}) {
+  const termRef = React.useRef<RemoteTerminalHandle>(null);
+  const [sessionId, setSessionId] = React.useState<string | null>(null);
+
+  // The terminal rides the provisioning socket, which needs a SetupSession bound
+  // to this server. Mint an ephemeral one for the terminal's lifetime.
+  React.useEffect(() => {
+    let active = true;
+    void api
+      .createSetupSession(slug, { server_id: server.id })
+      .then((s) => {
+        if (active) setSessionId(s.session_id);
+      })
+      .catch(toastError);
+    return () => {
+      active = false;
+    };
+  }, [slug, server.id]);
+
+  const onFrame = React.useCallback((f: ProvisionFrame) => {
+    if (f.type === "terminal.output") termRef.current?.write(f.data);
+    else if (f.type === "terminal.closed") termRef.current?.write("\r\n[session closed]\r\n");
+    else if (f.type === "error") toastError(f.detail);
+  }, []);
+
+  const { ready, send } = useProvisionSocket({ sessionId, onFrame });
+
+  React.useEffect(() => {
+    if (ready) send({ type: "terminal_open", cols: 100, rows: 30 });
+  }, [ready, send]);
+
+  return (
+    <Section title={`terminal · ${server.username}@${server.hostname}`}>
+      <div className="mb-2 flex items-center justify-between">
+        <span className="label-mono text-muted-foreground">{ready ? "live" : "connecting…"}</span>
+        <Button size="sm" variant="ghost" onClick={onBack}>Back to servers</Button>
+      </div>
+      <div className="h-[440px] overflow-hidden border">
+        <RemoteTerminal
+          ref={termRef}
+          onData={(d) => send({ type: "terminal_input", data: d })}
+          onResize={(cols, rows) => send({ type: "terminal_resize", cols, rows })}
+        />
+      </div>
+    </Section>
   );
 }

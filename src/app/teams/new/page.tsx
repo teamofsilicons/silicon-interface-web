@@ -9,6 +9,7 @@ import {
   Robot,
   Terminal as TerminalIcon,
   UploadSimple,
+  Warning,
 } from "@phosphor-icons/react/dist/ssr";
 
 import { toast } from "sonner";
@@ -51,14 +52,100 @@ const STEPS: { key: Step; label: string }[] = [
   { key: "done", label: "Done" },
 ];
 
+const STORE_KEY = "silicon-interface:new-team";
+
+interface Resumable {
+  slug: string;
+  sessionId: string;
+  step: Step;
+}
+
+function readResumable(): Resumable | null {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    return raw ? (JSON.parse(raw) as Resumable) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function NewTeamPage() {
   const router = useRouter();
   const [step, setStep] = React.useState<Step>("basics");
   const [team, setTeam] = React.useState<Team | null>(null);
   const [session, setSession] = React.useState<SetupSession | null>(null);
+  // "resuming" gates the first paint while we check for an in-progress wizard.
+  const [resuming, setResuming] = React.useState(true);
 
-  const goTo = React.useCallback((s: Step) => setStep(s), []);
+  const persist = React.useCallback((slug: string, sessionId: string, s: Step) => {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({ slug, sessionId, step: s }));
+    } catch {
+      /* private mode — non-fatal, we just can't resume */
+    }
+  }, []);
+
+  const clearStore = React.useCallback(() => {
+    try {
+      localStorage.removeItem(STORE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Advance to a step, mirror it to the SetupSession + localStorage so a refresh
+  // (or "Save & exit" then return) resumes exactly here.
+  const goTo = React.useCallback(
+    (s: Step) => {
+      setStep(s);
+      const slug = team?.slug;
+      const sid = session?.session_id;
+      if (slug && sid) {
+        persist(slug, sid, s);
+        void api.patchSetupSession(sid, { step: s }).catch(() => {});
+      }
+    },
+    [team?.slug, session?.session_id, persist],
+  );
+
+  // On mount, resume an in-progress wizard if one exists.
+  React.useEffect(() => {
+    const saved = readResumable();
+    if (!saved) {
+      setResuming(false);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const [t, s] = await Promise.all([
+          api.team(saved.slug),
+          api.setupSession(saved.sessionId),
+        ]);
+        if (!active) return;
+        setTeam(t);
+        setSession(s);
+        setStep(saved.step);
+      } catch {
+        clearStore(); // team/session gone — start fresh
+      } finally {
+        if (active) setResuming(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [clearStore]);
+
   const stepIndex = STEPS.findIndex((s) => s.key === step);
+
+  if (resuming) {
+    return (
+      <div className="grid min-h-screen place-items-center">
+        <Spinner className="text-xl" />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-5xl flex-col px-6 py-8">
@@ -70,6 +157,7 @@ export default function NewTeamPage() {
         <button
           className="text-xs text-muted-foreground underline-offset-2 hover:underline"
           onClick={() => router.push("/chat")}
+          title="Your progress is saved — you can come back and pick up here."
         >
           Save &amp; exit
         </button>
@@ -83,7 +171,9 @@ export default function NewTeamPage() {
             onDone={(t, s) => {
               setTeam(t);
               setSession(s);
-              goTo("server");
+              persist(t.slug, s.session_id, "server");
+              setStep("server");
+              void api.patchSetupSession(s.session_id, { step: "server" }).catch(() => {});
             }}
           />
         )}
@@ -97,12 +187,20 @@ export default function NewTeamPage() {
           <BrainsStep team={team} session={session} onSession={setSession} onDone={() => goTo("brain_login")} />
         )}
         {step === "brain_login" && session && (
-          <BrainLoginStep session={session} onDone={() => goTo("install")} />
+          <BrainLoginStep session={session} onDone={() => goTo("install")} onBack={() => goTo("brains")} />
         )}
         {step === "install" && team && session && (
           <InstallStep team={team} session={session} onDone={() => goTo("done")} />
         )}
-        {step === "done" && team && <DoneStep team={team} onFinish={() => router.push("/chat")} />}
+        {step === "done" && team && (
+          <DoneStep
+            team={team}
+            onFinish={() => {
+              clearStore();
+              router.push("/chat");
+            }}
+          />
+        )}
       </main>
     </div>
   );
@@ -234,7 +332,9 @@ function ServerStep({
   );
   const [secret, setSecret] = React.useState("");
   const [connected, setConnected] = React.useState(false);
+  const [serverId, setServerId] = React.useState<number | null>(session.server?.id ?? null);
   const [phaseOk, setPhaseOk] = React.useState(false);
+  const [failure, setFailure] = React.useState("");
   const [turns, setTurns] = React.useState<ChatTurn[]>([]);
   const [log, setLog] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -243,8 +343,10 @@ function ServerStep({
     if (f.type === "assistant") setTurns((t) => [...t, { role: "assistant", text: f.text }]);
     else if (f.type === "command.started") setLog((l) => l + `\n$ ${f.command}\n`);
     else if (f.type === "command.output") setLog((l) => l + f.data);
-    else if (f.type === "phase.done" && f.phase === "connect") setPhaseOk(f.ok);
-    else if (f.type === "error") toastError(f.detail);
+    else if (f.type === "phase.done" && f.phase === "connect") {
+      if (f.ok) setPhaseOk(true);
+      else setFailure(f.summary || "The server check didn't pass.");
+    } else if (f.type === "error") setFailure(f.detail);
   }, []);
 
   const { ready, send } = useProvisionSocket({
@@ -253,9 +355,21 @@ function ServerStep({
     enabled: connected,
   });
 
+  const runConnect = React.useCallback(() => {
+    setFailure("");
+    setPhaseOk(false);
+    setLog("");
+    setTurns([]);
+    send({ type: "connect" });
+  }, [send]);
+
+  const startedRef = React.useRef(false);
   React.useEffect(() => {
-    if (connected && ready) send({ type: "connect" });
-  }, [connected, ready, send]);
+    if (connected && ready && !startedRef.current) {
+      startedRef.current = true;
+      runConnect();
+    }
+  }, [connected, ready, runConnect]);
 
   const readPem = (file: File | null) => {
     if (!file) return;
@@ -277,6 +391,7 @@ function ServerStep({
       });
       const updated = await api.patchSetupSession(session.session_id, { server_id: server.id });
       onSession(updated);
+      setServerId(server.id);
       setSecret(""); // don't keep the key in memory longer than needed
       setConnected(true);
     } catch (e) {
@@ -292,10 +407,29 @@ function ServerStep({
         title="Connecting to your server"
         subtitle="The setup agent is verifying it can operate the server. Watch it work below."
       >
+        {failure && (
+          <ErrorBanner
+            message={failure}
+            onRetry={() => {
+              startedRef.current = true;
+              runConnect();
+            }}
+            onEdit={() => {
+              startedRef.current = false;
+              setConnected(false);
+              setFailure("");
+              // Drop the server we just created so retries don't pile up rows.
+              if (serverId) {
+                void api.deleteTeamServer(team.slug, serverId).catch(() => {});
+                setServerId(null);
+              }
+            }}
+          />
+        )}
         <div className="grid gap-4 md:grid-cols-2">
           <SetupChat
             turns={turns}
-            busy={!phaseOk}
+            busy={!phaseOk && !failure}
             disabled
             onSend={() => {}}
             placeholder="The agent will report what it finds…"
@@ -305,7 +439,13 @@ function ServerStep({
         </div>
         <div className="mt-6 flex items-center justify-between">
           <span className="label-mono text-muted-foreground">
-            {phaseOk ? "server ready" : ready ? "verifying…" : "opening connection…"}
+            {phaseOk
+              ? "server ready"
+              : failure
+                ? "connection failed"
+                : ready
+                  ? "verifying…"
+                  : "opening connection…"}
           </span>
           <Button onClick={onDone} disabled={!phaseOk}>
             Continue <ArrowRight />
@@ -396,7 +536,16 @@ function ArchitectureStep({ team, onDone }: { team: Team; onDone: () => void }) 
   React.useEffect(() => {
     if (started.current) return;
     started.current = true;
-    void ask("Let's design our team. Ask me what you need to know.");
+    // On resume, show the chart they'd already built before greeting.
+    void api
+      .teamStructure(team.slug)
+      .then((r) => {
+        if (r.dsl) setDsl(r.dsl);
+      })
+      .catch(() => {})
+      .finally(() => {
+        void ask("Let's design our team. Ask me what you need to know.");
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -481,6 +630,13 @@ function BrainsStep({
   const [profileId, setProfileId] = React.useState(session.browser_profile_id || "");
   const [configured, setConfigured] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
+  // Steel remote-viewer setup: null → idle, else an in-progress login session.
+  const [pending, setPending] = React.useState<{
+    token: string;
+    sessionId: string;
+    before: string[];
+  } | null>(null);
+  const [profileBusy, setProfileBusy] = React.useState(false);
 
   React.useEffect(() => {
     void api
@@ -493,35 +649,38 @@ function BrainsStep({
   }, [team.slug]);
 
   const startProfileSetup = async () => {
+    setProfileBusy(true);
     try {
       const { token } = await api.teamBrowserProfileSetup(team.slug);
       const s = await api.browserProfileSetupStart(token);
-      // Open the branded remote viewer so the head logs into their services.
+      // Capture the Steel session id — finish() needs it (this was the bug).
+      setPending({ token, sessionId: s.session_id, before: s.before_profile_ids });
       if (s.viewer_url) window.open(s.viewer_url, "_blank", "noopener");
-      toast.info(
-        "A browser viewer opened in a new tab. Sign into your services there, then come back and finish.",
-        { className: "font-mono" },
-      );
-      // Stash so "finish" can be called; keep it simple: store on window scope.
-      (window as unknown as Record<string, unknown>).__profileSetup = { token, before: s.before_profile_ids };
+      toast.info("A browser viewer opened in a new tab. Sign into your services there, then click “I've signed in”.", {
+        className: "font-mono",
+      });
     } catch (e) {
       toastError(e);
+    } finally {
+      setProfileBusy(false);
     }
   };
 
   const finishProfileSetup = async () => {
-    const stash = (window as unknown as Record<string, unknown>).__profileSetup as
-      | { token: string; before: string[] }
-      | undefined;
-    if (!stash) return;
+    if (!pending) return;
+    setProfileBusy(true);
     try {
-      const r = await api.browserProfileSetupFinish(stash.token, "", stash.before);
+      const r = await api.browserProfileSetupFinish(pending.token, pending.sessionId, pending.before);
       if (r.profile?.id) {
         setProfileId(r.profile.id);
-        setProfiles((p) => [...p, r.profile]);
+        setProfiles((p) => (p.some((x) => x.id === r.profile.id) ? p : [...p, r.profile]));
+        toast.success("Browser profile saved.", { className: "font-mono" });
       }
+      setPending(null);
     } catch (e) {
       toastError(e);
+    } finally {
+      setProfileBusy(false);
     }
   };
 
@@ -563,13 +722,16 @@ function BrainsStep({
       </div>
 
       <div className="mt-6">
-        <Label>Browser profile</Label>
+        <Label>Browser profile (optional)</Label>
         {!configured ? (
           <p className="mt-1 text-sm text-muted-foreground">
-            Browser profiles aren&apos;t configured for this team — you can set one up later.
+            Browser profiles aren&apos;t set up for this team — you can skip this and add one later.
           </p>
         ) : (
           <div className="mt-2 space-y-2">
+            <p className="text-[13px] text-muted-foreground">
+              A shared browser profile lets your Silicons use accounts you&apos;re already signed into. Optional — you can add one later.
+            </p>
             {profiles.length > 0 && (
               <select
                 value={profileId}
@@ -584,14 +746,23 @@ function BrainsStep({
                 ))}
               </select>
             )}
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={startProfileSetup}>
-                Set up a new profile
+            {pending ? (
+              <div className="border bg-muted/40 p-3 text-sm">
+                <p>A browser viewer opened in a new tab. Sign into your services there, then:</p>
+                <div className="mt-2 flex gap-2">
+                  <Button size="sm" onClick={finishProfileSetup} disabled={profileBusy}>
+                    {profileBusy ? <Spinner /> : "I've signed in — save profile"}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setPending(null)} disabled={profileBusy}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button variant="outline" size="sm" onClick={startProfileSetup} disabled={profileBusy}>
+                {profileBusy ? <Spinner /> : "Set up a new profile"}
               </Button>
-              <Button variant="ghost" size="sm" onClick={finishProfileSetup}>
-                I&apos;ve signed in — save profile
-              </Button>
-            </div>
+            )}
           </div>
         )}
       </div>
@@ -611,9 +782,18 @@ function BrainsStep({
 }
 
 // ---------------------------------------------------------------- Step 5
-function BrainLoginStep({ session, onDone }: { session: SetupSession; onDone: () => void }) {
+function BrainLoginStep({
+  session,
+  onDone,
+  onBack,
+}: {
+  session: SetupSession;
+  onDone: () => void;
+  onBack: () => void;
+}) {
   const termRef = React.useRef<RemoteTerminalHandle>(null);
   const brain = session.brain || "claude";
+  const tools = brain === "codex" ? ["codex"] : brain === "both" ? ["claude", "codex"] : ["claude"];
 
   const onFrame = React.useCallback((f: ProvisionFrame) => {
     if (f.type === "terminal.output") termRef.current?.write(f.data);
@@ -636,17 +816,19 @@ function BrainLoginStep({ session, onDone }: { session: SetupSession; onDone: ()
   return (
     <Card
       title="Sign your brains in"
-      subtitle="Run the login for each brain you chose. Follow the prompts in the terminal — device-code logins print a URL to open."
+      subtitle="Click a login button below, then follow the prompts right in the terminal. Device-code logins print a URL and a code — open the URL, paste the code, done."
       wide
     >
-      <div className="mb-3 flex flex-wrap gap-2">
-        {(brain === "codex" ? ["codex"] : brain === "both" ? ["claude", "codex"] : ["claude"]).map(
-          (t) => (
-            <Button key={t} variant="outline" size="sm" onClick={() => runLogin(t)}>
-              <TerminalIcon className="mr-1 h-4 w-4" /> {t} login
-            </Button>
-          ),
-        )}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="label-mono text-muted-foreground">start:</span>
+        {tools.map((t) => (
+          <Button key={t} variant="outline" size="sm" onClick={() => runLogin(t)} disabled={!ready}>
+            <TerminalIcon className="mr-1 h-4 w-4" /> {t} login
+          </Button>
+        ))}
+        <span className="text-xs text-muted-foreground">
+          You can also type directly into the terminal.
+        </span>
       </div>
       <div className="h-[420px] overflow-hidden border">
         <RemoteTerminal
@@ -656,11 +838,16 @@ function BrainLoginStep({ session, onDone }: { session: SetupSession; onDone: ()
         />
       </div>
       <div className="mt-4 flex items-center justify-between">
-        <span className="label-mono text-muted-foreground">
-          {ready ? "terminal live" : "connecting…"}
-        </span>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={onBack}>
+            Back
+          </Button>
+          <span className="label-mono text-muted-foreground">
+            {ready ? "terminal live" : "connecting…"}
+          </span>
+        </div>
         <Button onClick={onDone}>
-          I&apos;m signed in <ArrowRight />
+          {tools.length > 1 ? "Both signed in" : "I'm signed in"} <ArrowRight />
         </Button>
       </div>
     </Card>
@@ -681,7 +868,8 @@ function InstallStep({
   const [log, setLog] = React.useState("");
   const [done, setDone] = React.useState(false);
   const [ok, setOk] = React.useState(false);
-  const started = React.useRef(false);
+  const [failure, setFailure] = React.useState("");
+  const [elapsed, setElapsed] = React.useState(0);
 
   const onFrame = React.useCallback((f: ProvisionFrame) => {
     if (f.type === "assistant") setTurns((t) => [...t, { role: "assistant", text: f.text }]);
@@ -690,31 +878,64 @@ function InstallStep({
     else if (f.type === "phase.done" && f.phase === "install") {
       setDone(true);
       setOk(f.ok);
-    } else if (f.type === "error") toastError(f.detail);
+      if (!f.ok) setFailure(f.summary || "Setup didn't finish cleanly.");
+    } else if (f.type === "error") setFailure(f.detail);
   }, []);
 
   const { ready, send } = useProvisionSocket({ sessionId: session.session_id, onFrame });
 
+  const runInstall = React.useCallback(() => {
+    setDone(false);
+    setOk(false);
+    setFailure("");
+    send({ type: "install", context: { brain: session.brain, runtime: "docker" } });
+  }, [send, session.brain]);
+
+  const started = React.useRef(false);
   React.useEffect(() => {
     if (ready && !started.current) {
       started.current = true;
-      send({ type: "install", context: { brain: session.brain, runtime: "docker" } });
+      runInstall();
     }
-  }, [ready, send, session.brain]);
+  }, [ready, runInstall]);
+
+  // A running clock so a long install reads as progress, not a hang.
+  React.useEffect(() => {
+    if (done) return;
+    const id = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(id);
+  }, [done]);
+
+  const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
 
   return (
     <Card
       title="Setting up your Silicons"
-      subtitle="The agent is installing everything and bringing every Silicon online. This can take a few minutes."
+      subtitle="The agent is installing everything and bringing every Silicon online. This usually takes a few minutes — you can watch each command run."
       wide
     >
+      {failure && (
+        <ErrorBanner
+          message={failure}
+          onRetry={() => {
+            started.current = true;
+            runInstall();
+          }}
+        />
+      )}
       <div className="grid gap-4 lg:grid-cols-2">
-        <SetupChat turns={turns} busy={!done} disabled onSend={() => {}} className="h-[420px]" />
+        <SetupChat turns={turns} busy={!done && !failure} disabled onSend={() => {}} className="h-[420px]" />
         <LogView text={log} className="h-[420px]" />
       </div>
       <div className="mt-6 flex items-center justify-between">
         <span className="label-mono text-muted-foreground">
-          {done ? (ok ? "all silicons online" : "needs attention") : ready ? "installing…" : "connecting…"}
+          {done
+            ? ok
+              ? "all silicons online"
+              : "needs attention"
+            : ready
+              ? `installing… ${mmss}`
+              : "connecting…"}
         </span>
         <Button onClick={onDone} disabled={!done || !ok}>
           Finish <ArrowRight />
@@ -795,6 +1016,39 @@ function DoneStep({ team, onFinish }: { team: Team; onFinish: () => void }) {
 }
 
 // ---------------------------------------------------------------- shared UI
+function ErrorBanner({
+  message,
+  onRetry,
+  onEdit,
+}: {
+  message: string;
+  onRetry?: () => void;
+  onEdit?: () => void;
+}) {
+  return (
+    <div className="mb-4 flex items-start gap-3 border border-destructive/50 bg-destructive/10 p-3">
+      <Warning weight="fill" className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-sm text-foreground">{message}</p>
+        {(onRetry || onEdit) && (
+          <div className="mt-2 flex gap-2">
+            {onRetry && (
+              <Button size="sm" variant="outline" onClick={onRetry}>
+                Try again
+              </Button>
+            )}
+            {onEdit && (
+              <Button size="sm" variant="ghost" onClick={onEdit}>
+                Edit details
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Card({
   title,
   subtitle,

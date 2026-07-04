@@ -6,7 +6,16 @@
 // runs in a utilityProcess so it uses Electron's embedded Node — users don't
 // need Node installed.
 
-const { app, BrowserWindow, session, shell, utilityProcess } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  Tray,
+  nativeImage,
+  session,
+  shell,
+  utilityProcess,
+} = require("electron");
 const net = require("node:net");
 const path = require("node:path");
 
@@ -24,6 +33,10 @@ const SPOOFED_ORIGIN = "https://interface.teamofsilicons.com";
 
 let serverProc = null;
 let mainWindow = null;
+let tray = null;
+// Set once the local Next server is up; lets the tray / dock recreate the
+// window after it has been fully closed (e.g. after a renderer crash).
+let appUrl = null;
 
 // --- port helpers ------------------------------------------------------------
 
@@ -124,7 +137,7 @@ function installCorsShim(appOrigin) {
 
 // --- window -------------------------------------------------------------------
 
-function createWindow(appUrl) {
+function createWindow(url) {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 850,
@@ -142,18 +155,81 @@ function createWindow(appUrl) {
     shell.openExternal(url);
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(appUrl)) {
+  mainWindow.webContents.on("will-navigate", (event, navUrl) => {
+    if (!navUrl.startsWith(url)) {
       event.preventDefault();
-      shell.openExternal(url);
+      shell.openExternal(navUrl);
     }
+  });
+
+  // Closing the window hides it instead of quitting, so the renderer keeps
+  // running and in-page chat notifications keep firing. Real quits (Cmd+Q,
+  // menu/tray Quit, updater) set app.isQuitting in before-quit and pass through.
+  mainWindow.on("close", (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
+
+  // The page keeps the total unread count in the title as a leading "(n)".
+  // Mirror it onto the dock (macOS) / launcher (Linux Unity) badge.
+  mainWindow.on("page-title-updated", (_event, title) => {
+    const match = /^\((\d+)\)/.exec(title);
+    app.setBadgeCount(match ? Number(match[1]) : 0);
   });
 
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 
-  mainWindow.loadURL(appUrl);
+  mainWindow.loadURL(url);
+}
+
+// Un-hides (or recreates) the main window and brings it to the front.
+function showMainWindow() {
+  if (!mainWindow) {
+    if (appUrl) createWindow(appUrl);
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// --- tray (Windows/Linux) -------------------------------------------------------
+// With hide-on-close the app can end up running with no visible window; on
+// Windows/Linux there's no dock, so a tray icon is the way back in. macOS
+// relies on the dock instead.
+
+function createTray() {
+  if (process.platform === "darwin") return;
+
+  const image = nativeImage.createFromPath(path.join(__dirname, "build", "icon.png"));
+  if (image.isEmpty()) {
+    // No usable icon — skip the tray. window-all-closed falls back to
+    // quitting in that case so the app can't become unreachable.
+    console.warn("[desktop] tray icon missing; running without a tray");
+    return;
+  }
+
+  tray = new Tray(
+    process.platform === "win32" ? image.resize({ width: 16, height: 16 }) : image,
+  );
+  tray.setToolTip("Silicon Interface");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "Open Silicon Interface", click: showMainWindow },
+      { type: "separator" },
+      { label: "Quit", click: () => app.quit() },
+    ]),
+  );
+  // Left-click toggles the window (no-op on Linux DEs that only expose the
+  // context menu — "Open Silicon Interface" covers those).
+  tray.on("click", () => {
+    if (mainWindow?.isVisible()) mainWindow.hide();
+    else showMainWindow();
+  });
 }
 
 // --- lifecycle ------------------------------------------------------------------
@@ -161,29 +237,37 @@ function createWindow(appUrl) {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-  });
+  // A second launch (or a hidden-window user double-clicking the app icon)
+  // should surface the existing instance, un-hiding it if needed.
+  app.on("second-instance", showMainWindow);
 
   app.whenReady().then(async () => {
     const port = await pickPort();
-    const appUrl = `http://127.0.0.1:${port}`;
+    appUrl = `http://127.0.0.1:${port}`;
     installCorsShim(appUrl);
     startServer(port);
     await waitForServer(port);
     createWindow(appUrl);
+    createTray();
 
-    app.on("activate", () => {
-      // macOS dock re-activate with no windows — server is still up, reopen.
-      if (BrowserWindow.getAllWindows().length === 0) createWindow(appUrl);
-    });
+    // macOS dock click (also fired when an OS notification posted by the
+    // renderer is clicked and the app activates) — un-hide or recreate.
+    app.on("activate", showMainWindow);
   });
 
-  // The app is useless without a window steering the local server — quit
-  // everywhere, including macOS.
-  app.on("window-all-closed", () => app.quit());
-  app.on("before-quit", stopServer);
+  // With hide-on-close the window is normally hidden, not closed, so this only
+  // fires after a real window destruction (e.g. renderer crash). Keep running
+  // on macOS (dock restores) and on Win/Linux when a tray exists (tray
+  // restores); otherwise there'd be no way back in, so quit.
+  app.on("window-all-closed", () => {
+    if (process.platform === "darwin") return;
+    if (!tray) app.quit();
+  });
+
+  app.on("before-quit", () => {
+    // Lets the window `close` handler distinguish a real quit from a
+    // close-button press and stop intercepting.
+    app.isQuitting = true;
+    stopServer();
+  });
 }

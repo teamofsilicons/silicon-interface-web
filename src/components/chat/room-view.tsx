@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { cn, dayLabel } from "@/lib/utils";
-import { useAuth } from "@/lib/auth";
+import { authStore, useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent, playAckTick, vibrate } from "@/lib/sounds";
 import {
@@ -23,6 +23,8 @@ import {
   clearPendingPreview,
   failPendingPreview,
 } from "@/lib/pending-preview";
+import { advanceEventCursor } from "@/lib/event-cursor";
+import { ackOutbox } from "@/lib/outbox";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -511,6 +513,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       .events(roomId, undefined, PAGE_SIZE)
       .then((evs) => {
         if (!mounted) return;
+        // Room loads count as "seen" for the global resync cursor.
+        const owner = authStore.getCarbon()?.carbon_id;
+        if (owner) for (const e of evs) advanceEventCursor(owner, e.event_id);
         setEvents((prev) => {
           const pending = prev.filter((e) => e.event_id.startsWith("temp-") || e._status === "pending");
           // Loaded history is complete — mark final so it doesn't replay
@@ -567,6 +572,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       api
         .events(room.room_id, undefined, PAGE_SIZE)
         .then((evs) => {
+          const owner = authStore.getCarbon()?.carbon_id;
+          if (owner) for (const e of evs) advanceEventCursor(owner, e.event_id);
           setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
           // §1.7 — after a (re)connect, resync the progress line from the cache
           // rather than blindly dropping it: this effect also fires on the first
@@ -644,9 +651,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           // Fall back to the old content-equality heuristic when absent.
           const echoedClientId =
             typeof incoming.content.client_id === "string" ? incoming.content.client_id : null;
+          // "failed" rows are candidates too: a background outbox flush (or a
+          // POST whose response was lost after the server stored it) can land
+          // the echo while the local row still says failed — the echo with our
+          // client id is authoritative, so claim it instead of duplicating.
           const optIdx = prev.findIndex(
             (e) =>
-              e._status === "pending" &&
+              (e._status === "pending" || e._status === "failed") &&
               (echoedClientId
                 ? e._clientId === echoedClientId
                 : e.sender_handle === incoming.sender_handle &&
@@ -732,6 +743,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         ),
       );
     } else if (f.type === "read_receipt") {
+      // Receipts are broadcast for EVERY mark-read — including my own reads on
+      // other devices. Only a PEER's receipt can flip my messages to "read";
+      // my own receipt says nothing about whether they saw anything.
+      if (f.member_handle && f.member_handle === myUsername) return;
       // §2.6 — mark by POSITION, not string `<=`. String ordering is only valid
       // for fixed-width Crockford ULIDs; forwarded/UUID-fallback ids break it.
       let didRead = false;
@@ -1159,6 +1174,44 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       toast.error(err instanceof ApiError ? err.message : String(err));
     },
     [room.room_id],
+  );
+
+  // Tap-to-retry on a failed bubble: re-POST the SAME payload with the SAME
+  // client id (the server is idempotent per content.client_id, so a retry of
+  // a send that secretly succeeded resolves to the original event). The row
+  // flips back to "pending" — and so does the sidebar's pending preview —
+  // then the normal ack/fail path takes over. Text retries also clear their
+  // outbox entry on success so the background flusher doesn't re-send.
+  const retrySend = React.useCallback(
+    (ev: Event) => {
+      const local = ev as LocalEvent;
+      const clientId = local._clientId;
+      if (!clientId || local._status !== "failed") return;
+      const payload: OptimisticPayload = {
+        type: ev.type,
+        content: ev.content,
+        reply_to_event_id: ev.reply_to_event_id || undefined,
+      };
+      setEvents((prev) =>
+        prev.map((e) =>
+          e._clientId === clientId ? { ...e, _status: "pending" as MessageStatus } : e,
+        ),
+      );
+      setPendingPreview(room.room_id, {
+        clientId,
+        text: outgoingPreviewText(payload),
+        status: "waiting",
+      });
+      api
+        .sendEvent(room.room_id, payload, clientId)
+        .then((real) => {
+          const owner = authStore.getCarbon()?.carbon_id;
+          if (owner) ackOutbox(owner, clientId);
+          onAck(clientId, real);
+        })
+        .catch((err) => onFail(clientId, err));
+    },
+    [room.room_id, onAck, onFail],
   );
 
   // Empty-room "Say Hi" — sends a plain "hi" using the optimistic send flow.
@@ -1657,6 +1710,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                 onReply={readOnly ? undefined : onReply}
                 onReact={readOnly ? undefined : onReact}
                 onForward={readOnly ? undefined : onForward}
+                onRetry={readOnly ? undefined : retrySend}
                 onDelete={
                   readOnly || (room.kind === "direct" && peer?.kind === "silicon")
                     ? undefined

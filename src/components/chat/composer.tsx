@@ -15,6 +15,8 @@ import {
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { authStore } from "@/lib/auth";
+import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { track } from "@/lib/analytics";
 import { searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
@@ -953,8 +955,21 @@ export function Composer({
       const ackClientId = delayedTextQueueRef.current[0]?.clientId;
       clearDelayedQueue();
       if (ackClientId) onOptimisticUpdate?.(ackClientId, payload);
+      // Outbox: the merged batch persists under the FIRST queued client id —
+      // the same id the POST is stamped with, so a flush retry dedupes.
+      const outboxOwner = ackClientId ? (authStore.getCarbon()?.carbon_id ?? null) : null;
+      if (outboxOwner && ackClientId) {
+        enqueueOutbox(outboxOwner, {
+          roomId,
+          clientId: ackClientId,
+          body: String(payload.content?.body ?? ""),
+          replyTo: payload.reply_to_event_id,
+          at: Date.now(),
+        });
+      }
       try {
         const real = await api.sendEvent(roomId, payload, ackClientId); // §2.3
+        if (outboxOwner && ackClientId) ackOutbox(outboxOwner, ackClientId);
         if (optimistic && ackClientId) onAck(ackClientId, real);
         track.messageSent({
           room_id: roomId,
@@ -1090,9 +1105,27 @@ export function Composer({
       clearDelayTimer();
       const payload = buildQueuedPayload(queued);
       delayedTextQueueRef.current = [];
-      api.sendEvent(roomId, payload, queued[0]?.clientId).catch((err) => {
-        toast.error(err instanceof ApiError ? err.message : String(err));
-      });
+      const clientId = queued[0]?.clientId;
+      // Unmount flush is fire-and-forget — persist it to the outbox so a
+      // failure (or the page dying mid-POST) still gets retried later.
+      const outboxOwner = clientId ? (authStore.getCarbon()?.carbon_id ?? null) : null;
+      if (outboxOwner && clientId) {
+        enqueueOutbox(outboxOwner, {
+          roomId,
+          clientId,
+          body: String(payload.content?.body ?? ""),
+          replyTo: payload.reply_to_event_id,
+          at: Date.now(),
+        });
+      }
+      api
+        .sendEvent(roomId, payload, clientId)
+        .then(() => {
+          if (outboxOwner && clientId) ackOutbox(outboxOwner, clientId);
+        })
+        .catch((err) => {
+          toast.error(err instanceof ApiError ? err.message : String(err));
+        });
     },
     [buildQueuedPayload, clearDelayTimer, roomId],
   );
@@ -1105,9 +1138,27 @@ export function Composer({
       reply_to_event_id: replyTo?.event_id,
     };
     onOptimisticAdd(clientId, payload);
+    // Persisted outbox: enqueue BEFORE the POST, ack on success. On failure
+    // the entry stays — the reconnect/mount flusher (and the failed bubble's
+    // tap-to-retry) re-POSTs it with the same client id, which the server
+    // dedupes. Plain-text only: extraContent (bundle_id) can't be rebuilt by
+    // the flusher, so those sends keep the ephemeral path.
+    const outboxOwner = extraContent ? null : (authStore.getCarbon()?.carbon_id ?? null);
+    if (outboxOwner) {
+      enqueueOutbox(outboxOwner, {
+        roomId,
+        clientId,
+        body,
+        replyTo: replyTo?.event_id,
+        at: Date.now(),
+      });
+    }
     api
       .sendEvent(roomId, payload, clientId) // §2.3 — echo-match by client id
-      .then((real) => onAck(clientId, real))
+      .then((real) => {
+        if (outboxOwner) ackOutbox(outboxOwner, clientId);
+        onAck(clientId, real);
+      })
       .catch((err) => onFail(clientId, err));
     track.messageSent({
       room_id: roomId,

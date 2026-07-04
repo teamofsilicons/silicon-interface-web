@@ -151,6 +151,11 @@ export const api = {
   pushUnsubscribe: (endpoint: string) =>
     call<{ ok: boolean }>("POST", "/api/v1/push/unsubscribe", { endpoint }),
 
+  // -------- websocket auth --------
+  /** Mint a single-use, 60s-TTL WS ticket so the socket URL never carries the
+   *  long-lived JWT. One ticket per connect attempt (single-use). */
+  wsTicket: () => call<{ ticket: string; expires_in: number }>("POST", "/api/v1/ws/ticket", {}),
+
   // -------- health / dev --------
   healthz: () => call<{ status: string }>("GET", "/healthz", undefined, { auth: false }),
   readyz: () => call<{ ready: boolean; checks: Record<string, string> }>("GET", "/readyz", undefined, { auth: false }),
@@ -348,6 +353,18 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),
   finalizeEvent: (event_id: string) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/final`, {}),
+
+  /** Global ULID-cursor backfill across all visible rooms — replays events
+   *  created after `after` as WS-shaped frames, for reconnect resync. */
+  eventsSync: (after: string, limit = 200) =>
+    call<{
+      frames: { type: "event"; room_id: string; event: Event }[];
+      next: string | null;
+      has_more: boolean;
+    }>(
+      "GET",
+      `/api/v1/events/sync?after=${encodeURIComponent(after)}&limit=${limit}`,
+    ),
 
   read: (room_id: string, event_id: string) =>
     call<{ marked: number }>("POST", `/api/v1/rooms/${room_id}/read`, { event_id }),

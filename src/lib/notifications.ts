@@ -5,9 +5,9 @@ const MAX_NOTIFICATIONS = 80;
 const PREFIX = "silicon-interface:notifications";
 export const NOTIFICATION_EVENT = "silicon-interface:notifications-changed";
 // Soft-navigation request raised when a browser/OS notification is clicked.
-// The NotificationCenter (which owns a Next router) subscribes and does a
-// client-side push — see showBrowserNotification. This avoids the cold
-// window.location reload that used to tear down the live socket.
+// The chat page subscribes and opens the room via the History API — see
+// showBrowserNotification. This avoids the cold window.location reload that
+// used to tear down the live socket.
 export const NOTIFICATION_NAVIGATE_EVENT = "silicon-interface:notifications-navigate";
 
 export interface InterfaceNotification {
@@ -212,8 +212,8 @@ export function showBrowserNotification(
     });
     notification.onclick = () => {
       window.focus();
-      // Soft client-side navigation: ask a subscriber (NotificationCenter) to
-      // router.push instead of a hard window.location.href, which would
+      // Soft client-side navigation: ask a subscriber (the chat page) to open
+      // the room instead of a hard window.location.href, which would
       // cold-reload the SPA and drop the live socket.
       if (options.roomId) {
         window.dispatchEvent(

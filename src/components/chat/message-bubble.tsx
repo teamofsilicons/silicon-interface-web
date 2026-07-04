@@ -215,6 +215,9 @@ interface Props {
   onForward?: (event: Event) => void;
   /** Self-delete (5-min carbon window). */
   onDelete?: (event: Event) => void;
+  /** Re-send a failed message (same client id — the server dedupes). When set,
+   *  the failed receipt becomes a tap-to-retry affordance. */
+  onRetry?: (event: Event) => void;
   /** Attachment events sent alongside this text message — rendered as tilted
    *  pins over the bubble instead of as their own standalone bubbles. */
   pinnedAttachments?: Event[];
@@ -241,6 +244,7 @@ export function MessageBubble({
   onReact,
   onForward,
   onDelete,
+  onRetry,
   pinnedAttachments,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
@@ -471,7 +475,23 @@ export function MessageBubble({
             )}
           >
             {showTime && <HoverTime iso={event.created_at} />}
-            {showTime && isMine && status && <Receipt status={status} />}
+            {showTime && isMine && status && (
+              status === "failed" && onRetry ? (
+                // Failed → the receipt becomes tap-to-retry (same clientId, so
+                // the server-side idempotency guarantees no duplicate).
+                <button
+                  type="button"
+                  onClick={() => onRetry(event)}
+                  title="send failed — click to retry"
+                  className="inline-flex items-center gap-1 text-destructive transition-colors hover:underline"
+                >
+                  <Receipt status={status} />
+                  <span>retry</span>
+                </button>
+              ) : (
+                <Receipt status={status} />
+              )
+            )}
             {mightStream && <StreamingPill body={String(event.content.body ?? "")} />}
           </div>
         )}
@@ -788,13 +808,13 @@ function Receipt({ status }: { status: MessageStatus }) {
   // tick would imply it's already sent.
   if (status === "pending")
     return <Clock className="h-3 w-3 opacity-60" aria-label={title} />;
-  if (status === "delivered")
-    return <Checks className="h-3 w-3 opacity-60" aria-label={title} />;
-  // §1.5 — "read" must be unmistakable vs "delivered" (the old pair differed
-  // only by text colour on a beige canvas). Use the brand success colour, full
-  // opacity — the confident "they saw it" beat every messenger gets right.
+  // Double tick = READ ONLY (matches the sidebar). Use the brand success
+  // colour, full opacity — the confident "they saw it" beat every messenger
+  // gets right.
   if (status === "read")
     return <Checks className="receipt-fill h-3 w-3 text-[var(--success)]" aria-label={title} weight="bold" />;
+  // "sent" and "delivered" both render the single tick — delivered survives as
+  // an internal status (STATUS_RANK precedence) but is visually the same beat.
   return <Check className="h-3 w-3" aria-label={title} />;
 }
 

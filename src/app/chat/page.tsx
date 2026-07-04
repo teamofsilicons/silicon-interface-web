@@ -10,6 +10,7 @@ import { useAuth } from "@/lib/auth";
 import {
   addNotification,
   markRoomNotificationsRead,
+  NOTIFICATION_NAVIGATE_EVENT,
   showBrowserNotification,
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
@@ -27,6 +28,8 @@ import {
   saveCachedMemberships,
 } from "@/lib/sidebar-cache";
 import { dropPendingPreview } from "@/lib/pending-preview";
+import { advanceEventCursor, getEventCursor } from "@/lib/event-cursor";
+import { ackOutbox, listOutbox } from "@/lib/outbox";
 import {
   createPersonalFolder,
   deletePersonalFolder,
@@ -301,9 +304,15 @@ function ChatPageInner() {
   }, []);
   // This page's own per-frame handler, reassigned every render (below) so it
   // always closes over the latest state without re-subscribing the socket.
-  const pageFrameRef = React.useRef<(f: WsFrame) => void>(() => {});
-  const dispatchFrame = React.useCallback((f: WsFrame) => {
-    pageFrameRef.current(f);
+  // `quiet` marks a frame replayed from the events/sync backfill (not live):
+  // it must update last_event/unread/snippets like any other frame, but skip
+  // sounds, notifications, and toasts — the user shouldn't get a burst of
+  // pings for messages that arrived while the socket was down. Subscribers
+  // (the open RoomView) get quiet frames too; their handling is idempotent
+  // by event_id/client_id, so a replayed duplicate is a no-op there.
+  const pageFrameRef = React.useRef<(f: WsFrame, opts?: { quiet?: boolean }) => void>(() => {});
+  const dispatchFrame = React.useCallback((f: WsFrame, opts?: { quiet?: boolean }) => {
+    pageFrameRef.current(f, opts);
     for (const fn of frameListenersRef.current) fn(f);
   }, []);
   const socket = useChatSocket({ onFrame: dispatchFrame });
@@ -396,6 +405,27 @@ function ChatPageInner() {
     (roomId: string): ReadonlySet<string> => roomTeamsMap.get(roomId) ?? EMPTY_SLUGS,
     [roomTeamsMap],
   );
+
+  // Teams band ordering — most-recent activity first, live: the max
+  // last_event.at across a team's rooms decides its slot, so a new message
+  // (which patches that room's last_event in place) bumps its team to the
+  // front immediately. Teams with no room activity keep their relative server
+  // order, after the active ones. ISO timestamps sort lexicographically.
+  const orderedTeams = React.useMemo(() => {
+    const latestByTeam = new Map<string, string>();
+    for (const r of rooms) {
+      const at = r.last_event?.at ?? r.updated_at ?? "";
+      if (!at) continue;
+      for (const slug of roomTeams(r.room_id)) {
+        const cur = latestByTeam.get(slug);
+        if (!cur || at > cur) latestByTeam.set(slug, at);
+      }
+    }
+    return teams
+      .map((t, i) => ({ t, i, at: latestByTeam.get(t.slug) ?? "" }))
+      .sort((a, b) => (a.at === b.at ? a.i - b.i : b.at.localeCompare(a.at)))
+      .map((x) => x.t);
+  }, [teams, rooms, roomTeams]);
 
   // A non-observed room that belongs to no team is an "Other"; observed rooms
   // are a separate "Observing" filter regardless of team.
@@ -552,18 +582,37 @@ function ChatPageInner() {
   // §9b — true while a background rooms refetch is in flight (the list is
   // served from cache instantly, then reconciled); drives a 1px top hairline.
   const [refreshing, setRefreshing] = React.useState(false);
+  // Coalesce concurrent refreshes: a sync backfill can dispatch many frames
+  // for rooms we don't know yet, and each unknown-room frame asks for a
+  // refetch — one in-flight /rooms/ request serves them all.
+  const refreshInflightRef = React.useRef<Promise<void> | null>(null);
   const refresh = React.useCallback(async () => {
-    setRefreshing(true);
+    if (refreshInflightRef.current) return refreshInflightRef.current;
+    const run = (async () => {
+      setRefreshing(true);
+      try {
+        const next = await api.rooms();
+        setRooms(next);
+        if (ownerId) {
+          saveCachedRooms(ownerId, next);
+          // Seed/advance the global event cursor from the freshest projection
+          // we have — refresh() already reflects these events in unread counts
+          // and previews, so a later events/sync must not replay them noisily.
+          for (const r of next) advanceEventCursor(ownerId, r.last_event?.event_id);
+        }
+      } catch (e) {
+        toast.error(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        roomsCacheOwnerRef.current = ownerId;
+        setLoading(false);
+        setRefreshing(false);
+      }
+    })();
+    refreshInflightRef.current = run;
     try {
-      const next = await api.rooms();
-      setRooms(next);
-      if (ownerId) saveCachedRooms(ownerId, next);
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : String(e));
+      await run;
     } finally {
-      roomsCacheOwnerRef.current = ownerId;
-      setLoading(false);
-      setRefreshing(false);
+      refreshInflightRef.current = null;
     }
   }, [ownerId]);
 
@@ -617,14 +666,95 @@ function ChatPageInner() {
     for (const r of rooms) socket.send({ type: "subscribe", room_id: r.room_id });
   }, [socket.ready, rooms, socket.send]);
 
+  // Cursor resync: page through GET /events/sync from the persisted global
+  // cursor, feeding each returned frame through the normal dispatch path with
+  // `quiet` set — snippets/unread/last_event update, but no sounds/toasts.
+  // Capped at 5 pages; anything beyond that is better served by refresh().
+  // No stored cursor (first run / cleared storage) → skip entirely rather
+  // than pulling history; refresh() seeds the cursor from current data.
+  const syncInflightRef = React.useRef(false);
+  const syncMissedEvents = React.useCallback(async () => {
+    if (!ownerId || syncInflightRef.current) return;
+    const cursor = getEventCursor(ownerId);
+    if (!cursor) return;
+    syncInflightRef.current = true;
+    try {
+      let after = cursor;
+      for (let page = 0; page < 5; page++) {
+        const res = await api.eventsSync(after, 200);
+        for (const frame of res.frames ?? []) {
+          if (frame?.type !== "event" || !frame.event) continue;
+          dispatchFrame(
+            { type: "event", room_id: frame.room_id, event: frame.event },
+            { quiet: true },
+          );
+          advanceEventCursor(ownerId, frame.event.event_id);
+        }
+        if (!res.has_more || !res.next) break;
+        after = res.next;
+      }
+    } catch {
+      // Best-effort — the rooms refresh that follows is the source of truth.
+    } finally {
+      syncInflightRef.current = false;
+    }
+  }, [ownerId, dispatchFrame]);
+
+  // Outbox flush: re-POST every still-pending text send with its ORIGINAL
+  // client_id. The events endpoint is idempotent per content.client_id, so a
+  // send whose response was lost (but which the server stored) comes back as
+  // the original event instead of a duplicate. Entries that fail again simply
+  // stay queued for the next flush.
+  const outboxFlushingRef = React.useRef(false);
+  const flushOutbox = React.useCallback(async () => {
+    if (!ownerId || outboxFlushingRef.current) return;
+    const entries = listOutbox(ownerId);
+    if (!entries.length) return;
+    outboxFlushingRef.current = true;
+    try {
+      for (const it of entries) {
+        try {
+          await api.sendEvent(
+            it.roomId,
+            {
+              type: "m.text",
+              content: { body: it.body },
+              reply_to_event_id: it.replyTo,
+            },
+            it.clientId,
+          );
+          ackOutbox(ownerId, it.clientId);
+        } catch {
+          /* still unreachable — keep it queued */
+        }
+      }
+    } finally {
+      outboxFlushingRef.current = false;
+    }
+  }, [ownerId]);
+
+  // Flush once on app start (page mount, once authed) — sends that were
+  // stranded by a reload/crash go out before the user types anything new.
+  React.useEffect(() => {
+    if (!ownerId) return;
+    void flushOutbox();
+  }, [ownerId, flushOutbox]);
+
   // On (re)connect, resync the sidebar — frames sent while the socket was down
-  // (e.g. a backend restart or a backgrounded tab) are never replayed, so a
-  // plain refetch catches anything we missed.
+  // (e.g. a backend restart or a backgrounded tab) are never replayed. The
+  // cursor backfill runs first (quiet), then the rooms refetch reconciles
+  // unread/receipt truth, then the outbox flush retries stranded sends.
   const prevReadyRef = React.useRef(false);
   React.useEffect(() => {
-    if (socket.ready && !prevReadyRef.current) void refresh();
+    if (socket.ready && !prevReadyRef.current) {
+      void (async () => {
+        await syncMissedEvents();
+        void refresh();
+        void flushOutbox();
+      })();
+    }
     prevReadyRef.current = socket.ready;
-  }, [socket.ready, refresh]);
+  }, [socket.ready, refresh, syncMissedEvents, flushOutbox]);
 
   // Live sidebar streaming. On every event frame, patch the matching room's
   // last-message preview and unread count in place so a new message shows
@@ -635,13 +765,17 @@ function ChatPageInner() {
   // delivers each frame exactly once we no longer need the unbounded
   // `processedRef` dedup set the old `lastFrame` effect carried (QA §2.9).
   React.useEffect(() => {
-    pageFrameRef.current = (f: WsFrame) => {
+    pageFrameRef.current = (f: WsFrame, opts?: { quiet?: boolean }) => {
+    // Backfilled (sync-replayed) frame: state updates yes, noise no.
+    const quiet = opts?.quiet === true;
     if (f.type === "event") {
       const ev = f.event;
+      // Every observed event advances the global resync cursor.
+      if (ownerId) advanceEventCursor(ownerId, ev.event_id);
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       // Received-message sound — global (any room), once per event.
       // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
-      if (!mine && isCountableEvent(ev)) {
+      if (!quiet && !mine && isCountableEvent(ev)) {
         if (ev.sender_kind === "silicon") playReceivedSilicon();
         else playReceived();
       }
@@ -663,7 +797,7 @@ function ChatPageInner() {
       // notification, browser alert, or toast — read-only visibility shouldn't
       // ping me. The unread indicator below still updates so the Observing tab
       // can show there's new activity.
-      if (countableIncoming && ownerId && !room.observed) {
+      if (!quiet && countableIncoming && ownerId && !room.observed) {
         const body = notificationBody(ev);
         const display = notificationDisplay(room, contacts.byPeer);
         addNotification(ownerId, {
@@ -721,10 +855,36 @@ function ChatPageInner() {
       // preview so it doesn't linger beside the now-current last message.
       if (preview !== null) dropPendingPreview(rid);
     } else if (f.type === "read_receipt") {
-      // Someone read up to f.event_id. If that reaches my own latest message,
-      // flip its sidebar tick to "read". (My own auto-read only ever advances
-      // to the last *received* message, never my own send — so a receipt at/
-      // past my latest message must be from someone else.)
+      // Receipts are broadcast on EVERY mark-read — including my own, from any
+      // device. A self-receipt (member_handle is mine) means I read this room
+      // somewhere else: sync this device's unread badge, and never treat it as
+      // a peer "read" tick (I can't read my own sent message via my own receipt).
+      if (f.member_handle && f.member_handle === myUsername) {
+        if (ownerId) markRoomNotificationsRead(ownerId, f.room_id);
+        const room = roomsRef.current.find((r) => r.room_id === f.room_id);
+        const le = room?.last_event;
+        if (!le?.event_id || f.event_id >= le.event_id) {
+          // The receipt covers everything we know about — zero the badge.
+          setRooms((prev) => {
+            const needsClear = prev.some(
+              (r) => r.room_id === f.room_id && (r.unread || (r.unread_count ?? 0) > 0),
+            );
+            if (!needsClear) return prev;
+            return prev.map((r) =>
+              r.room_id === f.room_id ? { ...r, unread: false, unread_count: 0 } : r,
+            );
+          });
+        } else {
+          // Partial coverage (messages landed after the read) — refetch for
+          // the true remaining count rather than guessing.
+          void refresh();
+        }
+        return;
+      }
+      // Someone ELSE read up to f.event_id. If that reaches my own latest
+      // message, flip its sidebar tick to "read". (My own auto-read only ever
+      // advances to the last *received* message, never my own send — so a
+      // receipt at/past my latest message must be from someone else.)
       setRooms((prev) => {
         let changed = false;
         const next = prev.map((r) => {
@@ -817,6 +977,18 @@ function ChatPageInner() {
     }
     };
   });
+
+  // Clicking an OS notification (showBrowserNotification) raises a soft
+  // navigation request instead of a cold window.location load. Open the room
+  // through the same History-API path the sidebar uses so the socket survives.
+  React.useEffect(() => {
+    const onNavigate = (e: globalThis.Event) => {
+      const roomId = (e as CustomEvent<{ roomId?: string }>).detail?.roomId;
+      if (roomId) navigate(`/chat?room=${encodeURIComponent(roomId)}`);
+    };
+    window.addEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
+    return () => window.removeEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
+  }, [navigate]);
 
   // Esc closes the open conversation (back to the list / welcome pane). We
   // bail when the event was already handled — an open dialog, popover, emoji
@@ -1130,7 +1302,7 @@ function ChatPageInner() {
         <TeamSlider
           filters={filters}
           onChange={setFilters}
-          teams={teams.map((t) => ({ slug: t.slug, name: t.name, logo_url: t.logo_url }))}
+          teams={orderedTeams.map((t) => ({ slug: t.slug, name: t.name, logo_url: t.logo_url }))}
           hasOthers={hasOtherRooms}
           hasObserving={hasObservedRooms}
           unread={unreadByTab}

@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { env } from "./env";
+import { api } from "./api";
 import { authStore } from "./auth";
 import type { WsFrame } from "./types";
 
@@ -23,6 +24,29 @@ interface UseWsReturn {
 // e.g. a backend restart, a network blip, or a backgrounded tab.
 const PING_INTERVAL_MS = 25_000;
 const MAX_BACKOFF_MS = 15_000;
+// Watchdog: if NOTHING has arrived (no pong, no frames) for this long, the
+// socket is dead-but-open (sleeping proxy, dropped uplink with no FIN) —
+// force-close it so the close handler's reconnect path takes over.
+const STALE_AFTER_MS = PING_INTERVAL_MS * 2.5;
+// Ticket-based WS auth: mint a single-use, short-TTL ticket per connect
+// attempt so the URL never carries the long-lived JWT. Minting is a plain
+// HTTP call (with api.ts's transparent 401-refresh) — it must never wedge the
+// reconnect path, so a hung request is raced against this timeout and we fall
+// back to the legacy `?token=` query auth.
+const TICKET_MINT_TIMEOUT_MS = 5_000;
+
+/** Resolve to a ticket string, or null when minting failed/timed out
+ *  (network down, 5xx, endpoint not deployed yet). Never rejects. */
+function mintTicket(): Promise<string | null> {
+  const mint = api
+    .wsTicket()
+    .then((r) => (typeof r.ticket === "string" && r.ticket ? r.ticket : null))
+    .catch(() => null);
+  const timeout = new Promise<null>((resolve) => {
+    setTimeout(() => resolve(null), TICKET_MINT_TIMEOUT_MS);
+  });
+  return Promise.race([mint, timeout]);
+}
 
 export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): UseWsReturn {
   const [ready, setReady] = React.useState(false);
@@ -32,11 +56,19 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
   onFrameRef.current = onFrame;
 
   const pingRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  // Last time ANY message arrived — pongs included. Drives the stale watchdog.
+  // Stamped on `open`, so the 0 initial value never trips the check.
+  const lastActivityRef = React.useRef(0);
   const reconnectRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptsRef = React.useRef(0);
   // True only when we tear the socket down on purpose (unmount / token change /
   // manual reconnect) so the close handler doesn't fight us with a retry.
   const intentionalRef = React.useRef(false);
+  // Monotonic id per connect() call. The token path awaits an async ticket
+  // mint before opening the socket; if another connect started (or a teardown
+  // happened) while we were waiting, the stale attempt must abort instead of
+  // stacking a second socket.
+  const connectSeqRef = React.useRef(0);
 
   const clearTimers = React.useCallback(() => {
     if (pingRef.current) {
@@ -64,10 +96,7 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     const siliconKey = authStore.getSiliconKey();
     if (!access && !siliconKey) return;
     intentionalRef.current = false;
-    const qs = new URLSearchParams();
-    if (siliconKey) qs.set("silicon_key", siliconKey);
-    else if (access) qs.set("token", access);
-    const url = `${env.wsBase}/ws/v1/?${qs.toString()}`;
+    const seq = ++connectSeqRef.current;
 
     const scheduleReconnect = () => {
       if (intentionalRef.current || !enabled) return;
@@ -77,47 +106,93 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
       reconnectRef.current = setTimeout(() => connect(), delay);
     };
 
-    try {
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
-      ws.addEventListener("open", () => {
-        setReady(true);
-        attemptsRef.current = 0;
-        if (pingRef.current) clearInterval(pingRef.current);
-        pingRef.current = setInterval(() => {
-          try {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "ping" }));
+    const wsUrl = (params: Record<string, string>) =>
+      `${env.wsBase}/ws/v1/?${new URLSearchParams(params).toString()}`;
+
+    const open = (url: string) => {
+      try {
+        const ws = new WebSocket(url);
+        wsRef.current = ws;
+        ws.addEventListener("open", () => {
+          setReady(true);
+          attemptsRef.current = 0;
+          lastActivityRef.current = Date.now();
+          if (pingRef.current) clearInterval(pingRef.current);
+          pingRef.current = setInterval(() => {
+            try {
+              if (ws.readyState === WebSocket.OPEN) {
+                // No pong (or any other frame) since well before the last ping —
+                // the connection is silently dead. Close it; the close handler
+                // schedules the reconnect.
+                if (Date.now() - lastActivityRef.current > STALE_AFTER_MS) {
+                  ws.close();
+                  return;
+                }
+                ws.send(JSON.stringify({ type: "ping" }));
+              }
+            } catch {
+              /* ignore */
             }
-          } catch {
-            /* ignore */
+          }, PING_INTERVAL_MS);
+        });
+        ws.addEventListener("close", () => {
+          setReady(false);
+          if (wsRef.current === ws) wsRef.current = null;
+          if (pingRef.current) {
+            clearInterval(pingRef.current);
+            pingRef.current = null;
           }
-        }, PING_INTERVAL_MS);
-      });
-      ws.addEventListener("close", () => {
-        setReady(false);
-        if (wsRef.current === ws) wsRef.current = null;
-        if (pingRef.current) {
-          clearInterval(pingRef.current);
-          pingRef.current = null;
-        }
+          scheduleReconnect();
+        });
+        ws.addEventListener("error", () => {
+          // a `close` event always follows — reconnection is handled there.
+        });
+        ws.addEventListener("message", (e) => {
+          lastActivityRef.current = Date.now();
+          try {
+            const f = JSON.parse(e.data) as WsFrame;
+            setLastFrame(f);
+            onFrameRef.current?.(f);
+          } catch {
+            // ignore malformed frame
+          }
+        });
+      } catch {
         scheduleReconnect();
-      });
-      ws.addEventListener("error", () => {
-        // a `close` event always follows — reconnection is handled there.
-      });
-      ws.addEventListener("message", (e) => {
-        try {
-          const f = JSON.parse(e.data) as WsFrame;
-          setLastFrame(f);
-          onFrameRef.current?.(f);
-        } catch {
-          // ignore malformed frame
-        }
-      });
-    } catch {
-      scheduleReconnect();
+      }
+    };
+
+    // Silicon-key connections keep their existing query auth.
+    if (siliconKey) {
+      open(wsUrl({ silicon_key: siliconKey }));
+      return;
     }
+
+    // Carbon (JWT) connections: mint a FRESH single-use ticket per attempt and
+    // connect with `?ticket=`. Any mint failure falls back to the legacy
+    // `?token=` URL so reconnects never get stuck behind the ticket endpoint.
+    void mintTicket().then((ticket) => {
+      // A teardown (unmount / token change / manual reconnect) or a newer
+      // connect attempt happened while we were minting — abort this one.
+      if (intentionalRef.current || !enabled) return;
+      if (seq !== connectSeqRef.current) return;
+      const current = wsRef.current;
+      if (
+        current &&
+        (current.readyState === WebSocket.OPEN ||
+          current.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+      if (ticket) {
+        open(wsUrl({ ticket }));
+        return;
+      }
+      // Fallback: re-read the access token (it may have rotated while minting).
+      const tok = authStore.getAccess();
+      if (tok) open(wsUrl({ token: tok }));
+      else scheduleReconnect();
+    });
   }, [enabled]);
 
   React.useEffect(() => {

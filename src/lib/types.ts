@@ -465,6 +465,9 @@ export type WsFrame =
       room_id: string;
       member_kind: Kind;
       member_id: number;
+      /** Reader's public handle (carbon username or silicon name) — lets a
+       *  client tell its OWN reads (cross-device sync) from a peer's. */
+      member_handle?: string;
       event_id: string;
     }
   | {

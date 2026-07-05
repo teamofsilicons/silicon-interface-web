@@ -1,6 +1,6 @@
 # silicon-chat-frontend
 
-Next.js 15 (App Router) test client for the [silicon-chat backend](../silicon-chat-backend/). Real chat UI **plus** a `/dev` endpoint explorer. Light-mode-only, styled after [siliconfriendly.com](https://siliconfriendly.com/) — minimalist, monochrome with a teal accent.
+Next.js 15 (App Router) test client for the [silicon-chat backend](../silicon-chat-backend/). Real chat UI **plus** a `/dev` endpoint explorer. Light-mode-only, styled after [siliconfriendly.com](https://siliconfriendly.com/) — minimalist, monochrome, with a teal accent.
 
 ## Quickstart
 

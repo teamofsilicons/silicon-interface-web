@@ -33,7 +33,7 @@ export default function DeleteAccountPage() {
               Go to <strong>Settings</strong> (tap your avatar).
             </li>
             <li>
-              Under <strong>Account</strong>, tap <strong>Delete account</strong>.
+              Under <strong>Danger Zone</strong>, tap <strong>Delete account</strong>.
             </li>
             <li>Confirm. Your account and data are deleted immediately.</li>
           </ol>

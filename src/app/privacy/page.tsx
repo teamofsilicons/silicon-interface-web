@@ -185,8 +185,8 @@ export default function PrivacyPage() {
         <ul className="list-disc space-y-2 pl-6">
           <li>
             Email:{" "}
-            <a href="mailto:silicon@unlikefraction.com" className="underline">
-              silicon@unlikefraction.com
+            <a href="mailto:support@teamofsilicons.com" className="underline">
+              support@teamofsilicons.com
             </a>
           </li>
           <li>

@@ -47,7 +47,7 @@ export default function DeleteAccountPage() {
           </p>
           <p className="mt-4">
             <a
-              href="mailto:silicon@unlikefraction.com?subject=Delete%20my%20Silicon%20Interface%20account"
+              href="mailto:support@teamofsilicons.com?subject=Delete%20my%20Silicon%20Interface%20account"
               className="inline-block bg-primary px-5 py-3 font-semibold text-primary-foreground"
             >
               Request deletion by email

@@ -31,8 +31,9 @@ const STALE_AFTER_MS = PING_INTERVAL_MS * 2.5;
 // Ticket-based WS auth: mint a single-use, short-TTL ticket per connect
 // attempt so the URL never carries the long-lived JWT. Minting is a plain
 // HTTP call (with api.ts's transparent 401-refresh) — it must never wedge the
-// reconnect path, so a hung request is raced against this timeout and we fall
-// back to the legacy `?token=` query auth.
+// reconnect path, so a hung request is raced against this timeout and the
+// attempt retries via the normal backoff (the JWT never goes in the URL,
+// where proxies and access logs could capture it).
 const TICKET_MINT_TIMEOUT_MS = 5_000;
 
 /** Resolve to a ticket string, or null when minting failed/timed out
@@ -169,8 +170,8 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     }
 
     // Carbon (JWT) connections: mint a FRESH single-use ticket per attempt and
-    // connect with `?ticket=`. Any mint failure falls back to the legacy
-    // `?token=` URL so reconnects never get stuck behind the ticket endpoint.
+    // connect with `?ticket=`. A mint failure retries via backoff — the JWT is
+    // never placed in the URL.
     void mintTicket().then((ticket) => {
       // A teardown (unmount / token change / manual reconnect) or a newer
       // connect attempt happened while we were minting — abort this one.
@@ -188,10 +189,8 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
         open(wsUrl({ ticket }));
         return;
       }
-      // Fallback: re-read the access token (it may have rotated while minting).
-      const tok = authStore.getAccess();
-      if (tok) open(wsUrl({ token: tok }));
-      else scheduleReconnect();
+      // Mint failed (offline / transient 5xx): back off and retry.
+      scheduleReconnect();
     });
   }, [enabled]);
 

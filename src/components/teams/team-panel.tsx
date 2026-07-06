@@ -148,7 +148,7 @@ function TeamPanelBody({
         </div>
       </div>
 
-      <div className="flex h-12 shrink-0 items-stretch overflow-x-auto border-b px-6">
+      <div className="no-scrollbar flex h-12 shrink-0 items-stretch overflow-x-auto border-b px-6">
         {tabs.map((item) => (
           <button
             key={item.id}

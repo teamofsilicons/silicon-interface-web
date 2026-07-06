@@ -11,7 +11,9 @@ import {
   addNotification,
   markRoomNotificationsRead,
   NOTIFICATION_NAVIGATE_EVENT,
+  reportUnreadBadge,
   showBrowserNotification,
+  userPresent,
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
 import { playReceived, playReceivedSilicon } from "@/lib/sounds";
@@ -208,6 +210,15 @@ function ChatPageInner() {
   const teamViewSlug = search.get("team");
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [loading, setLoading] = React.useState(true);
+  // Mirror the total unread count to the desktop wrapper's Dock/taskbar badge.
+  // No-op in plain browsers (the wrapper injects the hook this feeds).
+  React.useEffect(() => {
+    const total = rooms.reduce(
+      (n, r) => (r.observed ? n : n + (r.unread_count ?? (r.unread ? 1 : 0))),
+      0,
+    );
+    reportUnreadBadge(total);
+  }, [rooms]);
   // §1d — roomId → expiry timestamp for rooms with a silicon mid-task. Drives a
   // faint sidebar "working…" shimmer even when the room isn't open.
   const [workingRooms, setWorkingRooms] = React.useState<Record<string, number>>({});
@@ -792,7 +803,13 @@ function ChatPageInner() {
       // (When the room is open, RoomView owns and persists the snippet itself.)
       if (!isOpen) appendRoomEventSnippet(rid, ev);
       const preview = eventPreview(ev);
-      const countableIncoming = isCountableEvent(ev) && !mine && !isOpen;
+      // An open room only counts as "seen" while the user is actually present
+      // (in the desktop wrapper: window visible AND focused). A minimized or
+      // hidden app with a room open must still notify and count unread —
+      // auto-read catches up when the user returns.
+      const present = userPresent();
+      const attended = isOpen && present;
+      const countableIncoming = isCountableEvent(ev) && !mine && !attended;
       // Observer rooms (inter-silicon chats I only watch) never raise a
       // notification, browser alert, or toast — read-only visibility shouldn't
       // ping me. The unread indicator below still updates so the Observing tab
@@ -815,7 +832,8 @@ function ChatPageInner() {
           tag: rid,
           roomId: rid,
         });
-        if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        // Present → in-app toast; absent → the OS notification above covers it.
+        if (present) {
           toast.message(display.title, {
             description: body,
             action: {

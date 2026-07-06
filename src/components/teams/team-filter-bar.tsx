@@ -49,7 +49,7 @@ export function TeamFilterBar({
     });
 
   return (
-    <div className="flex items-center gap-1.5 overflow-x-auto border-b py-2 pl-6 pr-3">
+    <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto border-b py-2 pl-6 pr-3">
       <Chip active={filters.unread} onClick={() => onChange({ ...filters, unread: !filters.unread })}>
         <Tray className="h-3.5 w-3.5" /> Unread
       </Chip>
@@ -104,7 +104,7 @@ export function TeamSlider({
 
   return (
     <div className="flex items-stretch border-b">
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-2 pl-6 pr-3">
+      <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-2 pl-6 pr-3">
         {teams.map((team) => {
           const active = filters.teams.includes(team.slug);
           return (

@@ -403,6 +403,17 @@ summary,
   }
 }
 
+/* Horizontally-scrollable chip rows: keep the scroll, hide the bar. Invisible
+   on macOS overlay scrollbars, but on Windows (real scrollbars — notably the
+   desktop app's WebView2) the classic bar would otherwise sit under the chips. */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge/IE */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chromium/WebKit */
+}
+
 /* Uppercase mono label — pinned to JetBrains Mono so it keeps its monospace
    character regardless of the default body face. */
 .label-mono {

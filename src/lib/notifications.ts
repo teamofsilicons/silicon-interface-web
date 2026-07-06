@@ -1,5 +1,7 @@
 "use client";
 
+import * as React from "react";
+
 const VERSION = 2;
 const MAX_NOTIFICATIONS = 80;
 const PREFIX = "silicon-interface:notifications";
@@ -160,6 +162,77 @@ export function clearNotifications(ownerId: string) {
   persist(ownerId, [], 0);
 }
 
+// ---- Desktop-wrapper awareness ---------------------------------------------
+// The native desktop apps (WKWebView / WebView2 shells) inject a bridge that
+// marks itself via `__siliconBridge`, and — on hosts that support it — mirrors
+// the real window state into `__siliconWindowState`. Inside a webview the
+// document-level signals are unreliable: WebView2 reports visibilityState
+// "visible" even when the window is minimized, and document.hasFocus() stays
+// false until the user clicks into the page. The wrapper knows the truth.
+interface WrapperWindowState {
+  focused: boolean;
+  visible: boolean;
+}
+
+declare global {
+  interface Window {
+    __siliconBridge?: boolean;
+    __siliconWindowState?: WrapperWindowState;
+    __siliconSetBadge?: (count: number) => void;
+  }
+}
+
+/** Raised (by the wrapper bridge) whenever the native window state changes. */
+export const WINDOW_STATE_EVENT = "silicon-interface:window-state";
+
+/**
+ * True when the user can be assumed to be looking at the app: in a browser, a
+ * visible tab; in the desktop wrapper, a visible AND focused window. Presence
+ * gates the notification split (present → in-app toast, absent → OS
+ * notification) and auto-read.
+ */
+export function userPresent(): boolean {
+  if (typeof document === "undefined") return true;
+  const ws = typeof window !== "undefined" ? window.__siliconWindowState : undefined;
+  if (ws) return ws.visible && ws.focused;
+  return document.visibilityState === "visible";
+}
+
+/** Subscribe to presence flips (tab visibility or wrapper window state). */
+export function onPresenceChange(cb: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  window.addEventListener(WINDOW_STATE_EVENT, cb);
+  document.addEventListener("visibilitychange", cb);
+  return () => {
+    window.removeEventListener(WINDOW_STATE_EVENT, cb);
+    document.removeEventListener("visibilitychange", cb);
+  };
+}
+
+/** React hook over userPresent(). */
+export function usePresence(): boolean {
+  const [present, setPresent] = React.useState(true);
+  React.useEffect(() => {
+    setPresent(userPresent());
+    return onPresenceChange(() => setPresent(userPresent()));
+  }, []);
+  return present;
+}
+
+/**
+ * Report the total unread count to the desktop wrapper (drives the Dock /
+ * taskbar badge). A no-op in plain browsers and in wrappers that don't define
+ * the hook.
+ */
+export function reportUnreadBadge(count: number) {
+  if (typeof window === "undefined") return;
+  try {
+    window.__siliconSetBadge?.(count);
+  } catch {
+    /* wrapper hook misbehaved — never let it break the app */
+  }
+}
+
 export function browserNotificationPermission(): NotificationPermission | "unsupported" {
   if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
   return window.Notification.permission;
@@ -199,11 +272,13 @@ export function showBrowserNotification(
 ) {
   if (typeof window === "undefined" || !("Notification" in window)) return;
   if (window.Notification.permission !== "granted") return;
-  // Only raise an OS notification when the document is hidden. A visible tab —
-  // even one that's unfocused (a second monitor) — already gets the in-app
-  // toast; firing the OS notification too is a double-notify. Gating purely on
-  // visibilityState (not hasFocus) suppresses that duplicate.
-  if (document.visibilityState === "visible") return;
+  // Only raise an OS notification when the user isn't looking. In a browser
+  // that means a hidden tab (a visible-but-unfocused tab — second monitor —
+  // already gets the in-app toast; firing the OS notification too would be a
+  // double-notify). In the desktop wrapper, presence means the native window
+  // is visible AND focused — the wrapper feeds that state in, since webview
+  // visibilityState/hasFocus are unreliable there.
+  if (userPresent()) return;
   try {
     const notification = new window.Notification(title, {
       icon: "/icon.png",

@@ -13,6 +13,7 @@ import {
   shouldPromptNotifications,
   markNotificationsAsked,
   requestBrowserNotifications,
+  usePresence,
 } from "@/lib/notifications";
 import type { Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
@@ -855,12 +856,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     return null;
   }, [events, myUsername]);
 
+  // Auto-read requires the user to actually be present (visible tab; in the
+  // desktop wrapper: visible AND focused window). A minimized/hidden app with
+  // this room open must NOT silently read incoming messages — they'd never
+  // notify. `present` flips true on return, re-running the effect to catch up.
+  const present = usePresence();
   React.useEffect(() => {
     if (readOnly) return; // observers don't mark read — they aren't members
     if (!hydrated) return; // §2.5 — don't mark cached-but-unseen messages read
     if (!lastTheirsEventId) return;
+    if (!present) return;
     api.read(room.room_id, lastTheirsEventId).catch(() => undefined);
-  }, [lastTheirsEventId, room.room_id, readOnly, hydrated]);
+  }, [lastTheirsEventId, room.room_id, readOnly, hydrated, present]);
 
   // ----- Take-back / self-delete / react / reply / forward -----
   const onTakeBack = async (eventId: string, force = false) => {

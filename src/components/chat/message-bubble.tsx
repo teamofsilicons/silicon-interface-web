@@ -25,6 +25,7 @@ import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
+import { emojiOnly } from "@/lib/emoji";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 
@@ -910,6 +911,15 @@ function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
       const blank = !body && !event.link_preview;
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
+      }
+      // §125 — a message that is ONLY emoji (1–3 clusters, no link preview)
+      // renders large, like WhatsApp/Signal/Telegram. Anything else (mixed
+      // text, >3 emoji, a link preview) falls through to the normal renderer.
+      const emoji = emojiOnly(body);
+      if (emoji.ok && emoji.count >= 1 && emoji.count <= 3 && !event.link_preview) {
+        const sizeClass =
+          emoji.count === 1 ? "text-5xl" : emoji.count === 2 ? "text-4xl" : "text-3xl";
+        return <div className={cn("py-0.5 leading-none", sizeClass)}>{body}</div>;
       }
       // A message written in markdown renders as real markdown (headings,
       // lists, code, tables…); plain chatter keeps the lightweight inline

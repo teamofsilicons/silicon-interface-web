@@ -912,14 +912,11 @@ function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
       }
-      // §125 — a message that is ONLY emoji (1–3 clusters, no link preview)
-      // renders large, like WhatsApp/Signal/Telegram. Anything else (mixed
-      // text, >3 emoji, a link preview) falls through to the normal renderer.
+      // §125 — a message that is exactly one emoji grapheme cluster (no link
+      // preview) renders large. Mixed text or multiple emoji stay normal.
       const emoji = emojiOnly(body);
-      if (emoji.ok && emoji.count >= 1 && emoji.count <= 3 && !event.link_preview) {
-        const sizeClass =
-          emoji.count === 1 ? "text-5xl" : emoji.count === 2 ? "text-4xl" : "text-3xl";
-        return <div className={cn("py-0.5 leading-none", sizeClass)}>{body}</div>;
+      if (emoji.ok && emoji.count === 1 && !event.link_preview) {
+        return <div className="py-0.5 text-5xl leading-none">{body}</div>;
       }
       // A message written in markdown renders as real markdown (headings,
       // lists, code, tables…); plain chatter keeps the lightweight inline

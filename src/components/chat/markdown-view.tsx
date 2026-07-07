@@ -101,8 +101,10 @@ export function MarkdownView({
               {children}
             </ul>
           ),
-          ol: ({ children }) => (
+          ol: ({ children, start, type }) => (
             <ol
+              start={start}
+              type={type}
               className={cn(
                 "list-decimal pl-5 first:mt-0 last:mb-0",
                 c ? "my-1.5 space-y-0.5" : "my-3 space-y-1 pl-6",

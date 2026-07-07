@@ -18,7 +18,7 @@ import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { track } from "@/lib/analytics";
-import { searchEmoji } from "@/lib/emoji";
+import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
 import { flushDraft, getDraft, setDraft } from "@/lib/drafts";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
@@ -340,8 +340,38 @@ function EmojiQuickPicker({
   limit: number;
   onPick: (emoji: string) => void;
 }) {
-  const results = React.useMemo(() => searchEmoji(query, limit), [query, limit]);
+  const isDefault = query.trim() === "";
+  const resultLimit = isDefault ? ALL_EMOJI_LIST.length : limit;
+  const results = React.useMemo(() => searchEmoji(query, resultLimit), [query, resultLimit]);
   if (results.length === 0) return null;
+
+  if (isDefault) {
+    const stripCols = Math.ceil(results.length / 3);
+    return (
+      <div className="absolute bottom-full inset-x-0 z-50 mb-2 overflow-x-auto border bg-card p-2 shadow-md">
+        <div
+          className="grid w-max gap-1"
+          style={{ gridTemplateColumns: `repeat(${stripCols}, 2.25rem)` }}
+        >
+          {results.map((r, i) => (
+            <button
+              key={`${r.emoji}-${r.name}`}
+              type="button"
+              onClick={() => onPick(r.emoji)}
+              className={cn(
+                "inline-flex h-9 w-9 items-center justify-center border transition-colors hover:bg-accent",
+                i === selectedIndex ? "border-foreground bg-accent" : "border-transparent",
+              )}
+              title={`:${r.name}:`}
+            >
+              <span className="text-lg leading-none">{r.emoji}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="absolute bottom-full inset-x-0 z-50 mb-2 grid gap-1 border bg-card p-2 shadow-md"
@@ -349,14 +379,12 @@ function EmojiQuickPicker({
     >
       {results.map((r, i) => (
         <button
-          key={r.name}
+          key={`${r.emoji}-${r.name}`}
           type="button"
           onClick={() => onPick(r.emoji)}
           className={cn(
             "inline-flex h-9 w-full items-center justify-center border transition-colors hover:bg-accent",
-            i === selectedIndex
-              ? "border-foreground bg-accent"
-              : "border-transparent",
+            i === selectedIndex ? "border-foreground bg-accent" : "border-transparent",
           )}
           title={`:${r.name}:`}
         >
@@ -1622,8 +1650,10 @@ export function Composer({
               // Emoji picker keyboard navigation — true 2-D grid: ←/→ move one
               // cell, ↑/↓ move a whole row.
               if (emojiQuery !== null) {
-                const results = searchEmoji(emojiQuery, emojiLimit);
+                const isDefaultEmojiQuery = emojiQuery.trim() === "";
+                const results = searchEmoji(emojiQuery, isDefaultEmojiQuery ? ALL_EMOJI_LIST.length : emojiLimit);
                 const n = results.length;
+                const navCols = isDefaultEmojiQuery ? Math.ceil(n / 3) : emojiCols;
                 if (n > 0 && e.key === "ArrowRight") {
                   e.preventDefault();
                   setEmojiIdx((i) => Math.min(i + 1, n - 1));
@@ -1636,12 +1666,12 @@ export function Composer({
                 }
                 if (n > 0 && e.key === "ArrowDown") {
                   e.preventDefault();
-                  setEmojiIdx((i) => Math.min(i + emojiCols, n - 1));
+                  setEmojiIdx((i) => Math.min(i + navCols, n - 1));
                   return;
                 }
                 if (n > 0 && e.key === "ArrowUp") {
                   e.preventDefault();
-                  setEmojiIdx((i) => Math.max(0, i - emojiCols));
+                  setEmojiIdx((i) => Math.max(0, i - navCols));
                   return;
                 }
                 if (e.key === "Tab" || (e.key === "Enter" && results.length > 0)) {

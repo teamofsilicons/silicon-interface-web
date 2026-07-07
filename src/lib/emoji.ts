@@ -141,7 +141,7 @@ function matchScore(entry: EmojiEntry, query: string): number | null {
 /** Match an entry by Unicode name, shortcode-ish name, or keyword. */
 export function searchEmoji(q: string, limit = 40): EmojiEntry[] {
   const s = normalizeSearchText(q);
-  if (!s) return POPULAR_EMOJI_LIST.slice(0, limit);
+  if (!s) return ALL_EMOJI_LIST.slice(0, limit);
 
   return ALL_EMOJI_LIST.map((entry, index) => ({ entry, index, score: matchScore(entry, s) }))
     .filter((result): result is { entry: EmojiEntry; index: number; score: number } => result.score !== null)

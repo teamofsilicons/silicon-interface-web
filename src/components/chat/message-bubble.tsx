@@ -10,6 +10,7 @@ import {
   DotsThree,
   DownloadSimple,
   ImageSquare,
+  ListChecks,
   MusicNote,
   Share,
   Smiley,
@@ -23,7 +24,7 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
-import type { Event, ProgressState } from "@/lib/types";
+import type { Event, EventType, ProgressState } from "@/lib/types";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
@@ -31,7 +32,6 @@ import { copyText } from "@/lib/clipboard";
 import { downloadAsset, MediaPreviewer } from "./media-previewer";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { AttachmentCard } from "@/components/chat/attachment-card";
 import { MarkdownView } from "@/components/chat/markdown-view";
@@ -60,6 +60,14 @@ import {
 } from "@/components/ui/dialog";
 
 const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
+const SELECTABLE_FORWARD_TYPES = new Set<EventType>([
+  "m.text",
+  "m.image",
+  "m.file",
+  "m.voice",
+  "m.tts",
+  "m.remote_browser",
+]);
 
 /** Deterministic tilt in [-3, 3] degrees, hashed from a stable key so each
  *  pin keeps its angle across re-renders (a fresh Math.random would jitter on
@@ -213,6 +221,14 @@ interface Props {
   onReact?: (event: Event, emoji: string) => void;
   /** Open a forward picker (a no-op stub today). */
   onForward?: (event: Event) => void;
+  /** Enter multi-select mode with this message pre-selected (options menu). */
+  onSelect?: (event: Event) => void;
+  /** True while the room is in multi-select mode. */
+  selectMode?: boolean;
+  /** Whether this message is currently in the selection set. */
+  selected?: boolean;
+  /** Toggle this message's membership in the selection set. */
+  onToggleSelect?: (event: Event) => void;
   /** Self-delete (5-min carbon window). */
   onDelete?: (event: Event) => void;
   /** Re-send a failed message (same client id — the server dedupes). When set,
@@ -243,8 +259,12 @@ export function MessageBubble({
   onReply,
   onReact,
   onForward,
+  onSelect,
   onDelete,
   onRetry,
+  selectMode = false,
+  selected = false,
+  onToggleSelect,
   pinnedAttachments,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
@@ -319,7 +339,17 @@ export function MessageBubble({
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
   // controlled state for that dropdown.
   const [moreOpen, setMoreOpen] = React.useState(false);
-  const hasActions = !redacted && !!(onReply || onReact || onForward || onDelete);
+  const hasActions = !redacted && !!(onReply || onReact || onForward || onDelete || onSelect);
+  // Multi-select eligibility mirrors the forward/reply gate: a real, settled,
+  // non-deleted bubble. Streaming/optimistic (`is_final === false`) and deleted
+  // messages are never selectable. (m.system / m.session_marker already early-
+  // return above, so they never reach here and can't be selected.)
+  const selectable =
+    !!onToggleSelect &&
+    SELECTABLE_FORWARD_TYPES.has(event.type) &&
+    event.is_final !== false &&
+    !redacted;
+  const inSelect = selectMode && selectable;
 
   return (
     <div
@@ -330,8 +360,35 @@ export function MessageBubble({
         "group flex w-full gap-2 mb-0.5",
         showSender ? "mt-1.5" : "mt-0.5",
         isMine ? "justify-end" : "justify-start",
+        // In select-mode the whole row is a big toggle target; suppress text
+        // selection so a click reads as "select", not "highlight".
+        inSelect && "cursor-pointer select-none",
       )}
+      // Toggle selection when the row is an eligible select target. Clicking
+      // suppresses the normal action menu (hidden below) and normal behavior.
+      onClick={inSelect ? () => onToggleSelect?.(event) : undefined}
     >
+      {selectMode && (
+        // Leading select affordance, shown for every bubble while in select-
+        // mode. Eligible bubbles get a real checkbox; ineligible ones (system
+        // rows early-return above; streaming/deleted are handled here) get a
+        // blank spacer so the timeline doesn't shift horizontally.
+        <div className="mt-1 flex w-5 shrink-0 items-center justify-center">
+          {selectable && (
+            <span
+              aria-hidden
+              className={cn(
+                "flex h-5 w-5 items-center justify-center rounded-full border transition-colors",
+                selected
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-muted-foreground/40",
+              )}
+            >
+              {selected && <Check className="h-3 w-3" weight="bold" />}
+            </span>
+          )}
+        </div>
+      )}
       {!isMine && (
         // Avatar slot stays present even on middle-of-group bubbles so the
         // text aligns vertically; we just hide the actual mark when it's
@@ -370,6 +427,10 @@ export function MessageBubble({
             className={cn(
               "relative z-10 -mb-2 flex flex-wrap gap-1.5 px-1",
               isMine ? "justify-end" : "justify-start",
+              // In select-mode a click anywhere on the row must toggle the
+              // whole bundle; disable the pins' own open/preview handlers so
+              // they don't swallow the click (and can't be opened mid-select).
+              inSelect && "pointer-events-none",
             )}
           >
             {pinnedAttachments.map((att, idx) => (
@@ -390,6 +451,8 @@ export function MessageBubble({
             // padding, label, time) reveals the actions — not just the text.
             "relative min-w-0 max-w-full p-3 text-sm shadow-sm",
             copyFlash && "copy-flash",
+            // Selected bubbles get a highlight ring in select-mode.
+            selected && "ring-2 ring-primary",
             redacted
               ? "border bg-muted text-muted-foreground italic"
               : isMine
@@ -420,7 +483,8 @@ export function MessageBubble({
           {/* Hover actions: reply / react / more. Floats above the bubble on
               hover; on mobile, tap-to-reveal is not supported here — a small-
               screen affordance is a follow-up. */}
-          {hasActions && (
+          {/* Hover actions are suppressed while selecting — the row is a toggle. */}
+          {hasActions && !selectMode && (
             <BubbleActions
               event={event}
               isMine={isMine}
@@ -431,6 +495,7 @@ export function MessageBubble({
               onReply={onReply}
               onReact={onReact}
               onForward={onForward}
+              onSelect={selectable ? onSelect : undefined}
               onDelete={onDelete}
               onTakeBack={onTakeBack}
               onCopied={triggerCopyFlash}
@@ -440,7 +505,7 @@ export function MessageBubble({
 
         {/* Reaction chips — surfaced under the bubble, grouped by emoji. */}
         {reactions && Object.keys(reactions).length > 0 && (
-          <div className={cn("flex flex-wrap gap-1", isMine && "justify-end")}>
+          <div className={cn("flex flex-wrap gap-1", isMine && "justify-end", inSelect && "pointer-events-none")}>
             {Object.entries(reactions).map(([emoji, who]) => {
               const reactedByMe = !!myHandle && who.includes(myHandle);
               return (
@@ -520,6 +585,7 @@ function BubbleActions({
   onReply,
   onReact,
   onForward,
+  onSelect,
   onDelete,
   onTakeBack,
   onCopied,
@@ -535,6 +601,7 @@ function BubbleActions({
   onReply?: (event: Event) => void;
   onReact?: (event: Event, emoji: string) => void;
   onForward?: (event: Event) => void;
+  onSelect?: (event: Event) => void;
   onDelete?: (event: Event) => void;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   onCopied?: () => void;
@@ -663,6 +730,12 @@ function BubbleActions({
             <DropdownMenuItem onClick={() => onForward(event)}>
               <Share className="mr-2 h-3.5 w-3.5" />
               forward
+            </DropdownMenuItem>
+          )}
+          {onSelect && (
+            <DropdownMenuItem onClick={() => onSelect(event)}>
+              <ListChecks className="mr-2 h-3.5 w-3.5" />
+              select
             </DropdownMenuItem>
           )}
           {hasMedia && (

@@ -22,7 +22,7 @@ import { IdAvatar } from "@/components/profile/id-avatar";
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The message being forwarded — needed for forward_from metadata. */
+  /** The source message. Server-side forwarding resolves bundled attachments. */
   event: Event | null;
   /** Rooms the user can forward into (excludes the source). */
   rooms: Room[];
@@ -32,8 +32,8 @@ interface Props {
 
 /**
  * Forward picker. Users multi-select rooms to forward into; the same source
- * content is re-posted to each target with a forward_from chip rendered on
- * the receiving bubble (Telegram-style).
+ * event is forwarded server-side so bundled attachments stay with the visible
+ * message and the client never sends raw attachment URLs.
  */
 export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }: Props) {
   const [query, setQuery] = React.useState("");
@@ -42,8 +42,10 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
 
   React.useEffect(() => {
     if (!open) {
-      setQuery("");
-      setSelected(new Set());
+      queueMicrotask(() => {
+        setQuery("");
+        setSelected(new Set());
+      });
     }
   }, [open]);
 
@@ -73,22 +75,13 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
     if (!event || selected.size === 0) return;
     setSending(true);
     try {
-      const forwardFrom = {
-        room_id: sourceRoomId,
-        event_id: event.event_id,
-        sender_kind: event.sender_kind,
-        sender_handle: event.sender_handle,
-      };
-      // Re-post into each selected room. The original event type/content is
-      // preserved; we just stash forward_from for the receiver to render.
-      const content = { ...(event.content as object), forward_from: forwardFrom };
       // QA §7.7: the old code `.catch`'d each send and used Promise.all, so the
       // aggregate always resolved and "forwarded to N chats" fired even when
       // every send failed (the user saw N error toasts AND a success toast).
       // Use allSettled and report the real success/failure split.
       const targets = Array.from(selected);
       const results = await Promise.allSettled(
-        targets.map((rid) => api.sendEvent(rid, { type: event.type, content })),
+        targets.map((rid) => api.forwardEvent(rid, sourceRoomId, event.event_id)),
       );
       const failures = results.filter((r) => r.status === "rejected");
       const ok = results.length - failures.length;

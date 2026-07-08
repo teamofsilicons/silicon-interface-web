@@ -158,14 +158,12 @@ export function ProfileEditor() {
         kind: "profile_icon",
         filename: file.name,
       });
-      if (!r.upload.dev_mode) {
-        const form = new FormData();
-        for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-        form.append("file", file);
-        const up = await fetch(r.upload.url, { method: r.upload.method || "POST", body: form });
-        if (!up.ok) throw new Error(`upload failed (${up.status})`);
-        await api.mediaComplete(r.media.media_id);
-      }
+      const form = new FormData();
+      for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+      form.append("file", file);
+      const up = await fetch(r.upload.url, { method: r.upload.method || "POST", body: form });
+      if (!up.ok) throw new Error(`upload failed (${up.status})`);
+      await api.mediaComplete(r.media.media_id);
       const key = (r.upload.fields as Record<string, string>).key || r.media.media_id;
       const c = await api.patchMe({ profile_photo_key: key });
       setMe(c);

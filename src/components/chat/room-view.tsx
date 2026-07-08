@@ -15,7 +15,7 @@ import {
   requestBrowserNotifications,
   usePresence,
 } from "@/lib/notifications";
-import type { Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
+import type { AnnotationDraft, Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
 import { readRoomEventSnippet, saveRoomEventSnippet } from "@/lib/room-snippet";
 import {
@@ -326,6 +326,10 @@ export function RoomView({
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const [editingEvent, setEditingEvent] = React.useState<Event | null>(null);
   const [restoreDraft, setRestoreDraft] = React.useState<ComposerRestoreDraft | null>(null);
+  // A flattened annotation set handed off from the studio, staged into the
+  // composer as a reply-linked draft (consumed by the composer, then cleared).
+  const [pendingAnnotationDraft, setPendingAnnotationDraft] =
+    React.useState<AnnotationDraft | null>(null);
   const [search, setSearch] = React.useState<string | null>(null);
   // Backend message search (/events/search) — covers the whole history, not just
   // the loaded window. `searchResults` is null when no query is active.
@@ -1470,6 +1474,18 @@ export function RoomView({
     [eventById, events, myUsername, queueJumpToEvent, replyJumpState, room.room_id],
   );
 
+  // The studio hands off a flattened annotation set here: reply to the original
+  // file message (so the thread + silicon have a clear reference) and stage the
+  // draft into the composer for the user to add a message before sending.
+  const onAttachAnnotations = React.useCallback(
+    (draft: AnnotationDraft) => {
+      const src = draft.sourceEventId ? eventById.get(draft.sourceEventId) : undefined;
+      if (src) setReplyTo(src);
+      setPendingAnnotationDraft(draft);
+    },
+    [eventById],
+  );
+
   // ----- Optimistic send plumbing -----
   const onOptimisticAdd = React.useCallback(
     (clientId: string, payload: OptimisticPayload) => {
@@ -2103,6 +2119,8 @@ export function RoomView({
             isDirect={room.kind === "direct"}
             mentionTargets={mentionCandidates}
             onMentionClick={openSenderProfile}
+            roomId={room.room_id}
+            onAttachAnnotations={readOnly ? undefined : onAttachAnnotations}
           />
         </>
       );
@@ -2191,6 +2209,8 @@ export function RoomView({
                   pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
                   mentionTargets={mentionCandidates}
                   onMentionClick={openSenderProfile}
+                  roomId={room.room_id}
+                  onAttachAnnotations={readOnly ? undefined : onAttachAnnotations}
                 />
               </div>
             );
@@ -2498,6 +2518,8 @@ export function RoomView({
             onOptimisticUpdate={onOptimisticUpdate}
             droppedFile={droppedFile}
             onDroppedFileConsumed={() => setDroppedFile(null)}
+            pendingAnnotationDraft={pendingAnnotationDraft}
+            onAnnotationDraftConsumed={() => setPendingAnnotationDraft(null)}
             replyTo={replyTo}
             onClearReply={() => setReplyTo(null)}
             delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}

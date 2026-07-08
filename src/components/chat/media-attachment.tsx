@@ -13,7 +13,7 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
-import type { MediaObject } from "@/lib/types";
+import type { AnnotationDraft, MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { AttachmentCard } from "./attachment-card";
@@ -24,8 +24,7 @@ import { SiliconAudio } from "./silicon-audio";
 /**
  * Renders an attachment inline (image/video/audio thumbnail / PDF chip / file
  * chip) and opens a fullscreen previewer on click for everything we can
- * render in-browser. Dev presigns (`dev-download.local`) skip the actual
- * fetch and just show a labelled chip.
+ * render in-browser.
  */
 export function MediaAttachment({
   mediaId,
@@ -38,10 +37,20 @@ export function MediaAttachment({
   localPeaks,
   width,
   height,
+  roomId,
+  eventId,
+  onAttachAnnotations,
 }: {
   mediaId: string;
   mime?: string;
   caption?: string;
+  /** Room the attachment lives in — enables the annotation studio in the
+   *  previewer (needs somewhere to send the result). */
+  roomId?: string;
+  /** event_id of the message carrying this attachment (annotation reply target). */
+  eventId?: string;
+  /** Stage annotations as a composer draft instead of posting directly. */
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
   /** Pixel dimensions from the event (media_meta) — used to reserve the exact
    *  bubble aspect from the FIRST render so the timeline never shifts when the
    *  image/video actually loads. Falls back to the fetched media dims. */
@@ -202,7 +211,6 @@ export function MediaAttachment({
   const isImage = m.startsWith("image/") || media?.kind === "image";
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/") || media?.kind === "voice" || media?.kind === "tts_output";
-  const isDev = !!url && (url.includes("dev-download.local") || url.includes("dev-upload.local"));
 
   // Decide the placeholder shape *before* the URL is known, so the bubble
   // doesn't visibly snap to size when the image actually arrives.
@@ -318,7 +326,7 @@ export function MediaAttachment({
   // doesn't reflow when the actual pixels arrive over the network. When the
   // server knows the real dimensions (#22), we use the actual aspect ratio
   // instead of the 4/3 fallback — zero layout shift.
-  if (isImage && !isDev) {
+  if (isImage) {
     const imgAspect = aspectFrom("4 / 3");
     return (
       <>
@@ -357,6 +365,10 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={eventId}
+          onAttachAnnotations={onAttachAnnotations}
         />
       </>
     );
@@ -365,7 +377,7 @@ export function MediaAttachment({
   // Video — same fixed-aspect-frame treatment so loading doesn't shift the
   // bubble; the inline player handles its own controls. Real dims (#22)
   // override the 16/9 fallback.
-  if (isVideo && !isDev) {
+  if (isVideo) {
     const vidAspect = aspectFrom("16 / 9");
     return (
       <>
@@ -393,6 +405,10 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={eventId}
+          onAttachAnnotations={onAttachAnnotations}
         />
       </>
     );
@@ -400,7 +416,7 @@ export function MediaAttachment({
 
   // Audio — Silicon-style waveform player. Uses server-computed peaks +
   // duration so the bars + timer render before the audio bytes download.
-  if (isAudio && !isDev) {
+  if (isAudio) {
     // No inline download — it's available from the message's options menu. Cap
     // the width so the player stays compact and never overflows narrow
     // containers like the profile drawer.
@@ -419,7 +435,7 @@ export function MediaAttachment({
   // Previewable types open the in-place previewer; the rest download directly.
   const Glyph = fileGlyph(filename, m);
   const sizeLabel = media?.size ? formatBytes(media.size) : null;
-  const canPreview = !isDev && isPreviewable(filename, m);
+  const canPreview = isPreviewable(filename, m);
   return (
     <>
       <AttachmentCard
@@ -440,6 +456,10 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={eventId}
+          onAttachAnnotations={onAttachAnnotations}
         />
       )}
     </>

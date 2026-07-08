@@ -21,10 +21,12 @@ import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { track } from "@/lib/analytics";
 import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
+import { xhrUpload } from "@/lib/media-upload";
 import { flushDraft, getDraft, setDraft } from "@/lib/drafts";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
 import { editableTextForEvent } from "@/lib/event-edit";
-import type { Event, EventType } from "@/lib/types";
+import { clearAnnotationSession } from "@/lib/annotation-session";
+import type { AnnotationDraft, Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -35,44 +37,6 @@ import { MediaPreviewer } from "@/components/chat/media-previewer";
 import { looksLikeMarkdown } from "@/lib/markdown";
 import { IdAvatar } from "@/components/profile/id-avatar";
 
-/** Upload to a presigned URL via XHR (fetch can't report upload progress).
- *  Reports 0–100% and supports abort; rejects with an AbortError when the
- *  user cancels so the caller can distinguish it from a real failure. */
-function xhrUpload(
-  url: string,
-  form: FormData,
-  onProgress: (pct: number, loaded: number) => void,
-  xhrRef: React.MutableRefObject<XMLHttpRequest | null>,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhrRef.current = xhr;
-    xhr.open("POST", url);
-    xhr.upload.onprogress = (e) => {
-      // Report the *real* loaded byte count alongside the percent so the UI's
-      // "X / Y" label reflects actual progress, not a count derived from a
-      // rounded percentage.
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100), e.loaded);
-    };
-    const clear = () => {
-      xhrRef.current = null;
-    };
-    xhr.onload = () => {
-      clear();
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`upload failed (${xhr.status})`));
-    };
-    xhr.onerror = () => {
-      clear();
-      reject(new Error("upload failed"));
-    };
-    xhr.onabort = () => {
-      clear();
-      reject(new DOMException("aborted", "AbortError"));
-    };
-    xhr.send(form);
-  });
-}
 
 /** Slice of an `Event` we can fabricate locally before the server responds. */
 export interface OptimisticPayload {
@@ -111,6 +75,9 @@ interface Props {
   /** A file dropped onto the chat surface gets handed in here. */
   droppedFile?: File | null;
   onDroppedFileConsumed?: () => void;
+  /** A flattened annotation set handed off from the studio, staged as a draft. */
+  pendingAnnotationDraft?: AnnotationDraft | null;
+  onAnnotationDraftConsumed?: () => void;
   /** When set, the next send will carry reply_to_event_id. */
   replyTo?: Event | null;
   onClearReply?: () => void;
@@ -211,6 +178,12 @@ interface StagedFile {
   loaded: number | null;
   mediaId: string | null;
   mime: string;
+  /** "annotations" for the generated annotated file staged from the studio (sent
+   *  as a normal m.file/m.image, reply-linked to its source file); a plain file
+   *  otherwise. */
+  kind?: "annotations";
+  /** The annotation payload, present only when `kind === "annotations"`. */
+  annotation?: AnnotationDraft;
 }
 
 /** Rebuild staged rows from a room's persisted (already-uploaded) draft. */
@@ -243,6 +216,8 @@ function StagedAttachment({
   uploadPct,
   uploadLoaded,
   onRemove,
+  roomId,
+  onAttachAnnotations,
 }: {
   /** Raw File while uploading; null for a draft-restored (already-uploaded) row. */
   file: File | null;
@@ -256,6 +231,12 @@ function StagedAttachment({
   /** Real bytes uploaded so far (from the XHR progress event). */
   uploadLoaded?: number | null;
   onRemove: () => void;
+  /** Room the draft will be sent to — enables annotating the staged file. */
+  roomId?: string;
+  /** Annotating a not-yet-sent draft has no message to reply to — this stages
+   *  the annotated result in place of the plain file (no sourceEventId, so the
+   *  eventual send carries no reply_to_event_id). */
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
 }) {
   const isImage = mime.startsWith("image/");
   const isVideo = mime.startsWith("video/");
@@ -357,6 +338,9 @@ function StagedAttachment({
           url={previewUrl}
           mime={mime}
           filename={name}
+          roomId={roomId}
+          sourceMediaId={mediaId ?? undefined}
+          onAttachAnnotations={onAttachAnnotations}
         />
       )}
     </div>
@@ -575,6 +559,31 @@ function newClientId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+/** A staged annotation set in the composer — a compact chip showing the source
+ *  file + the reference codes; sent as a normal m.file/m.image reply on Send. */
+function AnnotationChip({ draft, onRemove }: { draft: AnnotationDraft; onRemove: () => void }) {
+  const codes = draft.annotations.map((a) => a.ref_code).filter(Boolean);
+  const shown = codes.slice(0, 6).join(", ");
+  const more = codes.length > 6 ? ` +${codes.length - 6}` : "";
+  return (
+    <div className="relative flex items-center gap-3 border bg-card px-3 py-2">
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center border bg-muted text-muted-foreground">
+        <PencilSimple className="h-5 w-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <FileName name={`annotations · ${draft.sourceFilename}`} className="text-xs font-medium" />
+        <div className="label-mono text-[10px] text-muted-foreground">
+          {draft.annotations.length} mark{draft.annotations.length === 1 ? "" : "s"}
+          {shown ? ` · ${shown}${more}` : ""}
+        </div>
+      </div>
+      <Button size="icon" variant="ghost" className="shrink-0" onClick={onRemove} aria-label="remove annotations">
+        <X className="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  );
+}
+
 // Delights §7a/§7e — terminal-flavored slash commands. `handled` means the
 // command was fully dealt with locally (clear the input, don't send);
 // `replaceWith` transforms the outgoing message and lets it send.
@@ -615,6 +624,8 @@ export function Composer({
   onOptimisticUpdate,
   droppedFile,
   onDroppedFileConsumed,
+  pendingAnnotationDraft,
+  onAnnotationDraftConsumed,
   replyTo,
   onClearReply,
   delayTextForSilicon = false,
@@ -748,32 +759,30 @@ export function Composer({
           room_id: roomId,
         });
         const mediaId = r.media.media_id;
-        if (!r.upload.dev_mode) {
-          updateAttachment(id, { pct: 0, loaded: 0 });
-          const form = new FormData();
-          for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-          form.append("file", file);
-          await xhrUpload(
-            r.upload.url,
-            form,
-            (pct, loaded) => updateAttachment(id, { pct, loaded }),
-            ref,
-          );
-          // Decode metadata (#22 image dims; #6 audio/video duration) so the
-          // bubble reserves the right aspect / shows duration immediately.
-          let meta: Parameters<typeof api.mediaComplete>[1] = {};
-          if (file.type.startsWith("image/")) {
-            const d = await measureImage(file);
-            if (d) meta = { width: d.width, height: d.height };
-          } else if (file.type.startsWith("video/")) {
-            const d = await measureVideo(file);
-            if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
-          } else if (file.type.startsWith("audio/")) {
-            const d = await computePeaks(file);
-            if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
-          }
-          await api.mediaComplete(mediaId, meta);
+        updateAttachment(id, { pct: 0, loaded: 0 });
+        const form = new FormData();
+        for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+        form.append("file", file);
+        await xhrUpload(
+          r.upload.url,
+          form,
+          (pct, loaded) => updateAttachment(id, { pct, loaded }),
+          ref,
+        );
+        // Decode metadata (#22 image dims; #6 audio/video duration) so the
+        // bubble reserves the right aspect / shows duration immediately.
+        let meta: Parameters<typeof api.mediaComplete>[1] = {};
+        if (file.type.startsWith("image/")) {
+          const d = await measureImage(file);
+          if (d) meta = { width: d.width, height: d.height };
+        } else if (file.type.startsWith("video/")) {
+          const d = await measureVideo(file);
+          if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
+        } else if (file.type.startsWith("audio/")) {
+          const d = await computePeaks(file);
+          if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
         }
+        await api.mediaComplete(mediaId, meta);
         updateAttachment(id, {
           status: "ready",
           mediaId,
@@ -925,6 +934,45 @@ export function Composer({
     }
   }, [droppedFile, onDroppedFileConsumed, attachFiles]);
 
+  // Stage a flattened annotation set as a ready "annotations" row. Removes any
+  // earlier annotation row for the same source (re-attaching replaces rather
+  // than piles up) AND the plain staged file being annotated, if the source was
+  // a not-yet-sent draft attachment — annotating your own outgoing file swaps it
+  // for the annotated version instead of sending both.
+  const stageAnnotationDraft = React.useCallback((draft: AnnotationDraft) => {
+    setAttachments((prev) => {
+      const withoutDupe = prev.filter(
+        (a) =>
+          !(a.kind === "annotations" && a.annotation?.sourceMediaId === draft.sourceMediaId) &&
+          a.mediaId !== draft.sourceMediaId,
+      );
+      const row: StagedFile = {
+        id: newClientId(),
+        file: null,
+        name: `annotations · ${draft.sourceFilename}`,
+        size: 0,
+        status: "ready",
+        pct: null,
+        loaded: null,
+        mediaId: draft.annotatedMediaId,
+        mime: draft.annotatedMime,
+        kind: "annotations",
+        annotation: draft,
+      };
+      return [...withoutDupe, row];
+    });
+  }, []);
+
+  // Pull an annotation draft in from the studio (via RoomView) — same consume-
+  // hint pattern as the dropped-file effect above.
+  React.useEffect(() => {
+    if (pendingAnnotationDraft) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- consume-hint prop, mirrors the droppedFile effect above
+      stageAnnotationDraft(pendingAnnotationDraft);
+      onAnnotationDraftConsumed?.();
+    }
+  }, [pendingAnnotationDraft, onAnnotationDraftConsumed, stageAnnotationDraft]);
+
   // Clicking "reply" on a message sets a reply target — focus the input right
   // away so the user can start typing without a second click.
   React.useEffect(() => {
@@ -999,7 +1047,9 @@ export function Composer({
     setDraftAttachments(
       roomId,
       attachments
-        .filter((a) => a.status === "ready" && a.mediaId)
+        // Annotation rows aren't persisted here — their content lives in the
+        // studio's autosave (annotation-session), which restores the full set.
+        .filter((a) => a.status === "ready" && a.mediaId && a.kind !== "annotations")
         .map((a) => ({
           id: a.id,
           mediaId: a.mediaId as string,
@@ -1587,7 +1637,28 @@ export function Composer({
         // bundle_id so the timeline can render the attachments as pins on the
         // text bubble. With no text, attachments stand alone (no bundle).
         const bundleId = body && ready.length > 0 ? newClientId() : null;
+        let sentAnnotations = false;
         for (const a of ready) {
+          if (a.kind === "annotations" && a.annotation) {
+            // The generated annotated file → a normal m.file/m.image, reply-
+            // linked to the original so the thread + silicon reference it.
+            const d = a.annotation;
+            const annType = d.annotatedMime.startsWith("image/") ? "m.image" : "m.file";
+            await api.sendEvent(roomId, {
+              type: annType,
+              content: {
+                media_id: d.annotatedMediaId,
+                mime: d.annotatedMime,
+                filename: d.annotatedName,
+                ...(bundleId ? { bundle_id: bundleId } : {}),
+              },
+              ...(d.sourceEventId ? { reply_to_event_id: d.sourceEventId } : {}),
+            });
+            clearAnnotationSession(roomId, d.sourceMediaId);
+            sentAnnotations = true;
+            track.messageSent({ room_id: roomId, message_type: annType, has_attachment: true });
+            continue;
+          }
           const fileType = a.mime.startsWith("image/") ? "m.image" : "m.file";
           await api.sendEvent(roomId, {
             type: fileType,
@@ -1601,6 +1672,9 @@ export function Composer({
           track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         }
         reset();
+        // An attached annotation set carried the reply to the file — clear it so
+        // the next message isn't unexpectedly a reply (unless text handles it).
+        if (sentAnnotations && !body) onClearReply?.();
         // Typed text rides as a *separate* message after the attachments,
         // carrying the same bundle_id so they render together. If the user
         // typed @filename references, persist the resolved attachment ids too.
@@ -1681,19 +1755,16 @@ export function Composer({
         room_id: roomId,
       });
       const mediaId = r.media.media_id;
-      if (!r.upload.dev_mode) {
-        const form = new FormData();
-        for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-        form.append("file", blob, filename);
-        // §6.3 — Route the voice upload through the same xhr-with-progress +
-        // abort path the file picker uses, so a long note on a slow uplink
-        // shows progress and can be cancelled instead of an inert spinner.
-        setVoiceUploadPct(0);
-        await xhrUpload(r.upload.url, form, setVoiceUploadPct, voiceXhrRef);
-      }
+      const form = new FormData();
+      for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+      form.append("file", blob, filename);
+      // §6.3 — Route the voice upload through the same xhr-with-progress +
+      // abort path the file picker uses, so a long note on a slow uplink
+      // shows progress and can be cancelled instead of an inert spinner.
+      setVoiceUploadPct(0);
+      await xhrUpload(r.upload.url, form, setVoiceUploadPct, voiceXhrRef);
       // #6 — Send the peaks we computed during recording (durationMs is
-      // already known; the recorder reports it). This runs for dev uploads too
-      // so the server event has metadata after the optimistic row is replaced.
+      // already known; the recorder reports it).
       const peaks = await peaksPromise;
       await api.mediaComplete(mediaId, {
         duration_ms: peaks?.duration_ms || durationMs,
@@ -1820,19 +1891,29 @@ export function Composer({
         // Capped height with scroll so a big batch of files doesn't push the
         // composer (and the conversation) off-screen.
         <div className="flex max-h-56 flex-col gap-1.5 overflow-y-auto px-[52px]">
-          {attachments.map((a) => (
-            <StagedAttachment
-              key={a.id}
-              file={a.file}
-              name={a.name}
-              size={a.size}
-              mime={a.mime}
-              mediaId={a.mediaId}
-              uploadPct={a.status === "uploading" ? (a.pct ?? 0) : null}
-              uploadLoaded={a.loaded}
-              onRemove={() => removeAttachment(a.id)}
-            />
-          ))}
+          {attachments.map((a) =>
+            a.kind === "annotations" && a.annotation ? (
+              <AnnotationChip
+                key={a.id}
+                draft={a.annotation}
+                onRemove={() => removeAttachment(a.id)}
+              />
+            ) : (
+              <StagedAttachment
+                key={a.id}
+                file={a.file}
+                name={a.name}
+                size={a.size}
+                mime={a.mime}
+                mediaId={a.mediaId}
+                uploadPct={a.status === "uploading" ? (a.pct ?? 0) : null}
+                uploadLoaded={a.loaded}
+                onRemove={() => removeAttachment(a.id)}
+                roomId={roomId}
+                onAttachAnnotations={stageAnnotationDraft}
+              />
+            ),
+          )}
         </div>
       )}
       {/* §6.3 — Voice upload progress + abort. */}

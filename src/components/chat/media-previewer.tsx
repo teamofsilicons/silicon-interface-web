@@ -6,6 +6,7 @@ import {
   Code,
   DownloadSimple,
   Eye,
+  PencilSimple,
 } from "@phosphor-icons/react/dist/ssr";
 
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,9 @@ import {
 } from "@/lib/programmatic-files";
 import { cn } from "@/lib/utils";
 
+import type { AnnotationDraft } from "@/lib/types";
+
+import { AnnotationStudio } from "./annotation-studio/annotation-studio";
 import { MarkdownView } from "./markdown-view";
 import { SourceCodeViewer } from "./source-code-viewer";
 
@@ -31,6 +35,15 @@ interface Props {
   url: string;
   mime: string;
   filename?: string;
+  /** When both are set and the asset is an image/PDF, an "annotate" action is
+   *  offered next to download, opening the annotation studio. */
+  roomId?: string;
+  sourceMediaId?: string;
+  /** event_id of the message carrying this attachment (reply target for the
+   *  annotation draft). */
+  sourceEventId?: string;
+  /** Stage the annotations as a composer draft instead of posting directly. */
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
 }
 
 /**
@@ -41,18 +54,31 @@ interface Props {
  * The bare `<DialogContent>` doesn't ship with a visible title — we still
  * need one for screen readers, so we render a `sr-only` `DialogTitle`.
  */
-export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Props) {
+export function MediaPreviewer({
+  open,
+  onOpenChange,
+  url,
+  mime,
+  filename,
+  roomId,
+  sourceMediaId,
+  sourceEventId,
+  onAttachAnnotations,
+}: Props) {
   const m = (mime || "").toLowerCase();
   const language = languageForFile(filename, mime);
   const isSvgDocument = language?.id === "svg";
   const isImage = m.startsWith("image/") && !isSvgDocument;
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/");
-  const isPdf = m.includes("pdf");
+  const name = (filename || "").toLowerCase();
+  const isPdf = m.includes("pdf") || name.endsWith(".pdf");
   const isMarkdown = language?.id === "markdown";
   const isHtmlDocument = language?.id === "html";
   const hasPreviewPane = hasRenderedSourcePreview(filename, mime);
   const isText = isTextLikeFile(filename, mime);
+  const canAnnotate = Boolean(roomId && sourceMediaId && (isImage || isPdf));
+  const [studioOpen, setStudioOpen] = React.useState(false);
   const defaultSourceMode: SourceViewMode = hasPreviewPane ? "preview" : "code";
   const sourceKey = `${url}\n${defaultSourceMode}`;
   const [sourceModeState, setSourceModeState] = React.useState<{
@@ -99,6 +125,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
   const renderedSourceOpen = isText && activeSourceMode === "preview";
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[95vh] w-[min(96vw,1100px)] max-w-none gap-0 overflow-hidden p-0">
         {/* Required for a11y — Radix throws a console error if there is no
@@ -109,7 +136,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
 
         {/* Right-padding leaves room for the Dialog's built-in close X
             (positioned absolute, right-4 top-4 in DialogContent) so the
-            download button no longer collides with it. */}
+            action buttons no longer collide with it. */}
         <div className="flex items-center justify-between gap-3 border-b py-2 pl-4 pr-14">
           <div className="min-w-0 flex-1">
             <span className="block truncate text-sm font-medium">{label}</span>
@@ -123,6 +150,21 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             {showSourceToggle ? (
               <SourceModeToggle mode={sourceMode} onModeChange={setSourceMode} />
             ) : null}
+            {canAnnotate && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  // Hand off to the studio; close the read-only previewer so the
+                  // two modals don't stack.
+                  setStudioOpen(true);
+                  onOpenChange(false);
+                }}
+                aria-label="annotate"
+              >
+                <PencilSimple /> annotate
+              </Button>
+            )}
             <Button
               size="sm"
               variant="outline"
@@ -196,6 +238,20 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
         </div>
       </DialogContent>
     </Dialog>
+    {canAnnotate && roomId && sourceMediaId && (
+      <AnnotationStudio
+        open={studioOpen}
+        onOpenChange={setStudioOpen}
+        url={url}
+        mime={mime}
+        filename={filename}
+        roomId={roomId}
+        sourceMediaId={sourceMediaId}
+        sourceEventId={sourceEventId}
+        onAttach={onAttachAnnotations}
+      />
+    )}
+    </>
   );
 }
 

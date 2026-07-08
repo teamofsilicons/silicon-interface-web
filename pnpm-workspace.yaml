@@ -2,6 +2,13 @@ packages:
   - packages/*
   - desktop
 
+allowBuilds:
+  core-js: true
+  electron-winstaller: true
+  protobufjs: true
+  sharp: true
+  unrs-resolver: true
+
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver

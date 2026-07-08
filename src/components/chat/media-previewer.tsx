@@ -176,7 +176,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
                   <CircleNotch className="h-4 w-4 animate-spin" /> loading...
                 </p>
               ) : activeSourceMode === "preview" && isHtmlDocument ? (
-                <HtmlPreviewFrame source={textForUrl} title={label} />
+                <HtmlPreviewFrame source={textForUrl} title={label} baseUrl={url} />
               ) : activeSourceMode === "preview" && isSvgDocument ? (
                 <SvgPreviewFrame source={textForUrl} title={label} />
               ) : activeSourceMode === "preview" && isMarkdown ? (
@@ -240,11 +240,20 @@ function SourceModeToggle({
   );
 }
 
-function HtmlPreviewFrame({ source, title }: { source: string; title: string }) {
+function HtmlPreviewFrame({
+  source,
+  title,
+  baseUrl,
+}: {
+  source: string;
+  title: string;
+  baseUrl: string;
+}) {
+  const srcDoc = React.useMemo(() => withBaseHref(source, baseUrl), [source, baseUrl]);
   return (
     <iframe
-      sandbox=""
-      srcDoc={source}
+      sandbox="allow-scripts"
+      srcDoc={srcDoc}
       title={`${title} preview`}
       className="h-full w-full border-0 bg-card"
     />
@@ -275,6 +284,23 @@ svg{max-width:100%;max-height:100vh}
       className="h-full w-full border-0 bg-card"
     />
   );
+}
+
+function withBaseHref(source: string, baseUrl: string): string {
+  if (/<base\b/i.test(source)) return source;
+  const tag = `<base href="${escapeHtmlAttr(baseUrl)}" />`;
+  if (/<head[^>]*>/i.test(source)) {
+    return source.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
+  }
+  return `${tag}${source}`;
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 /**

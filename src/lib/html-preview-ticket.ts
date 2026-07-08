@@ -72,6 +72,39 @@ export function ticketKey(secret?: string): Buffer {
   return createHash("sha256").update(String(s)).digest();
 }
 
+/**
+ * PREVIEW/DEV ONLY — never true in production. Gates the in-memory single-use
+ * store and the fallback secret/host relaxations so a Vercel PREVIEW deploy (or
+ * local dev) can render HTML previews without the full env set. Vercel sets
+ * `VERCEL_ENV=preview` on preview deploys (NODE_ENV is "production" there);
+ * local dev has NODE_ENV !== "production". Production Vercel has
+ * `VERCEL_ENV=production` → this returns false → every fallback below is OFF and
+ * the route is fully fail-closed, exactly as before.
+ */
+export function isPreviewEnv(): boolean {
+  return process.env.VERCEL_ENV === "preview" || process.env.NODE_ENV !== "production";
+}
+
+// Fallback secret used ONLY in isPreviewEnv() when HTML_PREVIEW_TICKET_SECRET is
+// unset. NOT a production secret — preview tickets are single-use and short-
+// lived, and production ALWAYS requires the real env (resolveTicketKey throws).
+const PREVIEW_FALLBACK_SECRET =
+  "html-preview::vercel-preview-fallback::not-for-production-use";
+
+/**
+ * The AES key the routes seal/open with: derived from the env secret, or (in
+ * preview/dev only) the fallback secret, else THROW so production fails closed.
+ * `ticketKey()` above is left untouched so the self-test's fail-closed case
+ * still holds when called directly.
+ */
+export function resolveTicketKey(): Buffer {
+  const s =
+    process.env.HTML_PREVIEW_TICKET_SECRET ??
+    (isPreviewEnv() ? PREVIEW_FALLBACK_SECRET : undefined);
+  if (!s) throw new Error("HTML_PREVIEW_TICKET_SECRET is not set");
+  return createHash("sha256").update(s).digest();
+}
+
 /** The AAD string that binds a ticket to a media id. */
 export function ticketAad(mediaId: string): string {
   return `html-preview:${mediaId}`;
@@ -159,6 +192,23 @@ export function isAllowedPreviewUrl(url: URL, rawHosts?: string): boolean {
   return isHostAllowed(url.hostname, rawHosts);
 }
 
+/**
+ * Route-level URL gate used by BOTH the mint and consume routes. Production
+ * behavior is exactly `isAllowedPreviewUrl` (HTTPS + default port + exact
+ * allow-list host). In preview/dev ONLY, when no allow-list is configured, any
+ * HTTPS default-port host is accepted — the URL still comes from Glass for an
+ * authorized user and is fetched server-side (redirect:error + byte cap). This
+ * relaxation never applies in production or when HTML_PREVIEW_ALLOWED_HOSTS is
+ * set.
+ */
+export function previewUrlAccepted(url: URL): boolean {
+  if (isAllowedPreviewUrl(url)) return true;
+  if (isPreviewEnv() && parseAllowedHosts().length === 0) {
+    return url.protocol === "https:" && (!url.port || url.port === "443");
+  }
+  return false;
+}
+
 export function maxBytes(): number {
   const n = Number(process.env.HTML_PREVIEW_MAX_BYTES);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_BYTES;
@@ -181,24 +231,40 @@ function upstashConfig(): { url: string; token: string } | null {
   return { url: url.replace(/\/$/, ""), token };
 }
 
-/**
- * True when the single-use store can be used. Production requires Upstash.
- *
- * Vercel preview/local dev get a deliberately unsafe fallback so PR previews can
- * render without provisioning Redis for every branch. That fallback is read-only,
- * short-lived-ticket scoped, and never enabled for production, but it is NOT
- * replay-proof. Production keeps the original fail-closed behavior.
- */
-export function unsafePreviewStoreFallbackAllowed(): boolean {
-  return (
-    process.env.HTML_PREVIEW_ALLOW_UNSAFE_PREVIEW_STORE === "1" ||
-    process.env.VERCEL_ENV === "preview" ||
-    process.env.NODE_ENV !== "production"
-  );
+/** True only when BOTH Upstash env vars are present. */
+export function storeConfigured(): boolean {
+  return upstashConfig() !== null;
 }
 
-export function storeConfigured(): boolean {
-  return upstashConfig() !== null || unsafePreviewStoreFallbackAllowed();
+// PREVIEW/DEV ONLY in-memory single-use store — a per-process Map used when
+// Upstash is not configured AND isPreviewEnv(). SET-NX + TTL and GETDEL (delete-
+// before-return) semantics hold WITHIN one process only. This is NOT cross-
+// instance atomic and is NOT the production security model: production requires
+// Upstash and fails closed when it is absent.
+const memStore = new Map<string, number>(); // jtiKey -> expiry (epoch ms)
+
+function memSetNx(key: string, ttlSec: number): boolean {
+  const now = Date.now();
+  const exp = memStore.get(key);
+  if (exp !== undefined && exp > now) return false; // a live marker already exists
+  memStore.set(key, now + ttlSec * 1000);
+  return true;
+}
+
+function memGetDel(key: string): string | null {
+  const now = Date.now();
+  const exp = memStore.get(key);
+  memStore.delete(key); // delete-before-return keeps it single-use on this path too
+  if (exp === undefined || exp <= now) return null;
+  return "1";
+}
+
+/**
+ * Whether a consume-store is available at all: real Upstash, or (preview/dev
+ * only) the in-memory fallback. Production without Upstash → false → 503.
+ */
+export function consumeStoreAvailable(): boolean {
+  return storeConfigured() || isPreviewEnv();
 }
 
 /** Namespaced marker key for a ticket's single-use id. */
@@ -239,10 +305,9 @@ async function upstashCommand(args: (string | number)[]): Promise<{ result: unkn
  * (already exists) or on ANY store error (fail closed).
  */
 export async function kvSetNx(key: string, ttl: number): Promise<boolean> {
-  if (!upstashConfig() && unsafePreviewStoreFallbackAllowed()) {
-    void key;
-    void ttl;
-    return true;
+  if (!storeConfigured()) {
+    // No Upstash: preview/dev uses the in-memory store; production fails closed.
+    return isPreviewEnv() ? memSetNx(key, ttl) : false;
   }
   const r = await upstashCommand(["SET", key, "1", "NX", "EX", ttl]);
   return !!r && r.result === "OK";
@@ -254,9 +319,9 @@ export async function kvSetNx(key: string, ttl: number): Promise<boolean> {
  * on the single valid use, or `null` on replay/expiry/store error (fail closed).
  */
 export async function kvGetDel(key: string): Promise<string | null> {
-  if (!upstashConfig() && unsafePreviewStoreFallbackAllowed()) {
-    void key;
-    return "preview-store-fallback";
+  if (!storeConfigured()) {
+    // No Upstash: preview/dev uses the in-memory store; production fails closed.
+    return isPreviewEnv() ? memGetDel(key) : null;
   }
   const r = await upstashCommand(["GETDEL", key]);
   if (!r) return null;

@@ -14,13 +14,14 @@ import type { NextRequest } from "next/server";
 
 import {
   apiBase,
-  isAllowedPreviewUrl,
+  consumeStoreAvailable,
   jtiKey,
   kvSetNx,
   maxBytes,
   newJti,
+  previewUrlAccepted,
+  resolveTicketKey,
   seal,
-  storeConfigured,
   ticketAad,
   ttlSeconds,
   type HtmlTicketPayload,
@@ -92,7 +93,7 @@ export async function POST(
   let urlPath: string;
   try {
     const u = new URL(downloadUrl);
-    if (!isAllowedPreviewUrl(u)) {
+    if (!previewUrlAccepted(u)) {
       return json({ error: "host_not_allowed" }, 400);
     }
     host = u.hostname;
@@ -110,7 +111,9 @@ export async function POST(
     return json({ error: "too_large" }, 413);
   }
 
-  // 5) Seal the ticket. Missing HTML_PREVIEW_TICKET_SECRET → seal() throws → 503.
+  // 5) Seal the ticket. resolveTicketKey() throws when no secret is available
+  //    (production without HTML_PREVIEW_TICKET_SECRET) → 503. In preview/dev it
+  //    falls back to the preview-only key.
   const ttl = ttlSeconds();
   const exp = Math.floor(Date.now() / 1000) + ttl;
   const jti = newJti();
@@ -126,14 +129,15 @@ export async function POST(
   };
   let sealed: string;
   try {
-    sealed = seal(payload, ticketAad(id));
+    sealed = seal(payload, ticketAad(id), resolveTicketKey());
   } catch {
     return json({ error: "ticket_secret_unavailable" }, 503);
   }
 
-  // 6) Claim the single-use marker. FAIL CLOSED: unconfigured store or a write
-  //    that did not land (NX collision / error) → do NOT hand back a ticket.
-  if (!storeConfigured()) {
+  // 6) Claim the single-use marker. FAIL CLOSED: no consume store available
+  //    (production without Upstash) or a write that did not land (NX collision /
+  //    error) → do NOT hand back a ticket. Preview/dev uses the in-memory store.
+  if (!consumeStoreAvailable()) {
     return json({ error: "store_unavailable" }, 503);
   }
   const stored = await kvSetNx(jtiKey(jti), ttl);

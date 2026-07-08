@@ -10,14 +10,15 @@
 import type { NextRequest } from "next/server";
 
 import {
+  consumeStoreAvailable,
   htmlError,
-  isAllowedPreviewUrl,
   jtiKey,
   kvGetDel,
   maxBytes,
   open,
+  previewUrlAccepted,
+  resolveTicketKey,
   securityHeaders,
-  storeConfigured,
   ticketAad,
   type HtmlTicketPayload,
 } from "@/lib/html-preview-ticket";
@@ -40,7 +41,7 @@ export async function GET(
   //    throws → 403. Any failure → 403 (never distinguishes tamper reasons).
   let ticket: HtmlTicketPayload;
   try {
-    ticket = open(token, ticketAad(id));
+    ticket = open(token, ticketAad(id), resolveTicketKey());
   } catch {
     return htmlError(403, "This preview link is invalid.");
   }
@@ -52,7 +53,7 @@ export async function GET(
   try {
     const u = new URL(ticket.url);
     urlHost = u.hostname;
-    if (!isAllowedPreviewUrl(u)) {
+    if (!previewUrlAccepted(u)) {
       return htmlError(403, "This preview link is invalid.");
     }
   } catch {
@@ -68,7 +69,7 @@ export async function GET(
   // 3) Atomic single-use consume. GETDEL lets exactly one caller observe the
   //    marker; replays see null → 410. Store unavailable → FAIL CLOSED 503.
   //    (Headers are sent on both branches via htmlError.)
-  if (!storeConfigured()) return htmlError(503, "Preview is temporarily unavailable.");
+  if (!consumeStoreAvailable()) return htmlError(503, "Preview is temporarily unavailable.");
   const marker = await kvGetDel(jtiKey(ticket.jti));
   if (marker === null) {
     // Could be replay OR a store error — both must refuse. Treat as consumed/

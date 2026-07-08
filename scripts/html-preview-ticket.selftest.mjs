@@ -35,6 +35,13 @@ const {
   parseAllowedHosts,
   isHostAllowed,
   isAllowedPreviewUrl,
+  // Preview/dev-only fallbacks (Dope #116 Vercel-preview patch)
+  resolveTicketKey,
+  previewUrlAccepted,
+  consumeStoreAvailable,
+  kvSetNx,
+  kvGetDel,
+  jtiKey,
 } = mod;
 
 let passed = 0;
@@ -191,6 +198,80 @@ console.log("html-preview-ticket self-test\n");
     "allowed preview URL rejects non-default port",
     !isAllowedPreviewUrl(new URL("https://assets.example.com:444/file.html"), allowed),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Preview/dev-only fallbacks (Vercel-preview patch). Production stays fail-closed.
+// ---------------------------------------------------------------------------
+
+// 12) preview in-memory single-use store: SET NX claims once, GETDEL consumes once
+{
+  delete process.env.UPSTASH_REDIS_REST_URL;
+  delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  process.env.NODE_ENV = "development"; // isPreviewEnv() → true
+  const key = jtiKey(newJti());
+  const first = await kvSetNx(key, 90);
+  const second = await kvSetNx(key, 90);
+  const get1 = await kvGetDel(key);
+  const get2 = await kvGetDel(key);
+  check(
+    "preview in-memory store: SET NX claims once, GETDEL consumes once (single-use)",
+    first === true && second === false && get1 === "1" && get2 === null,
+  );
+  check(
+    "consumeStoreAvailable() is true in preview without Upstash",
+    consumeStoreAvailable() === true,
+  );
+}
+
+// 13) production without Upstash fails closed — NO in-memory fallback
+{
+  const savedVercel = process.env.VERCEL_ENV;
+  process.env.NODE_ENV = "production";
+  delete process.env.VERCEL_ENV; // isPreviewEnv() → false
+  const setProd = await kvSetNx(jtiKey(newJti()), 90);
+  check(
+    "production without Upstash: kvSetNx fails closed (false) + store unavailable",
+    setProd === false && consumeStoreAvailable() === false,
+  );
+  process.env.VERCEL_ENV = savedVercel;
+  process.env.NODE_ENV = "development";
+}
+
+// 14) resolveTicketKey: env secret → key; preview fallback when unset; prod throws
+{
+  process.env.HTML_PREVIEW_TICKET_SECRET = "real-secret";
+  const withEnv = resolveTicketKey();
+  delete process.env.HTML_PREVIEW_TICKET_SECRET;
+  process.env.NODE_ENV = "development"; // preview → fallback key, no throw
+  const previewKey = resolveTicketKey();
+  process.env.NODE_ENV = "production";
+  delete process.env.VERCEL_ENV; // not preview → throws (fail closed)
+  const prodThrows = threw(() => resolveTicketKey());
+  check(
+    "resolveTicketKey: env→32B key, preview→32B fallback key, production→throws",
+    withEnv.length === 32 && previewKey.length === 32 && prodThrows === true,
+  );
+  process.env.NODE_ENV = "development";
+  process.env.HTML_PREVIEW_TICKET_SECRET = "self-test-secret-please-ignore";
+}
+
+// 15) previewUrlAccepted: strict in prod; in preview with an empty allow-list,
+//     any https default-port host is accepted (http / non-default port still rejected)
+{
+  delete process.env.HTML_PREVIEW_ALLOWED_HOSTS; // empty allow-list
+  process.env.NODE_ENV = "development"; // preview
+  const previewAny = previewUrlAccepted(new URL("https://whatever.s3.amazonaws.com/a/b?sig=x"));
+  const previewHttp = previewUrlAccepted(new URL("http://whatever.s3.amazonaws.com/a"));
+  const previewPort = previewUrlAccepted(new URL("https://whatever.s3.amazonaws.com:8443/a"));
+  process.env.NODE_ENV = "production";
+  delete process.env.VERCEL_ENV; // not preview
+  const prodAny = previewUrlAccepted(new URL("https://whatever.s3.amazonaws.com/a"));
+  check(
+    "previewUrlAccepted: preview+empty-list allows https:443 any-host, rejects http/non-default port; production rejects",
+    previewAny === true && previewHttp === false && previewPort === false && prodAny === false,
+  );
+  process.env.NODE_ENV = "development";
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

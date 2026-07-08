@@ -283,12 +283,32 @@ app-wide download behavior (identical for every attachment type) and is **out of
 scope for #116** — see the scope note at the top of this doc.
 ```
 
+## Preview/dev environment fallback (NOT the production security model)
 
-## Preview deployment fallback
+Production requires the full env set — `HTML_PREVIEW_TICKET_SECRET`,
+`HTML_PREVIEW_ALLOWED_HOSTS`, and `UPSTASH_REDIS_REST_URL` +
+`UPSTASH_REDIS_REST_TOKEN`. With any of them missing, production **fails closed**
+(mint → 400/503, consume → 403/503), exactly as before.
 
-Vercel preview/local dev may run without Upstash Redis. In those non-production
-environments only, the route allows a deliberately unsafe consume-store fallback
-so branch previews can render HTML. Production still requires
-`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` and fails closed when
-they are missing. The fallback is not replay-proof and must not be used as the
-production security model.
+To let a **Vercel Preview** deployment (or local dev) render HTML previews
+without provisioning Upstash/secret/allow-list, a fallback path activates **only**
+when `isPreviewEnv()` is true — i.e. `VERCEL_ENV === "preview"` or
+`NODE_ENV !== "production"`. It is never active in production
+(`VERCEL_ENV === "production"`). When active AND the corresponding env is unset:
+
+- **Store**: an in-process in-memory `Map` replaces Upstash. It keeps single-use
+  semantics WITHIN one process (`SET NX` + TTL, `GETDEL`/delete-before-return)
+  but is **not cross-instance atomic** — good enough for reviewing a preview
+  deploy, NOT a production guarantee.
+- **Secret**: a fixed preview-only fallback secret is used (single-use, short-
+  lived tickets). Production always uses the real env secret.
+- **Allow-list**: when `HTML_PREVIEW_ALLOWED_HOSTS` is empty, any HTTPS
+  default-port host is accepted (the URL still comes from Glass for an authorized
+  user and is fetched server-side with `redirect: "error"` + byte cap). Setting
+  the allow-list re-enables strict exact-host matching even in preview.
+
+The self-test (`node scripts/html-preview-ticket.selftest.mjs`) asserts BOTH the
+preview fallbacks AND that production without Upstash/secret fails closed —
+covering the mem-store single-use path, `resolveTicketKey()` (env → key,
+preview → fallback key, production → throws), and `previewUrlAccepted()`
+(preview-relaxed vs production-strict).

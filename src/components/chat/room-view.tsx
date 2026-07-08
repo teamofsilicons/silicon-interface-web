@@ -1198,7 +1198,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       try {
         let cursor = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
         let found: Event | null = null;
-        for (let page = 0; page < 10 && cursor; page += 1) {
+        const seenCursors = new Set<string>();
+        while (cursor) {
+          if (seenCursors.has(cursor)) break;
+          seenCursors.add(cursor);
           const older = await api.events(room.room_id, cursor, PAGE_SIZE);
           if (older.length === 0) {
             setHasMore(false);

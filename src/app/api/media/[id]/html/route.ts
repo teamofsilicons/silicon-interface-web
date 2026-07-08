@@ -11,7 +11,7 @@ import type { NextRequest } from "next/server";
 
 import {
   htmlError,
-  isHostAllowed,
+  isAllowedPreviewUrl,
   jtiKey,
   kvGetDel,
   maxBytes,
@@ -50,11 +50,15 @@ export async function GET(
   if (ticket.media_id !== id) return htmlError(403, "This preview link is invalid.");
   let urlHost: string;
   try {
-    urlHost = new URL(ticket.url).hostname;
+    const u = new URL(ticket.url);
+    urlHost = u.hostname;
+    if (!isAllowedPreviewUrl(u)) {
+      return htmlError(403, "This preview link is invalid.");
+    }
   } catch {
     return htmlError(403, "This preview link is invalid.");
   }
-  if (ticket.host !== urlHost || !isHostAllowed(urlHost)) {
+  if (ticket.host !== urlHost) {
     return htmlError(403, "This preview link is invalid.");
   }
   if (ticket.exp <= Math.floor(Date.now() / 1000)) {

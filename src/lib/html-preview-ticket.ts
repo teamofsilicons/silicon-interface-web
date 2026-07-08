@@ -149,6 +149,16 @@ export function isHostAllowed(host: string, raw?: string): boolean {
   return parseAllowedHosts(raw).includes(host.toLowerCase());
 }
 
+/**
+ * Validate the presigned HTML URL's origin shape. Security intentionally allows
+ * only HTTPS on the default port plus an exact hostname allow-list match.
+ */
+export function isAllowedPreviewUrl(url: URL, rawHosts?: string): boolean {
+  if (url.protocol !== "https:") return false;
+  if (url.port && url.port !== "443") return false;
+  return isHostAllowed(url.hostname, rawHosts);
+}
+
 export function maxBytes(): number {
   const n = Number(process.env.HTML_PREVIEW_MAX_BYTES);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_BYTES;

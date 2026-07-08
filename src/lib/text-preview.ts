@@ -10,8 +10,17 @@ import * as React from "react";
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string | null>>();
 
+const HTML_EXT = new Set(["html", "htm"]);
+
+function isHtmlLike(name?: string | null, mime?: string | null): boolean {
+  const m = (mime || "").toLowerCase().split(";")[0].trim();
+  const ext = (name || "").toLowerCase().split(".").pop() || "";
+  return m === "text/html" || HTML_EXT.has(ext);
+}
+
 /** Is this a text-ish file we can show a content peek for? */
 export function isTextLike(name?: string | null, mime?: string | null): boolean {
+  if (isHtmlLike(name, mime)) return false;
   const m = (mime || "").toLowerCase();
   if (
     m.startsWith("text/") ||
@@ -25,7 +34,7 @@ export function isTextLike(name?: string | null, mime?: string | null): boolean 
   const ext = (name || "").toLowerCase().split(".").pop() || "";
   return [
     "md", "markdown", "mdx", "txt", "text", "log", "csv", "json", "yml", "yaml",
-    "ini", "toml", "html", "htm", "css", "js", "ts", "tsx", "jsx", "py", "rs",
+    "ini", "toml", "css", "js", "ts", "tsx", "jsx", "py", "rs",
     "c", "h", "cpp", "sql", "sh", "env",
   ].includes(ext);
 }

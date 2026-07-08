@@ -34,6 +34,7 @@ const {
   newJti,
   parseAllowedHosts,
   isHostAllowed,
+  isAllowedPreviewUrl,
 } = mod;
 
 let passed = 0;
@@ -172,6 +173,23 @@ console.log("html-preview-ticket self-test\n");
     isHostAllowed("assets.example.com", "assets.example.com") &&
       !isHostAllowed("evil-assets.example.com", "assets.example.com") &&
       !isHostAllowed("assets.example.com.evil.com", "assets.example.com"),
+  );
+}
+
+// 11) preview URL origin must be HTTPS default port + exact host match
+{
+  const allowed = "assets.example.com";
+  check(
+    "allowed preview URL accepts https default port",
+    isAllowedPreviewUrl(new URL("https://assets.example.com/file.html"), allowed),
+  );
+  check(
+    "allowed preview URL rejects http scheme",
+    !isAllowedPreviewUrl(new URL("http://assets.example.com/file.html"), allowed),
+  );
+  check(
+    "allowed preview URL rejects non-default port",
+    !isAllowedPreviewUrl(new URL("https://assets.example.com:444/file.html"), allowed),
   );
 }
 

@@ -11,7 +11,7 @@ import type { NextRequest } from "next/server";
 
 import {
   apiBase,
-  isHostAllowed,
+  isAllowedPreviewUrl,
   jtiKey,
   kvSetNx,
   maxBytes,
@@ -89,6 +89,9 @@ export async function POST(
   let urlPath: string;
   try {
     const u = new URL(downloadUrl);
+    if (!isAllowedPreviewUrl(u)) {
+      return json({ error: "host_not_allowed" }, 400);
+    }
     host = u.hostname;
     urlPath = u.pathname;
   } catch {
@@ -98,18 +101,13 @@ export async function POST(
     return json({ error: "unsupported_media_type" }, 415);
   }
 
-  // 4) The presigned URL's hostname must be an exact allow-list match.
-  if (!isHostAllowed(host)) {
-    return json({ error: "host_not_allowed" }, 400);
-  }
-
-  // 5) Reject over-cap objects up front when the size is known.
+  // 4) Reject over-cap objects up front when the size is known.
   const cap = maxBytes();
   if (typeof media.size === "number" && media.size > cap) {
     return json({ error: "too_large" }, 413);
   }
 
-  // 6) Seal the ticket. Missing HTML_PREVIEW_TICKET_SECRET → seal() throws → 503.
+  // 5) Seal the ticket. Missing HTML_PREVIEW_TICKET_SECRET → seal() throws → 503.
   const ttl = ttlSeconds();
   const exp = Math.floor(Date.now() / 1000) + ttl;
   const jti = newJti();
@@ -130,7 +128,7 @@ export async function POST(
     return json({ error: "ticket_secret_unavailable" }, 503);
   }
 
-  // 7) Claim the single-use marker. FAIL CLOSED: unconfigured store or a write
+  // 6) Claim the single-use marker. FAIL CLOSED: unconfigured store or a write
   //    that did not land (NX collision / error) → do NOT hand back a ticket.
   if (!storeConfigured()) {
     return json({ error: "store_unavailable" }, 503);
@@ -140,7 +138,7 @@ export async function POST(
     return json({ error: "store_unavailable" }, 503);
   }
 
-  // 8) Hand back the same-origin consume URL + absolute expiry.
+  // 7) Hand back the same-origin consume URL + absolute expiry.
   return json(
     { src: `/api/media/${encodeURIComponent(id)}/html?t=${sealed}`, exp },
     200,

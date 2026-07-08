@@ -26,6 +26,7 @@ import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import type { Event, EventType, ProgressState } from "@/lib/types";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
+import { emojiOnly } from "@/lib/emoji";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 
@@ -347,6 +348,26 @@ export function MessageBubble({
   const selectable = !!onToggleSelect && canForward;
   const inSelect = selectMode && selectable;
 
+  // §125 (Saket feedback) — a message that is EXACTLY one emoji renders large
+  // and WITHOUT a message bubble (no filled/ink background). Replies, forwards,
+  // link previews, and 2+ emoji keep the normal bubble behavior.
+  const emojiBody =
+    event.type === "m.text" ? String(event.content.body ?? "").replace(/^\s+|\s+$/g, "") : "";
+  const emojiMeta = emojiOnly(emojiBody);
+  const soloEmoji =
+    event.type === "m.text" &&
+    !redacted &&
+    // Base the reply exclusion on the event field, not the resolved parent:
+    // `replyToEvent` is undefined when the parent isn't loaded in `eventById`,
+    // which would otherwise let a reply render bare/big (QA hold on #125).
+    !event.reply_to_event_id &&
+    !event.link_preview &&
+    // ANY forward_from object keeps the normal bubble — including a forward
+    // whose sender_handle is missing/empty.
+    !(event.content as { forward_from?: unknown }).forward_from &&
+    emojiMeta.ok &&
+    emojiMeta.count === 1;
+
   return (
     <div
       className={cn(
@@ -445,20 +466,24 @@ export function MessageBubble({
             // visible asymmetry around media attachments). `group` lives on the
             // message column wrapper so hovering anywhere on the block (bubble,
             // padding, label, time) reveals the actions — not just the text.
-            "relative min-w-0 max-w-full p-3 text-sm shadow-sm",
+            "relative min-w-0 max-w-full",
+            // §125 — a lone emoji renders bare: no bubble background, shadow, or
+            // padded box, just the big glyph. Everything else keeps the bubble.
+            soloEmoji ? "py-0.5" : "p-3 text-sm shadow-sm",
             copyFlash && "copy-flash",
             // Selected bubbles get a highlight ring in select-mode.
             selected && "ring-2 ring-primary",
-            redacted
-              ? "border bg-muted text-muted-foreground italic"
-              : isMine
-                // `bubble-sent` carries a dedicated ::selection rule in
-                // globals.css — the global highlight is ink, which vanishes
-                // into this ink bubble, so we reverse it to cream-on-ink there.
-                // (A Tailwind `selection:` utility can't win against the
-                // unlayered global ::selection rule, hence the explicit class.)
-                ? "bubble-sent bg-primary text-primary-foreground"
-                : "bg-bubble-received",
+            !soloEmoji &&
+              (redacted
+                ? "border bg-muted text-muted-foreground italic"
+                : isMine
+                  // `bubble-sent` carries a dedicated ::selection rule in
+                  // globals.css — the global highlight is ink, which vanishes
+                  // into this ink bubble, so we reverse it to cream-on-ink there.
+                  // (A Tailwind `selection:` utility can't win against the
+                  // unlayered global ::selection rule, hence the explicit class.)
+                  ? "bubble-sent bg-primary text-primary-foreground"
+                  : "bg-bubble-received"),
           )}
         >
           {/* Quoted parent so a reply visibly references its target. */}
@@ -473,7 +498,7 @@ export function MessageBubble({
           {redacted ? (
             <span className="italic">message deleted</span>
           ) : (
-            <Body event={event} isMine={isMine} />
+            <Body event={event} isMine={isMine} soloEmoji={soloEmoji} />
           )}
 
           {/* Hover actions: reply / react / more. Floats above the bubble on
@@ -950,22 +975,38 @@ function VoiceTranscript({ text }: { text: string }) {
   );
 }
 
-function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
+function Body({
+  event,
+  isMine,
+  soloEmoji,
+}: {
+  event: Event;
+  isMine?: boolean;
+  soloEmoji?: boolean;
+}) {
   // #17 — forwarded chip rendered above the bubble body for *every* message
   // type (text, images, files, voice…), not just text. Telegram style:
   // "Forwarded from @alice".
   const forwarded = (event.content as { forward_from?: { sender_handle?: string } }).forward_from;
   const forwardedFrom = forwarded?.sender_handle ?? null;
-  if (!forwardedFrom) return <BodyContent event={event} isMine={isMine} />;
+  if (!forwardedFrom) return <BodyContent event={event} isMine={isMine} soloEmoji={soloEmoji} />;
   return (
     <div className="space-y-1">
       <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />
-      <BodyContent event={event} isMine={isMine} />
+      <BodyContent event={event} isMine={isMine} soloEmoji={soloEmoji} />
     </div>
   );
 }
 
-function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
+function BodyContent({
+  event,
+  isMine,
+  soloEmoji,
+}: {
+  event: Event;
+  isMine?: boolean;
+  soloEmoji?: boolean;
+}) {
   const c = event.content;
   switch (event.type) {
     case "m.text": {
@@ -980,6 +1021,14 @@ function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
       const blank = !body && !event.link_preview;
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
+      }
+      // §125 (Saket feedback) — a message that is EXACTLY one emoji renders
+      // large; the bubble wrapper drops its background for this case (decided in
+      // MessageBubble as `soloEmoji`, which also excludes replies/forwards/link
+      // previews). Multiple emoji and emoji+text fall through to the normal
+      // renderer and keep the standard bubble.
+      if (soloEmoji) {
+        return <div className="text-5xl leading-none">{body}</div>;
       }
       // A message written in markdown renders as real markdown (headings,
       // lists, code, tables…); plain chatter keeps the lightweight inline

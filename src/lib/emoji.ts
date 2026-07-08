@@ -149,3 +149,71 @@ export function searchEmoji(q: string, limit = 40): EmojiEntry[] {
     .slice(0, limit)
     .map((result) => result.entry);
 }
+
+// U+20E3 COMBINING ENCLOSING KEYCAP — the tail of keycap sequences like 1-keycap.
+const KEYCAP = /⃣/u;
+// A grapheme cluster is an emoji if it's a flag (regional-indicator pair), a
+// keycap, or contains an Extended_Pictographic base (covers plain emoji, ZWJ
+// sequences, skin-tone and variation-selector variants).
+function isEmojiCluster(cluster: string): boolean {
+  if (!cluster) return false;
+  if (KEYCAP.test(cluster)) return true;
+  if (/\p{Regional_Indicator}/u.test(cluster)) return true;
+  return /\p{Extended_Pictographic}/u.test(cluster);
+}
+
+// Split a string into grapheme clusters. Uses Intl.Segmenter when available
+// (correctly groups ZWJ families, flags, keycaps, skin tones); otherwise a
+// manual pass that merges the same sequences off the code-point stream.
+function toGraphemes(text: string): string[] {
+  const Segmenter = (Intl as typeof Intl & { Segmenter?: typeof Intl.Segmenter }).Segmenter;
+  if (Segmenter) {
+    try {
+      const seg = new Segmenter("en", { granularity: "grapheme" });
+      return Array.from(seg.segment(text), (s) => s.segment);
+    } catch {
+      // fall through to the manual splitter
+    }
+  }
+  const cps = Array.from(text);
+  const isRI = (ch: string) => /\p{Regional_Indicator}/u.test(ch);
+  // Variation selector (FE0F), keycap (20E3), and skin-tone modifiers cling to
+  // the preceding base; ZWJ (200D) joins the following base into one glyph.
+  const isTrailer = (ch: string) => /[️⃣\u{1F3FB}-\u{1F3FF}]/u.test(ch);
+  const out: string[] = [];
+  for (let i = 0; i < cps.length; i++) {
+    let cur = cps[i];
+    if (isRI(cur) && i + 1 < cps.length && isRI(cps[i + 1])) {
+      cur += cps[++i];
+      out.push(cur);
+      continue;
+    }
+    let j = i + 1;
+    while (j < cps.length && (isTrailer(cps[j]) || cps[j] === "‍")) {
+      cur += cps[j];
+      if (cps[j] === "‍" && j + 1 < cps.length) cur += cps[++j];
+      j++;
+    }
+    i = j - 1;
+    out.push(cur);
+  }
+  return out;
+}
+
+/**
+ * Is `text` nothing but emoji? Interior whitespace is ignored, so "😎 😎"
+ * still counts. `count` is the number of emoji grapheme clusters — a ZWJ family
+ * (👨‍👩‍👧), a flag (🇮🇳), and a keycap (1️⃣) each count as one. Returns ok=false the
+ * moment any non-whitespace cluster is a normal letter/number/symbol/punct.
+ */
+export function emojiOnly(text: string): { ok: boolean; count: number } {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return { ok: false, count: 0 };
+  let count = 0;
+  for (const cluster of toGraphemes(trimmed)) {
+    if (/^\s+$/u.test(cluster)) continue; // interior whitespace between emoji
+    if (!isEmojiCluster(cluster)) return { ok: false, count: 0 };
+    count += 1;
+  }
+  return { ok: count > 0, count };
+}

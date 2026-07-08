@@ -331,9 +331,14 @@ export function MessageBubble({
   const soloEmoji =
     event.type === "m.text" &&
     !redacted &&
-    !replyToEvent &&
+    // Base the reply exclusion on the event field, not the resolved parent:
+    // `replyToEvent` is undefined when the parent isn't loaded in `eventById`,
+    // which would otherwise let a reply render bare/big (QA hold on #125).
+    !event.reply_to_event_id &&
     !event.link_preview &&
-    !(event.content as { forward_from?: { sender_handle?: string } }).forward_from?.sender_handle &&
+    // ANY forward_from object keeps the normal bubble — including a forward
+    // whose sender_handle is missing/empty.
+    !(event.content as { forward_from?: unknown }).forward_from &&
     emojiMeta.ok &&
     emojiMeta.count === 1;
 

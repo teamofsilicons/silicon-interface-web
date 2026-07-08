@@ -1,5 +1,6 @@
 import * as React from "react";
 import type { Icon } from "@phosphor-icons/react";
+import { DownloadSimple } from "@phosphor-icons/react/dist/ssr";
 
 import { cn } from "@/lib/utils";
 
@@ -24,6 +25,7 @@ export function AttachmentCard({
   sizeLabel,
   tilt,
   onClick,
+  onDownload,
   className,
 }: {
   glyph: Icon;
@@ -38,10 +40,14 @@ export function AttachmentCard({
   /** Degrees of rotation (pins only). Omit for a flat standalone card. */
   tilt?: number;
   onClick?: (e: React.MouseEvent) => void;
+  /** When set, renders an explicit download affordance on the card. The handler
+   *  runs after `stopPropagation()`, so it never also triggers the card click
+   *  (e.g. a non-previewable file whose card-click already downloads). */
+  onDownload?: (e: React.MouseEvent) => void;
   className?: string;
 }) {
   const tilted = typeof tilt === "number";
-  return (
+  const card = (
     <button
       type="button"
       onClick={onClick}
@@ -87,5 +93,30 @@ export function AttachmentCard({
         ) : null}
       </div>
     </button>
+  );
+
+  // No explicit download affordance requested — return the bare card unchanged.
+  if (!onDownload) return card;
+
+  // The card root is a <button>, so the download control can't nest inside it
+  // (invalid HTML). Render it as an absolutely-positioned sibling over the
+  // card's top-right corner; stopPropagation keeps the card's own onClick from
+  // also firing.
+  return (
+    <div className="relative inline-flex max-w-full">
+      {card}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDownload(e);
+        }}
+        aria-label="download"
+        title="download"
+        className="absolute right-1 top-1 inline-flex h-7 w-7 items-center justify-center border bg-background/80 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-accent"
+      >
+        <DownloadSimple className="h-3.5 w-3.5" />
+      </button>
+    </div>
   );
 }

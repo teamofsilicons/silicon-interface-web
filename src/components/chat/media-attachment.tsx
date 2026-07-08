@@ -110,33 +110,41 @@ export function MediaAttachment({
   const retriedRef = React.useRef(false);
   React.useEffect(() => {
     if (localUrl) {
-      setFailed(false);
-      setUrl(localUrl);
-      setMedia(
-        {
-          media_id: mediaId || "local",
-          uploader_kind: "carbon",
-          uploader_id: 0,
-          mime: mime || "audio/webm",
-          size: 0,
-          sha256: "",
-          status: "ready",
-          kind: (mime || "").startsWith("audio/") ? "voice" : "file",
-          transcript: "",
-          duration_ms: localDurationMs ?? null,
-          peaks: localPeaks ?? null,
-          width: null,
-          height: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        } as MediaObject,
-      );
-      return;
+      let alive = true;
+      queueMicrotask(() => {
+        if (!alive) return;
+        setFailed(false);
+        setUrl(localUrl);
+        setMedia(
+          {
+            media_id: mediaId || "local",
+            uploader_kind: "carbon",
+            uploader_id: 0,
+            mime: mime || "audio/webm",
+            size: 0,
+            sha256: "",
+            status: "ready",
+            kind: (mime || "").startsWith("audio/") ? "voice" : "file",
+            transcript: "",
+            duration_ms: localDurationMs ?? null,
+            peaks: localPeaks ?? null,
+            width: null,
+            height: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          } as MediaObject,
+        );
+      });
+      return () => {
+        alive = false;
+      };
     }
     if (!mediaId) return;
     let alive = true;
     retriedRef.current = false;
-    setPollExhausted(false);
+    queueMicrotask(() => {
+      if (alive) setPollExhausted(false);
+    });
     let attempts = 0;
     let errors = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -357,6 +365,7 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          mediaId={mediaId}
         />
       </>
     );
@@ -393,6 +402,7 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          mediaId={mediaId}
         />
       </>
     );
@@ -432,6 +442,10 @@ export function MediaAttachment({
           if (canPreview) setPreviewOpen(true);
           else if (url) downloadAsset(url, filename);
         }}
+        // Genuinely non-previewable files (zip/doc/unknown) get an explicit
+        // download button; previewable ones open the previewer (which has its
+        // own download in the header). `url` is non-null past the guard above.
+        onDownload={canPreview ? undefined : () => downloadAsset(url, filename)}
       />
       {canPreview && (
         <MediaPreviewer
@@ -440,6 +454,7 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          mediaId={mediaId}
         />
       )}
     </>

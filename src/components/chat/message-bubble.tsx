@@ -31,7 +31,6 @@ import { copyText } from "@/lib/clipboard";
 import { downloadAsset, MediaPreviewer } from "./media-previewer";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { AttachmentCard } from "@/components/chat/attachment-card";
 import { MarkdownView } from "@/components/chat/markdown-view";
@@ -159,6 +158,7 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
           url={url}
           mime={mime}
           filename={filename}
+          mediaId={mediaId}
         />
       )}
     </>

@@ -82,27 +82,34 @@ export function ticketKey(secret?: string): Buffer {
  * the route is fully fail-closed, exactly as before.
  */
 export function isPreviewEnv(): boolean {
-  return process.env.VERCEL_ENV === "preview" || process.env.NODE_ENV !== "production";
+  // The Vercel environment marker WINS when present: a prod-marked deploy
+  // (VERCEL_ENV="production") is NEVER treated as preview, even if NODE_ENV is
+  // accidentally non-production. Only off Vercel (no VERCEL_ENV — e.g. local
+  // `next dev`) do we fall back to NODE_ENV.
+  if (process.env.VERCEL_ENV) return process.env.VERCEL_ENV === "preview";
+  return process.env.NODE_ENV !== "production";
 }
 
-// Fallback secret used ONLY in isPreviewEnv() when HTML_PREVIEW_TICKET_SECRET is
-// unset. NOT a production secret — preview tickets are single-use and short-
-// lived, and production ALWAYS requires the real env (resolveTicketKey throws).
-const PREVIEW_FALLBACK_SECRET =
-  "html-preview::vercel-preview-fallback::not-for-production-use";
+// Process-local preview fallback KEY — generated ONCE at module load with CSPRNG
+// randomness, never committed or derivable. A committed constant would have made
+// preview tickets forgeable (anyone could seal a ticket and, with the empty-
+// allow-list relaxation, point `url` at any https:443 host → an SSRF-shaped
+// read proxy). A per-process random key removes that: preview tickets are only
+// consumable by the same process that minted them — consistent with the
+// per-process in-memory store, and unforgeable since the key never leaves RAM.
+const PREVIEW_FALLBACK_KEY = randomBytes(32);
 
 /**
  * The AES key the routes seal/open with: derived from the env secret, or (in
- * preview/dev only) the fallback secret, else THROW so production fails closed.
- * `ticketKey()` above is left untouched so the self-test's fail-closed case
- * still holds when called directly.
+ * preview/dev only) the process-local random fallback key, else THROW so
+ * production fails closed. `ticketKey()` above is left untouched so the
+ * self-test's fail-closed case still holds when called directly.
  */
 export function resolveTicketKey(): Buffer {
-  const s =
-    process.env.HTML_PREVIEW_TICKET_SECRET ??
-    (isPreviewEnv() ? PREVIEW_FALLBACK_SECRET : undefined);
-  if (!s) throw new Error("HTML_PREVIEW_TICKET_SECRET is not set");
-  return createHash("sha256").update(s).digest();
+  const s = process.env.HTML_PREVIEW_TICKET_SECRET;
+  if (s) return createHash("sha256").update(s).digest();
+  if (isPreviewEnv()) return PREVIEW_FALLBACK_KEY;
+  throw new Error("HTML_PREVIEW_TICKET_SECRET is not set");
 }
 
 /** The AAD string that binds a ticket to a media id. */

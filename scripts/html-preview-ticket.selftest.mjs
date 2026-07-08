@@ -36,6 +36,7 @@ const {
   isHostAllowed,
   isAllowedPreviewUrl,
   // Preview/dev-only fallbacks (Dope #116 Vercel-preview patch)
+  isPreviewEnv,
   resolveTicketKey,
   previewUrlAccepted,
   consumeStoreAvailable,
@@ -234,7 +235,8 @@ console.log("html-preview-ticket self-test\n");
     "production without Upstash: kvSetNx fails closed (false) + store unavailable",
     setProd === false && consumeStoreAvailable() === false,
   );
-  process.env.VERCEL_ENV = savedVercel;
+  if (savedVercel === undefined) delete process.env.VERCEL_ENV;
+  else process.env.VERCEL_ENV = savedVercel;
   process.env.NODE_ENV = "development";
 }
 
@@ -271,6 +273,53 @@ console.log("html-preview-ticket self-test\n");
     "previewUrlAccepted: preview+empty-list allows https:443 any-host, rejects http/non-default port; production rejects",
     previewAny === true && previewHttp === false && previewPort === false && prodAny === false,
   );
+  process.env.NODE_ENV = "development";
+}
+
+// 16) gate precedence: the Vercel prod marker WINS over a stray NODE_ENV
+{
+  const savedVercel = process.env.VERCEL_ENV;
+  process.env.VERCEL_ENV = "production";
+  process.env.NODE_ENV = "development";
+  const prodMarkerWins = isPreviewEnv() === false; // prod marker beats NODE_ENV
+  process.env.VERCEL_ENV = "preview";
+  process.env.NODE_ENV = "production";
+  const previewMarkerOn = isPreviewEnv() === true;
+  delete process.env.VERCEL_ENV;
+  process.env.NODE_ENV = "production";
+  const offVercelProd = isPreviewEnv() === false;
+  process.env.NODE_ENV = "development";
+  const offVercelDev = isPreviewEnv() === true;
+  check(
+    "isPreviewEnv: VERCEL_ENV marker wins (prod=false even if NODE_ENV=dev), preview=true; off-Vercel uses NODE_ENV",
+    prodMarkerWins && previewMarkerOn && offVercelProd && offVercelDev,
+  );
+  if (savedVercel === undefined) delete process.env.VERCEL_ENV;
+  else process.env.VERCEL_ENV = savedVercel;
+  process.env.NODE_ENV = "development";
+}
+
+// 17) preview fallback key is process-local random (stable in-process, 32B) and
+//     the OLD committed-constant secret can no longer open a preview ticket
+{
+  delete process.env.HTML_PREVIEW_TICKET_SECRET;
+  delete process.env.VERCEL_ENV;
+  process.env.NODE_ENV = "development"; // preview
+  const k1 = resolveTicketKey();
+  const k2 = resolveTicketKey();
+  const tok = seal(payloadFor("media-A", now + 90), ticketAad("media-A"), resolveTicketKey());
+  const oldConstantCannotOpen = threw(() =>
+    open(
+      tok,
+      ticketAad("media-A"),
+      ticketKey("html-preview::vercel-preview-fallback::not-for-production-use"),
+    ),
+  );
+  check(
+    "preview fallback key is process-local random (stable in-process, 32B) and unforgeable by the old committed constant",
+    k1.length === 32 && k1.equals(k2) && oldConstantCannotOpen === true,
+  );
+  process.env.HTML_PREVIEW_TICKET_SECRET = "self-test-secret-please-ignore";
   process.env.NODE_ENV = "development";
 }
 

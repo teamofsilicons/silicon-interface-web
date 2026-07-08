@@ -292,16 +292,21 @@ Production requires the full env set — `HTML_PREVIEW_TICKET_SECRET`,
 
 To let a **Vercel Preview** deployment (or local dev) render HTML previews
 without provisioning Upstash/secret/allow-list, a fallback path activates **only**
-when `isPreviewEnv()` is true — i.e. `VERCEL_ENV === "preview"` or
-`NODE_ENV !== "production"`. It is never active in production
-(`VERCEL_ENV === "production"`). When active AND the corresponding env is unset:
+when `isPreviewEnv()` is true. The Vercel marker WINS: if `VERCEL_ENV` is set it
+must equal `"preview"` (so a prod-marked deploy is never preview even with a
+stray `NODE_ENV`); only off Vercel (no `VERCEL_ENV`, e.g. local `next dev`) does
+it fall back to `NODE_ENV !== "production"`. When active AND the corresponding
+env is unset:
 
 - **Store**: an in-process in-memory `Map` replaces Upstash. It keeps single-use
   semantics WITHIN one process (`SET NX` + TTL, `GETDEL`/delete-before-return)
   but is **not cross-instance atomic** — good enough for reviewing a preview
   deploy, NOT a production guarantee.
-- **Secret**: a fixed preview-only fallback secret is used (single-use, short-
-  lived tickets). Production always uses the real env secret.
+- **Secret**: a **process-local random key** (`randomBytes(32)` generated once at
+  module load) is used — never a committed constant, so preview tickets cannot be
+  forged. A ticket is only consumable by the same process that minted it
+  (consistent with the in-memory store). Production always uses the real env
+  secret.
 - **Allow-list**: when `HTML_PREVIEW_ALLOWED_HOSTS` is empty, any HTTPS
   default-port host is accepted (the URL still comes from Glass for an authorized
   user and is fetched server-side with `redirect: "error"` + byte cap). Setting

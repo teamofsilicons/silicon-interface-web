@@ -996,6 +996,62 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const [forwardingEvent, setForwardingEvent] = React.useState<Event | null>(null);
   const onForward = (ev: Event) => setForwardingEvent(ev);
 
+  // Dope #79 — multi-select → mass forward. `selectMode` swaps the composer for
+  // a selection action bar; `selectedEventIds` holds the chosen source events.
+  const [selectMode, setSelectMode] = React.useState(false);
+  const [selectedEventIds, setSelectedEventIds] = React.useState<Set<string>>(new Set());
+  // `forwardSelection` opens the shared ForwardDialog against the selection
+  // (rather than a single `forwardingEvent`).
+  const [forwardSelection, setForwardSelection] = React.useState(false);
+  const MAX_FORWARD = 50;
+
+  // 'select' options-menu action: enter select-mode with this message chosen.
+  const onSelect = (ev: Event) => {
+    setSelectMode(true);
+    setSelectedEventIds(new Set([ev.event_id]));
+  };
+  const toggleSelect = (ev: Event) => {
+    const already = selectedEventIds.has(ev.event_id);
+    // Cap the set; a toggle that would exceed the cap is a no-op with a hint.
+    if (!already && selectedEventIds.size >= MAX_FORWARD) {
+      toast.error(`you can forward up to ${MAX_FORWARD} messages at once`);
+      return;
+    }
+    setSelectedEventIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(ev.event_id)) next.delete(ev.event_id);
+      else next.add(ev.event_id);
+      return next;
+    });
+  };
+  const cancelSelect = () => {
+    setSelectedEventIds(new Set());
+    setSelectMode(false);
+    setForwardSelection(false);
+  };
+  // Resolve the selected ids to events, deduped by attachment `bundle_id`.
+  // Selection granularity is the visible bubble (the text/primary event) and
+  // pinned attachments aren't independently selectable, so a bundle already
+  // maps to a single selectable unit — but we dedupe defensively so the server
+  // (which expands the bundle from any member) never forwards it twice.
+  const selectedEvents = React.useMemo(() => {
+    if (selectedEventIds.size === 0) return [] as Event[];
+    const byId = new Map(events.map((e) => [e.event_id, e]));
+    const out: Event[] = [];
+    const seenBundles = new Set<string>();
+    for (const id of selectedEventIds) {
+      const ev = byId.get(id);
+      if (!ev) continue;
+      const bid = (ev.content as { bundle_id?: unknown }).bundle_id;
+      if (typeof bid === "string" && bid) {
+        if (seenBundles.has(bid)) continue;
+        seenBundles.add(bid);
+      }
+      out.push(ev);
+    }
+    return out;
+  }, [selectedEventIds, events]);
+
   // Aggregate reactions: target_event_id → { emoji → [sender_handle] }
   const reactionsByTarget = React.useMemo(() => {
     const map = new Map<string, Record<string, string[]>>();
@@ -1717,6 +1773,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                 onReply={readOnly ? undefined : onReply}
                 onReact={readOnly ? undefined : onReact}
                 onForward={readOnly ? undefined : onForward}
+                onSelect={readOnly ? undefined : onSelect}
+                selectMode={selectMode}
+                selected={selectedEventIds.has(e.event_id)}
+                onToggleSelect={readOnly ? undefined : toggleSelect}
                 onRetry={readOnly ? undefined : retrySend}
                 onDelete={
                   readOnly || (room.kind === "direct" && peer?.kind === "silicon")
@@ -1982,7 +2042,26 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         </button>
       ) : null}
 
-      {readOnly ? (
+      {selectMode ? (
+        // Dope #79 — selection action bar, shown in place of the composer while
+        // multi-selecting. readOnly rooms never enter select-mode (no onSelect).
+        <div className="flex items-center justify-between gap-2 border-t bg-background px-4 py-3">
+          <span className="label-mono text-[10px] text-muted-foreground">
+            {selectedEventIds.size} selected
+          </span>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={cancelSelect}>
+              cancel
+            </Button>
+            <Button
+              onClick={() => setForwardSelection(true)}
+              disabled={selectedEventIds.size === 0}
+            >
+              forward
+            </Button>
+          </div>
+        </div>
+      ) : readOnly ? (
         <div className="flex items-center justify-center gap-2 border-t bg-muted/40 px-6 py-4 text-xs text-muted-foreground">
           <Eye className="h-3.5 w-3.5" />
           You&rsquo;re observing this silicon-to-silicon conversation. It&rsquo;s
@@ -2010,11 +2089,19 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       <DropOverlay visible={isDropTarget} />
 
       <ForwardDialog
-        open={!!forwardingEvent}
-        onOpenChange={(v) => !v && setForwardingEvent(null)}
+        open={!!forwardingEvent || forwardSelection}
+        onOpenChange={(v) => {
+          if (!v) {
+            setForwardingEvent(null);
+            setForwardSelection(false);
+          }
+        }}
         event={forwardingEvent}
+        events={forwardSelection ? selectedEvents : undefined}
         rooms={allRooms}
         sourceRoomId={room.room_id}
+        // On full success from the multi-select flow, drop out of select-mode.
+        onComplete={cancelSelect}
       />
 
       <Dialog

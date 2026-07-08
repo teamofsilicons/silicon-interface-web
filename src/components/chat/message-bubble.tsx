@@ -10,6 +10,7 @@ import {
   DotsThree,
   DownloadSimple,
   ImageSquare,
+  ListChecks,
   MusicNote,
   Share,
   Smiley,
@@ -23,8 +24,9 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
-import type { Event, ProgressState } from "@/lib/types";
+import type { Event, EventType, ProgressState } from "@/lib/types";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
+import { emojiOnly } from "@/lib/emoji";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 
@@ -59,6 +61,13 @@ import {
 } from "@/components/ui/dialog";
 
 const REACTION_EMOJI = ["❤️", "👍", "👎", "😂", "😊", "😢"] as const;
+const SELECTABLE_FORWARD_TYPES = new Set<EventType>([
+  "m.text",
+  "m.image",
+  "m.file",
+  "m.voice",
+  "m.tts",
+]);
 
 /** Deterministic tilt in [-3, 3] degrees, hashed from a stable key so each
  *  pin keeps its angle across re-renders (a fresh Math.random would jitter on
@@ -213,6 +222,14 @@ interface Props {
   onReact?: (event: Event, emoji: string) => void;
   /** Open a forward picker (a no-op stub today). */
   onForward?: (event: Event) => void;
+  /** Enter multi-select mode with this message pre-selected (options menu). */
+  onSelect?: (event: Event) => void;
+  /** True while the room is in multi-select mode. */
+  selectMode?: boolean;
+  /** Whether this message is currently in the selection set. */
+  selected?: boolean;
+  /** Toggle this message's membership in the selection set. */
+  onToggleSelect?: (event: Event) => void;
   /** Self-delete (5-min carbon window). */
   onDelete?: (event: Event) => void;
   /** Re-send a failed message (same client id — the server dedupes). When set,
@@ -243,8 +260,12 @@ export function MessageBubble({
   onReply,
   onReact,
   onForward,
+  onSelect,
   onDelete,
   onRetry,
+  selectMode = false,
+  selected = false,
+  onToggleSelect,
   pinnedAttachments,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
@@ -319,7 +340,34 @@ export function MessageBubble({
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
   // controlled state for that dropdown.
   const [moreOpen, setMoreOpen] = React.useState(false);
-  const hasActions = !redacted && !!(onReply || onReact || onForward || onDelete);
+  const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
+  const hasActions = !redacted && !!(onReply || onReact || (onForward && canForward) || onDelete || (onSelect && canForward));
+  // Multi-select eligibility mirrors the forward gate: a real, settled,
+  // non-deleted bubble whose type the backend forward endpoint supports.
+  // Streaming/optimistic (`is_final === false`) and deleted messages are never
+  // selectable. (m.system / m.session_marker already early-return above.)
+  const selectable = !!onToggleSelect && canForward;
+  const inSelect = selectMode && selectable;
+
+  // §125 (Saket feedback) — a message that is EXACTLY one emoji renders large
+  // and WITHOUT a message bubble (no filled/ink background). Replies, forwards,
+  // link previews, and 2+ emoji keep the normal bubble behavior.
+  const emojiBody =
+    event.type === "m.text" ? String(event.content.body ?? "").replace(/^\s+|\s+$/g, "") : "";
+  const emojiMeta = emojiOnly(emojiBody);
+  const soloEmoji =
+    event.type === "m.text" &&
+    !redacted &&
+    // Base the reply exclusion on the event field, not the resolved parent:
+    // `replyToEvent` is undefined when the parent isn't loaded in `eventById`,
+    // which would otherwise let a reply render bare/big (QA hold on #125).
+    !event.reply_to_event_id &&
+    !event.link_preview &&
+    // ANY forward_from object keeps the normal bubble — including a forward
+    // whose sender_handle is missing/empty.
+    !(event.content as { forward_from?: unknown }).forward_from &&
+    emojiMeta.ok &&
+    emojiMeta.count === 1;
 
   return (
     <div
@@ -330,8 +378,35 @@ export function MessageBubble({
         "group flex w-full gap-2 mb-0.5",
         showSender ? "mt-1.5" : "mt-0.5",
         isMine ? "justify-end" : "justify-start",
+        // In select-mode the whole row is a big toggle target; suppress text
+        // selection so a click reads as "select", not "highlight".
+        inSelect && "cursor-pointer select-none",
       )}
+      // Toggle selection when the row is an eligible select target. Clicking
+      // suppresses the normal action menu (hidden below) and normal behavior.
+      onClick={inSelect ? () => onToggleSelect?.(event) : undefined}
     >
+      {selectMode && (
+        // Leading select affordance, shown for every bubble while in select-
+        // mode. Eligible bubbles get a real checkbox; ineligible ones (system
+        // rows early-return above; streaming/deleted are handled here) get a
+        // blank spacer so the timeline doesn't shift horizontally.
+        <div className="mt-1 flex w-5 shrink-0 items-center justify-center">
+          {selectable && (
+            <span
+              aria-hidden
+              className={cn(
+                "flex h-5 w-5 items-center justify-center rounded-full border transition-colors",
+                selected
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-muted-foreground/40",
+              )}
+            >
+              {selected && <Check className="h-3 w-3" weight="bold" />}
+            </span>
+          )}
+        </div>
+      )}
       {!isMine && (
         // Avatar slot stays present even on middle-of-group bubbles so the
         // text aligns vertically; we just hide the actual mark when it's
@@ -370,6 +445,10 @@ export function MessageBubble({
             className={cn(
               "relative z-10 -mb-2 flex flex-wrap gap-1.5 px-1",
               isMine ? "justify-end" : "justify-start",
+              // In select-mode a click anywhere on the row must toggle the
+              // whole bundle; disable the pins' own open/preview handlers so
+              // they don't swallow the click (and can't be opened mid-select).
+              inSelect && "pointer-events-none",
             )}
           >
             {pinnedAttachments.map((att, idx) => (
@@ -388,18 +467,24 @@ export function MessageBubble({
             // visible asymmetry around media attachments). `group` lives on the
             // message column wrapper so hovering anywhere on the block (bubble,
             // padding, label, time) reveals the actions — not just the text.
-            "relative min-w-0 max-w-full p-3 text-sm shadow-sm",
+            "relative min-w-0 max-w-full",
+            // §125 — a lone emoji renders bare: no bubble background, shadow, or
+            // padded box, just the big glyph. Everything else keeps the bubble.
+            soloEmoji ? "py-0.5" : "p-3 text-sm shadow-sm",
             copyFlash && "copy-flash",
-            redacted
-              ? "border bg-muted text-muted-foreground italic"
-              : isMine
-                // `bubble-sent` carries a dedicated ::selection rule in
-                // globals.css — the global highlight is ink, which vanishes
-                // into this ink bubble, so we reverse it to cream-on-ink there.
-                // (A Tailwind `selection:` utility can't win against the
-                // unlayered global ::selection rule, hence the explicit class.)
-                ? "bubble-sent bg-primary text-primary-foreground"
-                : "bg-bubble-received",
+            // Selected bubbles get a highlight ring in select-mode.
+            selected && "ring-2 ring-primary",
+            !soloEmoji &&
+              (redacted
+                ? "border bg-muted text-muted-foreground italic"
+                : isMine
+                  // `bubble-sent` carries a dedicated ::selection rule in
+                  // globals.css — the global highlight is ink, which vanishes
+                  // into this ink bubble, so we reverse it to cream-on-ink there.
+                  // (A Tailwind `selection:` utility can't win against the
+                  // unlayered global ::selection rule, hence the explicit class.)
+                  ? "bubble-sent bg-primary text-primary-foreground"
+                  : "bg-bubble-received"),
           )}
         >
           {/* Quoted parent so a reply visibly references its target. */}
@@ -414,13 +499,14 @@ export function MessageBubble({
           {redacted ? (
             <span className="italic">message deleted</span>
           ) : (
-            <Body event={event} isMine={isMine} />
+            <Body event={event} isMine={isMine} soloEmoji={soloEmoji} />
           )}
 
           {/* Hover actions: reply / react / more. Floats above the bubble on
               hover; on mobile, tap-to-reveal is not supported here — a small-
               screen affordance is a follow-up. */}
-          {hasActions && (
+          {/* Hover actions are suppressed while selecting — the row is a toggle. */}
+          {hasActions && !selectMode && (
             <BubbleActions
               event={event}
               isMine={isMine}
@@ -431,6 +517,7 @@ export function MessageBubble({
               onReply={onReply}
               onReact={onReact}
               onForward={onForward}
+              onSelect={selectable ? onSelect : undefined}
               onDelete={onDelete}
               onTakeBack={onTakeBack}
               onCopied={triggerCopyFlash}
@@ -440,7 +527,7 @@ export function MessageBubble({
 
         {/* Reaction chips — surfaced under the bubble, grouped by emoji. */}
         {reactions && Object.keys(reactions).length > 0 && (
-          <div className={cn("flex flex-wrap gap-1", isMine && "justify-end")}>
+          <div className={cn("flex flex-wrap gap-1", isMine && "justify-end", inSelect && "pointer-events-none")}>
             {Object.entries(reactions).map(([emoji, who]) => {
               const reactedByMe = !!myHandle && who.includes(myHandle);
               return (
@@ -520,6 +607,7 @@ function BubbleActions({
   onReply,
   onReact,
   onForward,
+  onSelect,
   onDelete,
   onTakeBack,
   onCopied,
@@ -535,6 +623,7 @@ function BubbleActions({
   onReply?: (event: Event) => void;
   onReact?: (event: Event, emoji: string) => void;
   onForward?: (event: Event) => void;
+  onSelect?: (event: Event) => void;
   onDelete?: (event: Event) => void;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   onCopied?: () => void;
@@ -544,6 +633,7 @@ function BubbleActions({
     Date.now() - new Date(event.created_at).getTime() < FIVE_MIN_MS;
   const canDelete = isMine && within5Min;
   const canTakeBack = isMine && isOwnSilicon;
+  const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false;
   const textBody = event.type === "m.text" ? String(event.content.body ?? "") : "";
   const handleCopy = async () => {
     // §7.1 — copyText handles insecure contexts (LAN/http) with an execCommand
@@ -659,10 +749,16 @@ function BubbleActions({
               reply
             </DropdownMenuItem>
           )}
-          {onForward && (
+          {onForward && canForward && (
             <DropdownMenuItem onClick={() => onForward(event)}>
               <Share className="mr-2 h-3.5 w-3.5" />
               forward
+            </DropdownMenuItem>
+          )}
+          {onSelect && canForward && (
+            <DropdownMenuItem onClick={() => onSelect(event)}>
+              <ListChecks className="mr-2 h-3.5 w-3.5" />
+              select
             </DropdownMenuItem>
           )}
           {hasMedia && (
@@ -880,22 +976,38 @@ function VoiceTranscript({ text }: { text: string }) {
   );
 }
 
-function Body({ event, isMine }: { event: Event; isMine?: boolean }) {
+function Body({
+  event,
+  isMine,
+  soloEmoji,
+}: {
+  event: Event;
+  isMine?: boolean;
+  soloEmoji?: boolean;
+}) {
   // #17 — forwarded chip rendered above the bubble body for *every* message
   // type (text, images, files, voice…), not just text. Telegram style:
   // "Forwarded from @alice".
   const forwarded = (event.content as { forward_from?: { sender_handle?: string } }).forward_from;
   const forwardedFrom = forwarded?.sender_handle ?? null;
-  if (!forwardedFrom) return <BodyContent event={event} isMine={isMine} />;
+  if (!forwardedFrom) return <BodyContent event={event} isMine={isMine} soloEmoji={soloEmoji} />;
   return (
     <div className="space-y-1">
       <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />
-      <BodyContent event={event} isMine={isMine} />
+      <BodyContent event={event} isMine={isMine} soloEmoji={soloEmoji} />
     </div>
   );
 }
 
-function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
+function BodyContent({
+  event,
+  isMine,
+  soloEmoji,
+}: {
+  event: Event;
+  isMine?: boolean;
+  soloEmoji?: boolean;
+}) {
   const c = event.content;
   switch (event.type) {
     case "m.text": {
@@ -910,6 +1022,14 @@ function BodyContent({ event, isMine }: { event: Event; isMine?: boolean }) {
       const blank = !body && !event.link_preview;
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
+      }
+      // §125 (Saket feedback) — a message that is EXACTLY one emoji renders
+      // large; the bubble wrapper drops its background for this case (decided in
+      // MessageBubble as `soloEmoji`, which also excludes replies/forwards/link
+      // previews). Multiple emoji and emoji+text fall through to the normal
+      // renderer and keep the standard bubble.
+      if (soloEmoji) {
+        return <div className="text-5xl leading-none">{body}</div>;
       }
       // A message written in markdown renders as real markdown (headings,
       // lists, code, tables…); plain chatter keeps the lightweight inline

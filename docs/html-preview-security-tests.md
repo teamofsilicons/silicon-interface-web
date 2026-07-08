@@ -4,6 +4,14 @@ Same-origin HTML preview served through a **sealed single-use ticket** + a
 server-side **proxy** that re-serves the body under a strict header-only CSP +
 `sandbox`. We NEVER iframe a presigned URL directly.
 
+**Scope of the security claim (#116):** the presigned URL is never used as the
+iframe `src` and is never fetched client-side for preview/peek. It is **not**
+claimed that the browser never sees the presigned URL at all — direct HTML
+**download** (options-menu / header / `AttachmentCard` buttons) still fetches
+the original asset via the presigned URL, exactly like every other attachment
+type. That is pre-existing app-wide behavior and is **out of scope for #116**;
+a server-side download proxy is tracked separately (pending Architect sign-off).
+
 Two routes (App Router, `runtime = "nodejs"`):
 
 | Route | File | Purpose |
@@ -270,5 +278,7 @@ Let a ticket expire (or reuse it) so the iframe shows the 410 page. Click
 
 The previewer's header **download** button (and the non-previewable
 `AttachmentCard` download button) fetch the original asset via the presigned URL
-and save it unchanged — independent of the preview proxy.
+and save it unchanged — independent of the preview proxy. This is pre-existing
+app-wide download behavior (identical for every attachment type) and is **out of
+scope for #116** — see the scope note at the top of this doc.
 ```

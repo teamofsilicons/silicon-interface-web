@@ -6,7 +6,10 @@
 // media is a ready text/html object served from an allow-listed host under the
 // size cap, atomically records a single-use marker in Upstash (FAIL CLOSED),
 // and returns a sealed ticket pointing at the same-origin consume route. The
-// browser never sees the presigned URL and never iframes it directly.
+// presigned URL is never used as the iframe src and is never fetched
+// client-side for preview/peek. (Direct HTML *download* still uses the
+// presigned URL like every other attachment type — pre-existing app-wide
+// behavior, out of scope for #116.)
 import type { NextRequest } from "next/server";
 
 import {

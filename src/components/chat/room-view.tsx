@@ -286,8 +286,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const highlightTimerRef = React.useRef<number | null>(null);
   const [pendingJumpEventId, setPendingJumpEventId] = React.useState<string | null>(null);
   const lookupTargetRef = React.useRef<string | null>(null);
+  const lookupRunRef = React.useRef(0);
   const [replyJumpState, setReplyJumpState] = React.useState<
-    Record<string, { status: "loading" | "error"; message?: string }>
+    Record<string, { status: "loading" | "continue" | "error"; message?: string; cursor?: string }>
   >({});
   const [cronOpen, setCronOpen] = React.useState(false);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
@@ -296,6 +297,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const [activities, setActivities] = React.useState<
     Record<string, { state: "typing" | "uploading" | "recording"; until: number }>
   >({});
+  React.useEffect(() => {
+    lookupRunRef.current += 1;
+    lookupTargetRef.current = null;
+  }, [room.room_id]);
   // Clear expired activity entries on a 2s interval.
   React.useEffect(() => {
     const id = window.setInterval(() => {
@@ -1193,18 +1198,31 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
       if (lookupTargetRef.current) return;
       lookupTargetRef.current = eventId;
+      const runId = ++lookupRunRef.current;
+      const priorState = replyJumpState[eventId];
       setReplyJumpState((prev) => ({ ...prev, [eventId]: { status: "loading" } }));
       setLoadingOlder(true);
       try {
-        let cursor = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+        let cursor =
+          priorState?.status === "continue" && priorState.cursor
+            ? priorState.cursor
+            : events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
         let found: Event | null = null;
         const seenCursors = new Set<string>();
-        while (cursor) {
-          if (seenCursors.has(cursor)) break;
+        const deadline = Date.now() + 5000;
+        let pages = 0;
+        while (cursor && pages < 15 && Date.now() < deadline) {
+          if (seenCursors.has(cursor)) {
+            cursor = undefined;
+            break;
+          }
           seenCursors.add(cursor);
           const older = await api.events(room.room_id, cursor, PAGE_SIZE);
+          if (runId !== lookupRunRef.current) return;
+          pages += 1;
           if (older.length === 0) {
             setHasMore(false);
+            cursor = undefined;
             break;
           }
           setEvents((prev) => {
@@ -1222,6 +1240,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           if (found) break;
           if (older.length < PAGE_SIZE) {
             setHasMore(false);
+            cursor = undefined;
             break;
           }
           cursor = older.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
@@ -1244,7 +1263,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         } else {
           setReplyJumpState((prev) => ({
             ...prev,
-            [eventId]: { status: "error", message: "Couldn’t find the original message." },
+            [eventId]: cursor
+              ? {
+                  status: "continue",
+                  cursor,
+                  message: "Still looking in older history... Continue?",
+                }
+              : { status: "error", message: "Couldn’t find the original message." },
           }));
         }
       } catch (e) {
@@ -1254,11 +1279,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             : "Couldn’t find the original message.";
         setReplyJumpState((prev) => ({ ...prev, [eventId]: { status: "error", message } }));
       } finally {
-        lookupTargetRef.current = null;
-        setLoadingOlder(false);
+        if (runId === lookupRunRef.current) {
+          lookupTargetRef.current = null;
+          setLoadingOlder(false);
+        }
       }
     },
-    [eventById, events, myUsername, queueJumpToEvent, room.room_id],
+    [eventById, events, myUsername, queueJumpToEvent, replyJumpState, room.room_id],
   );
 
   // ----- Optimistic send plumbing -----

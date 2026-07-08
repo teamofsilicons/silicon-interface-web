@@ -192,7 +192,7 @@ interface Props {
   /** Jump to the replied-to event, loading older history if needed. */
   onJumpToEvent?: (eventId: string) => void;
   /** Per-reply lookup state surfaced inline in the preview. */
-  replyJumpState?: { status: "loading" | "error"; message?: string };
+  replyJumpState?: { status: "loading" | "continue" | "error"; message?: string };
   isOwnSilicon?: boolean;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   /** Send-receipt for messages this Carbon authored. Ignored for received messages. */
@@ -1000,7 +1000,7 @@ function ReplyPreviewButton({
 }: {
   replyToEvent?: Event;
   targetId: string;
-  state?: { status: "loading" | "error"; message?: string };
+  state?: { status: "loading" | "continue" | "error"; message?: string };
   onJump?: (eventId: string) => void;
   isMine: boolean;
 }) {
@@ -1016,6 +1016,14 @@ function ReplyPreviewButton({
       ? "Jump to replied voice message"
       : "Jump to replied message";
   const disabled = state?.status === "loading" || !onJump;
+  const previewText =
+    state?.status === "loading"
+      ? "Finding original message..."
+      : state?.status === "continue"
+        ? state.message || "Still looking in older history... Continue?"
+        : state?.status === "error"
+          ? state.message || "Couldn’t find the original message."
+          : label;
   return (
     <button
       type="button"
@@ -1034,11 +1042,7 @@ function ReplyPreviewButton({
       <div className="flex min-w-0 items-center gap-1 truncate">
         {replyToEvent?.type === "m.voice" && <MusicNote className="h-3 w-3 shrink-0" />}
         <span className="truncate">
-          {state?.status === "loading"
-            ? "Finding original message..."
-            : state?.status === "error"
-              ? state.message || "Couldn’t find the original message."
-              : label}
+          {previewText}
         </span>
       </div>
     </button>

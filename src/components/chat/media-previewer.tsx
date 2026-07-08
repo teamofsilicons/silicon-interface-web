@@ -1,7 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { CircleNotch, DownloadSimple } from "@phosphor-icons/react/dist/ssr";
+import {
+  CircleNotch,
+  Code,
+  DownloadSimple,
+  Eye,
+} from "@phosphor-icons/react/dist/ssr";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -10,9 +15,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  hasRenderedSourcePreview,
+  isTextLikeFile,
+  languageForFile,
+} from "@/lib/programmatic-files";
 import { cn } from "@/lib/utils";
 
 import { MarkdownView } from "./markdown-view";
+import { SourceCodeViewer } from "./source-code-viewer";
 
 interface Props {
   open: boolean;
@@ -32,38 +43,48 @@ interface Props {
  */
 export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Props) {
   const m = (mime || "").toLowerCase();
-  const name = (filename || "").toLowerCase();
-  const isImage = m.startsWith("image/");
+  const language = languageForFile(filename, mime);
+  const isSvgDocument = language?.id === "svg";
+  const isImage = m.startsWith("image/") && !isSvgDocument;
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/");
   const isPdf = m.includes("pdf");
-  // Markdown / plain-text: render inline. Detect by mime or extension, since
-  // .md is often served as application/octet-stream or text/plain.
-  const isMarkdown =
-    m.includes("markdown") || /\.(md|markdown|mdx)$/.test(name);
-  const isText =
-    isMarkdown ||
-    m.startsWith("text/") ||
-    /\.(txt|text|log|csv|json)$/.test(name);
+  const isMarkdown = language?.id === "markdown";
+  const isHtmlDocument = language?.id === "html";
+  const hasPreviewPane = hasRenderedSourcePreview(filename, mime);
+  const isText = isTextLikeFile(filename, mime);
+  const defaultSourceMode: SourceViewMode = hasPreviewPane ? "preview" : "code";
+  const sourceKey = `${url}\n${defaultSourceMode}`;
+  const [sourceModeState, setSourceModeState] = React.useState<{
+    key: string;
+    mode: SourceViewMode;
+  }>(() => ({ key: sourceKey, mode: defaultSourceMode }));
+  const sourceMode =
+    sourceModeState.key === sourceKey ? sourceModeState.mode : defaultSourceMode;
+  const setSourceMode = React.useCallback(
+    (mode: SourceViewMode) => setSourceModeState({ key: sourceKey, mode }),
+    [sourceKey],
+  );
 
-  // Fetch text content lazily when a text/markdown file is previewed.
-  const [text, setText] = React.useState<string | null>(null);
-  const [textError, setTextError] = React.useState(false);
+  // Fetch text content lazily when source/text files are previewed.
+  const [textState, setTextState] = React.useState<{
+    url: string;
+    text: string | null;
+    error: boolean;
+  } | null>(null);
   React.useEffect(() => {
     if (!open || !isText || !url) return;
     let alive = true;
-    setText(null);
-    setTextError(false);
     fetch(url, { mode: "cors" })
       .then((r) => {
         if (!r.ok) throw new Error(`status ${r.status}`);
         return r.text();
       })
       .then((t) => {
-        if (alive) setText(t);
+        if (alive) setTextState({ url, text: t, error: false });
       })
       .catch(() => {
-        if (alive) setTextError(true);
+        if (alive) setTextState({ url, text: null, error: true });
       });
     return () => {
       alive = false;
@@ -71,6 +92,11 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
   }, [open, isText, url]);
 
   const label = filename?.trim() || "preview";
+  const textForUrl = textState?.url === url ? textState.text : null;
+  const textError = textState?.url === url ? textState.error : false;
+  const activeSourceMode = hasPreviewPane ? sourceMode : "code";
+  const showSourceToggle = isText && hasPreviewPane;
+  const renderedSourceOpen = isText && activeSourceMode === "preview";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -85,21 +111,37 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             (positioned absolute, right-4 top-4 in DialogContent) so the
             download button no longer collides with it. */}
         <div className="flex items-center justify-between gap-3 border-b py-2 pl-4 pr-14">
-          <span className="truncate text-sm font-medium">{label}</span>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => downloadAsset(url, filename)}
-            aria-label="download"
-          >
-            <DownloadSimple /> download
-          </Button>
+          <div className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">{label}</span>
+            {language ? (
+              <span className="label-mono text-[10px] text-muted-foreground">
+                {language.label}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {showSourceToggle ? (
+              <SourceModeToggle mode={sourceMode} onModeChange={setSourceMode} />
+            ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => downloadAsset(url, filename)}
+              aria-label="download"
+            >
+              <DownloadSimple /> download
+            </Button>
+          </div>
         </div>
         <div
           className={cn(
-            "flex max-h-[82vh] min-h-[40vh] overflow-auto bg-card",
+            "flex max-h-[82vh] min-h-[40vh] bg-card",
             // Text is top-left aligned and scrolls; media is centered.
-            isText ? "items-start justify-start" : "items-center justify-center",
+            isText || isPdf
+              ? renderedSourceOpen
+                ? "items-stretch justify-start overflow-hidden"
+                : "items-start justify-start overflow-auto"
+              : "items-center justify-center overflow-auto",
           )}
         >
           {isImage && (
@@ -124,21 +166,25 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             />
           )}
           {isText && (
-            <div className="w-full p-6">
+            <div className={cn("w-full", renderedSourceOpen ? "h-[82vh]" : "p-6")}>
               {textError ? (
                 <p className="text-sm text-muted-foreground">
-                  couldn&rsquo;t load the file — use the download button.
+                  couldn&rsquo;t load the file - use the download button.
                 </p>
-              ) : text === null ? (
+              ) : textForUrl === null ? (
                 <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <CircleNotch className="h-4 w-4 animate-spin" /> loading…
+                  <CircleNotch className="h-4 w-4 animate-spin" /> loading...
                 </p>
-              ) : isMarkdown ? (
-                <MarkdownView source={text} className="mx-auto max-w-3xl" />
+              ) : activeSourceMode === "preview" && isHtmlDocument ? (
+                <HtmlPreviewFrame source={textForUrl} title={label} />
+              ) : activeSourceMode === "preview" && isSvgDocument ? (
+                <SvgPreviewFrame source={textForUrl} title={label} />
+              ) : activeSourceMode === "preview" && isMarkdown ? (
+                <div className="h-full overflow-auto p-6">
+                  <MarkdownView source={textForUrl} className="mx-auto max-w-3xl" />
+                </div>
               ) : (
-                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-                  {text}
-                </pre>
+                <SourceCodeViewer source={textForUrl} language={language} />
               )}
             </div>
           )}
@@ -150,6 +196,84 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+type SourceViewMode = "preview" | "code";
+
+function SourceModeToggle({
+  mode,
+  onModeChange,
+}: {
+  mode: SourceViewMode;
+  onModeChange: (mode: SourceViewMode) => void;
+}) {
+  return (
+    <div className="inline-flex h-8 shrink-0 border bg-background" role="group" aria-label="source view">
+      <button
+        type="button"
+        aria-pressed={mode === "preview"}
+        onClick={() => onModeChange("preview")}
+        className={cn(
+          "inline-flex items-center gap-1 border-r px-2 text-xs transition-colors",
+          mode === "preview"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
+        )}
+      >
+        <Eye className="h-3.5 w-3.5" /> preview
+      </button>
+      <button
+        type="button"
+        aria-pressed={mode === "code"}
+        onClick={() => onModeChange("code")}
+        className={cn(
+          "inline-flex items-center gap-1 px-2 text-xs transition-colors",
+          mode === "code"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
+        )}
+      >
+        <Code className="h-3.5 w-3.5" /> code
+      </button>
+    </div>
+  );
+}
+
+function HtmlPreviewFrame({ source, title }: { source: string; title: string }) {
+  return (
+    <iframe
+      sandbox=""
+      srcDoc={source}
+      title={`${title} preview`}
+      className="h-full w-full border-0 bg-card"
+    />
+  );
+}
+
+function SvgPreviewFrame({ source, title }: { source: string; title: string }) {
+  const srcDoc = React.useMemo(
+    () => `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+html,body{margin:0;min-height:100%}
+body{display:grid;place-items:center;min-height:100vh;overflow:auto}
+svg{max-width:100%;max-height:100vh}
+</style>
+</head>
+<body>${source}</body>
+</html>`,
+    [source],
+  );
+  return (
+    <iframe
+      sandbox=""
+      srcDoc={srcDoc}
+      title={`${title} preview`}
+      className="h-full w-full border-0 bg-card"
+    />
   );
 }
 

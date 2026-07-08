@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { isTextLikeFile } from "@/lib/programmatic-files";
+
 /**
  * Fetches a small head of a text/markdown file's contents for a mini preview on
  * the attachment card (like a document thumbnail). Cached per key (media_id)
@@ -12,22 +14,7 @@ const inflight = new Map<string, Promise<string | null>>();
 
 /** Is this a text-ish file we can show a content peek for? */
 export function isTextLike(name?: string | null, mime?: string | null): boolean {
-  const m = (mime || "").toLowerCase();
-  if (
-    m.startsWith("text/") ||
-    m.includes("markdown") ||
-    m.includes("json") ||
-    m.includes("xml") ||
-    m.includes("csv")
-  ) {
-    return true;
-  }
-  const ext = (name || "").toLowerCase().split(".").pop() || "";
-  return [
-    "md", "markdown", "mdx", "txt", "text", "log", "csv", "json", "yml", "yaml",
-    "ini", "toml", "html", "htm", "css", "js", "ts", "tsx", "jsx", "py", "rs",
-    "c", "h", "cpp", "sql", "sh", "env",
-  ].includes(ext);
+  return isTextLikeFile(name, mime);
 }
 
 function fetchSnippet(url: string, key: string, maxChars: number): Promise<string | null> {

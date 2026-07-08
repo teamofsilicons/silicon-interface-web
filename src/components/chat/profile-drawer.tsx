@@ -460,6 +460,7 @@ function FilesTab({ events }: { events: Event[] }) {
           key={e.event_id}
           mediaId={String(e.content.media_id)}
           mime={e.content.mime ? String(e.content.mime) : undefined}
+          filename={e.content.filename ? String(e.content.filename) : undefined}
           caption={e.content.caption ? String(e.content.caption) : undefined}
         />
       ))}

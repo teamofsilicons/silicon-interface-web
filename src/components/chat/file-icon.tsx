@@ -29,6 +29,8 @@ import {
   FileZip,
 } from "@phosphor-icons/react/dist/ssr";
 
+import { isTextLikeFile } from "@/lib/programmatic-files";
+
 // Extension → glyph. Covers the common cases; everything else falls back to a
 // type-family guess from the mime, then the generic File.
 const BY_EXT: Record<string, Icon> = {
@@ -107,6 +109,7 @@ export function isPreviewable(name?: string | null, mime?: string | null): boole
   ) {
     return true;
   }
+  if (isTextLikeFile(name, mime)) return true;
   const ext = (name || "").toLowerCase().split(".").pop() || "";
   return PREVIEWABLE_EXT.has(ext);
 }

@@ -282,3 +282,13 @@ and save it unchanged — independent of the preview proxy. This is pre-existing
 app-wide download behavior (identical for every attachment type) and is **out of
 scope for #116** — see the scope note at the top of this doc.
 ```
+
+
+## Preview deployment fallback
+
+Vercel preview/local dev may run without Upstash Redis. In those non-production
+environments only, the route allows a deliberately unsafe consume-store fallback
+so branch previews can render HTML. Production still requires
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` and fails closed when
+they are missing. The fallback is not replay-proof and must not be used as the
+production security model.

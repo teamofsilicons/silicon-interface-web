@@ -181,9 +181,24 @@ function upstashConfig(): { url: string; token: string } | null {
   return { url: url.replace(/\/$/, ""), token };
 }
 
-/** True only when BOTH Upstash env vars are present. */
+/**
+ * True when the single-use store can be used. Production requires Upstash.
+ *
+ * Vercel preview/local dev get a deliberately unsafe fallback so PR previews can
+ * render without provisioning Redis for every branch. That fallback is read-only,
+ * short-lived-ticket scoped, and never enabled for production, but it is NOT
+ * replay-proof. Production keeps the original fail-closed behavior.
+ */
+export function unsafePreviewStoreFallbackAllowed(): boolean {
+  return (
+    process.env.HTML_PREVIEW_ALLOW_UNSAFE_PREVIEW_STORE === "1" ||
+    process.env.VERCEL_ENV === "preview" ||
+    process.env.NODE_ENV !== "production"
+  );
+}
+
 export function storeConfigured(): boolean {
-  return upstashConfig() !== null;
+  return upstashConfig() !== null || unsafePreviewStoreFallbackAllowed();
 }
 
 /** Namespaced marker key for a ticket's single-use id. */
@@ -224,6 +239,11 @@ async function upstashCommand(args: (string | number)[]): Promise<{ result: unkn
  * (already exists) or on ANY store error (fail closed).
  */
 export async function kvSetNx(key: string, ttl: number): Promise<boolean> {
+  if (!upstashConfig() && unsafePreviewStoreFallbackAllowed()) {
+    void key;
+    void ttl;
+    return true;
+  }
   const r = await upstashCommand(["SET", key, "1", "NX", "EX", ttl]);
   return !!r && r.result === "OK";
 }
@@ -234,6 +254,10 @@ export async function kvSetNx(key: string, ttl: number): Promise<boolean> {
  * on the single valid use, or `null` on replay/expiry/store error (fail closed).
  */
 export async function kvGetDel(key: string): Promise<string | null> {
+  if (!upstashConfig() && unsafePreviewStoreFallbackAllowed()) {
+    void key;
+    return "preview-store-fallback";
+  }
   const r = await upstashCommand(["GETDEL", key]);
   if (!r) return null;
   const v = r.result;

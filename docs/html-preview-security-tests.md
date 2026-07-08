@@ -290,6 +290,12 @@ Production requires the full env set — `HTML_PREVIEW_TICKET_SECRET`,
 `UPSTASH_REDIS_REST_TOKEN`. With any of them missing, production **fails closed**
 (mint → 400/503, consume → 403/503), exactly as before.
 
+> **Off-Vercel deployments must set `NODE_ENV=production`.** The gate treats a
+> set `VERCEL_ENV` as authoritative, but with no `VERCEL_ENV` and a
+> non-production `NODE_ENV` the deploy is intentionally treated as dev and gets
+> the preview fallbacks. On Vercel this is automatic; elsewhere set
+> `NODE_ENV=production` for real production.
+
 To let a **Vercel Preview** deployment (or local dev) render HTML previews
 without provisioning Upstash/secret/allow-list, a fallback path activates **only**
 when `isPreviewEnv()` is true. The Vercel marker WINS: if `VERCEL_ENV` is set it

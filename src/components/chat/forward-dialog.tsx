@@ -24,21 +24,39 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   /** The source message. Server-side forwarding resolves bundled attachments. */
   event: Event | null;
+  /**
+   * Multi-select source messages. When provided (and non-empty) this takes
+   * precedence over `event`; otherwise the single-`event` path is used. Each
+   * message is forwarded to each target room server-side.
+   */
+  events?: Event[];
   /** Rooms the user can forward into (excludes the source). */
   rooms: Room[];
   /** The current room id, excluded from the picker. */
   sourceRoomId: string;
+  /** Called after a FULL-success forward so the caller can exit select-mode. */
+  onComplete?: () => void;
 }
 
 /**
  * Forward picker. Users multi-select rooms to forward into; the same source
- * event is forwarded server-side so bundled attachments stay with the visible
- * message and the client never sends raw attachment URLs.
+ * event(s) are forwarded server-side so bundled attachments stay with the
+ * visible message and the client never sends raw attachment URLs.
  */
-export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }: Props) {
+export function ForwardDialog({ open, onOpenChange, event, events, rooms, sourceRoomId, onComplete }: Props) {
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [sending, setSending] = React.useState(false);
+
+  // Working set of source messages: prefer the multi-select list, fall back to
+  // the single `event`. ULID `event_id`s sort lexicographically in send order,
+  // so a plain sort lands them chronologically in every target room.
+  const items = React.useMemo(() => {
+    const list = events?.length ? events : event ? [event] : [];
+    return [...list].sort((a, b) =>
+      a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0,
+    );
+  }, [events, event]);
 
   React.useEffect(() => {
     if (!open) {
@@ -72,37 +90,63 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
   };
 
   const submit = async () => {
-    if (!event || selected.size === 0) return;
+    if (items.length === 0 || selected.size === 0) return;
     setSending(true);
     try {
       // QA §7.7: the old code `.catch`'d each send and used Promise.all, so the
       // aggregate always resolved and "forwarded to N chats" fired even when
-      // every send failed (the user saw N error toasts AND a success toast).
-      // Use allSettled and report the real success/failure split.
+      // every send failed. Use per-call try/catch and report the real split.
+      //
+      // Ordering: within a single target room the messages must land in send
+      // order, so we forward them SEQUENTIALLY (await each before the next).
+      // Different rooms are independent, so those runs go in PARALLEL.
       const targets = Array.from(selected);
-      const results = await Promise.allSettled(
-        targets.map((rid) => api.forwardEvent(rid, sourceRoomId, event.event_id)),
+      const perRoom = await Promise.all(
+        targets.map(async (rid) => {
+          const outcomes: PromiseSettledResult<unknown>[] = [];
+          for (const ev of items) {
+            try {
+              const r = await api.forwardEvent(rid, sourceRoomId, ev.event_id);
+              outcomes.push({ status: "fulfilled", value: r });
+            } catch (e) {
+              outcomes.push({ status: "rejected", reason: e });
+            }
+          }
+          return outcomes;
+        }),
       );
+      // One result per (message × room) forward call.
+      const results = perRoom.flat();
       const failures = results.filter((r) => r.status === "rejected");
       const ok = results.length - failures.length;
+      const msgN = items.length;
+      const roomN = targets.length;
 
-      if (ok > 0) {
-        toast.success(`forwarded to ${ok} ${ok === 1 ? "chat" : "chats"}`);
-      }
-      if (failures.length > 0) {
+      if (failures.length === 0) {
+        // Full success. Preserve the terse single-message wording; report both
+        // counts once more than one message is forwarded.
+        toast.success(
+          msgN === 1
+            ? `forwarded to ${roomN} ${roomN === 1 ? "chat" : "chats"}`
+            : `forwarded ${msgN} messages to ${roomN} ${roomN === 1 ? "chat" : "chats"}`,
+        );
+        // Only dismiss + exit select-mode when everything went through.
+        onOpenChange(false);
+        onComplete?.();
+      } else {
+        if (ok > 0) {
+          toast.success(`forwarded ${ok} of ${results.length}`);
+        }
         // Surface the first real error message; the rest are almost always the
         // same transient cause, and N stacked toasts is noise.
         const first = failures[0] as PromiseRejectedResult;
         const reason = first.reason;
         const detail = reason instanceof ApiError ? reason.message : "forward failed";
         toast.error(
-          `couldn't forward to ${failures.length} ${failures.length === 1 ? "chat" : "chats"} - ${detail}`,
+          `couldn't forward ${failures.length} ${failures.length === 1 ? "message" : "messages"} - ${detail}`,
         );
+        // On partial/total failure keep the picker open so the user can retry.
       }
-
-      // Only dismiss when everything went through; on partial/total failure
-      // keep the picker open so the user can retry the rest.
-      if (failures.length === 0) onOpenChange(false);
     } finally {
       setSending(false);
     }

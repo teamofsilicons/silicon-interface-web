@@ -300,6 +300,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   React.useEffect(() => {
     lookupRunRef.current += 1;
     lookupTargetRef.current = null;
+    setLoadingOlder(false);
+    setPendingJumpEventId(null);
+    setReplyJumpState({});
   }, [room.room_id]);
   // Clear expired activity entries on a 2s interval.
   React.useEffect(() => {

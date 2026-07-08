@@ -66,7 +66,6 @@ const SELECTABLE_FORWARD_TYPES = new Set<EventType>([
   "m.file",
   "m.voice",
   "m.tts",
-  "m.remote_browser",
 ]);
 
 /** Deterministic tilt in [-3, 3] degrees, hashed from a stable key so each
@@ -339,16 +338,13 @@ export function MessageBubble({
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
   // controlled state for that dropdown.
   const [moreOpen, setMoreOpen] = React.useState(false);
-  const hasActions = !redacted && !!(onReply || onReact || onForward || onDelete || onSelect);
-  // Multi-select eligibility mirrors the forward/reply gate: a real, settled,
-  // non-deleted bubble. Streaming/optimistic (`is_final === false`) and deleted
-  // messages are never selectable. (m.system / m.session_marker already early-
-  // return above, so they never reach here and can't be selected.)
-  const selectable =
-    !!onToggleSelect &&
-    SELECTABLE_FORWARD_TYPES.has(event.type) &&
-    event.is_final !== false &&
-    !redacted;
+  const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
+  const hasActions = !redacted && !!(onReply || onReact || (onForward && canForward) || onDelete || (onSelect && canForward));
+  // Multi-select eligibility mirrors the forward gate: a real, settled,
+  // non-deleted bubble whose type the backend forward endpoint supports.
+  // Streaming/optimistic (`is_final === false`) and deleted messages are never
+  // selectable. (m.system / m.session_marker already early-return above.)
+  const selectable = !!onToggleSelect && canForward;
   const inSelect = selectMode && selectable;
 
   return (
@@ -611,6 +607,7 @@ function BubbleActions({
     Date.now() - new Date(event.created_at).getTime() < FIVE_MIN_MS;
   const canDelete = isMine && within5Min;
   const canTakeBack = isMine && isOwnSilicon;
+  const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false;
   const textBody = event.type === "m.text" ? String(event.content.body ?? "") : "";
   const handleCopy = async () => {
     // §7.1 — copyText handles insecure contexts (LAN/http) with an execCommand
@@ -726,13 +723,13 @@ function BubbleActions({
               reply
             </DropdownMenuItem>
           )}
-          {onForward && (
+          {onForward && canForward && (
             <DropdownMenuItem onClick={() => onForward(event)}>
               <Share className="mr-2 h-3.5 w-3.5" />
               forward
             </DropdownMenuItem>
           )}
-          {onSelect && (
+          {onSelect && canForward && (
             <DropdownMenuItem onClick={() => onSelect(event)}>
               <ListChecks className="mr-2 h-3.5 w-3.5" />
               select

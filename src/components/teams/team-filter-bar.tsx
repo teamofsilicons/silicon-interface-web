@@ -102,10 +102,18 @@ export function TeamSlider({
   const settingsTarget =
     teams.length === 1 ? teams[0] : selectedTeams.length === 1 ? selectedTeams[0] : null;
 
+  // #108 — float teams with unread to the front, preserving original relative
+  // order within the unread and read groups (stable). Sorting on a boolean +
+  // original index keeps the band still unless the unread SET actually changes.
+  const orderedTeams = teams
+    .map((t, i) => ({ t, i, u: (unread?.teams[t.slug] ?? 0) > 0 }))
+    .sort((a, b) => (a.u === b.u ? a.i - b.i : a.u ? -1 : 1))
+    .map((x) => x.t);
+
   return (
     <div className="flex items-stretch border-b">
       <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-2 pl-6 pr-3">
-        {teams.map((team) => {
+        {orderedTeams.map((team) => {
           const active = filters.teams.includes(team.slug);
           return (
             <button

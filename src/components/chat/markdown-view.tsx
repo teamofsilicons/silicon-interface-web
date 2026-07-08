@@ -4,6 +4,47 @@ import remarkGfm from "remark-gfm";
 
 import { cn } from "@/lib/utils";
 
+// Minimal mdast node shape we touch — enough to walk children and split text.
+interface MdastNode {
+  type: string;
+  value?: string;
+  children?: MdastNode[];
+}
+
+// Rewrite every soft line break (a lone "\n" inside a `text` node) into a hard
+// `break` node, so a chat message written as
+//     hello
+//     world
+// renders on two visible lines instead of collapsing to "hello world" — the
+// same soft-break behavior WhatsApp/Signal/etc. use, and what the plain-text
+// renderer (lib/markdown.ts) already does. This is the `remark-breaks` behavior
+// implemented locally (no dependency): it only ever touches `text` nodes, so
+// fenced code and inline code (`code`/`inlineCode` nodes — no `text` children),
+// list/table structure, and blank-line paragraph splits are all left intact.
+function splitSoftBreaks(node: MdastNode): void {
+  if (!node.children) return;
+  const next: MdastNode[] = [];
+  for (const child of node.children) {
+    if (child.type === "text" && typeof child.value === "string" && child.value.includes("\n")) {
+      const parts = child.value.split("\n");
+      parts.forEach((part, i) => {
+        if (part) next.push({ type: "text", value: part });
+        if (i < parts.length - 1) next.push({ type: "break" });
+      });
+    } else {
+      splitSoftBreaks(child);
+      next.push(child);
+    }
+  }
+  node.children = next;
+}
+
+function remarkSoftBreaks() {
+  return (tree: unknown) => {
+    splitSoftBreaks(tree as MdastNode);
+  };
+}
+
 /**
  * Markdown renderer (GFM: tables, task lists, strikethrough, autolinks). We
  * don't use @tailwindcss/typography, so every element is styled by hand below.
@@ -26,7 +67,7 @@ export function MarkdownView({
   return (
     <div className={cn("text-sm leading-relaxed text-foreground", className)}>
       <Markdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkSoftBreaks]}
         components={{
           h1: ({ children }) => (
             <h1
@@ -101,8 +142,10 @@ export function MarkdownView({
               {children}
             </ul>
           ),
-          ol: ({ children }) => (
+          ol: ({ children, start, type }) => (
             <ol
+              start={start}
+              type={type}
               className={cn(
                 "list-decimal pl-5 first:mt-0 last:mb-0",
                 c ? "my-1.5 space-y-0.5" : "my-3 space-y-1 pl-6",

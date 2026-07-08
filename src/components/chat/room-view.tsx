@@ -281,6 +281,14 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   const [searchLoading, setSearchLoading] = React.useState(false);
   const [searchHasMore, setSearchHasMore] = React.useState(false);
   const searchBlockRef = React.useRef(0);
+  const messageNodeRefs = React.useRef(new Map<string, HTMLDivElement>());
+  const [highlightedEventId, setHighlightedEventId] = React.useState<string | null>(null);
+  const highlightTimerRef = React.useRef<number | null>(null);
+  const [pendingJumpEventId, setPendingJumpEventId] = React.useState<string | null>(null);
+  const lookupTargetRef = React.useRef<string | null>(null);
+  const [replyJumpState, setReplyJumpState] = React.useState<
+    Record<string, { status: "loading" | "error"; message?: string }>
+  >({});
   const [cronOpen, setCronOpen] = React.useState(false);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
@@ -1094,6 +1102,162 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     return m;
   }, [events]);
 
+  const renderedEventIdFor = React.useCallback(
+    (eventId: string): string => {
+      const ev = eventById.get(eventId);
+      const bid = ev && (ev.type === "m.image" || ev.type === "m.file")
+        ? (ev.content as { bundle_id?: unknown }).bundle_id
+        : null;
+      if (typeof bid === "string" && bid) {
+        const anchor = events.find(
+          (e) =>
+            e.type === "m.text" &&
+            !e.redacted_at &&
+            (e.content as { bundle_id?: unknown }).bundle_id === bid,
+        );
+        if (anchor) return anchor.event_id;
+      }
+      return eventId;
+    },
+    [eventById, events],
+  );
+
+  const scrollToRenderedEvent = React.useCallback(
+    (eventId: string): boolean => {
+      const renderedId = renderedEventIdFor(eventId);
+      const node = messageNodeRefs.current.get(renderedId);
+      if (!node) return false;
+      node.scrollIntoView({ block: "center", behavior: "smooth" });
+      node.focus({ preventScroll: true });
+      setHighlightedEventId(renderedId);
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = window.setTimeout(() => {
+        setHighlightedEventId((cur) => (cur === renderedId ? null : cur));
+      }, 2300);
+      window.setTimeout(() => {
+        messageNodeRefs.current.get(renderedId)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      }, 160);
+      return true;
+    },
+    [renderedEventIdFor],
+  );
+
+  React.useEffect(() => {
+    if (!pendingJumpEventId) return;
+    const id = window.requestAnimationFrame(() => {
+      if (scrollToRenderedEvent(pendingJumpEventId)) {
+        setPendingJumpEventId(null);
+      }
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [pendingJumpEventId, scrollToRenderedEvent]);
+
+  React.useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
+
+  const queueJumpToEvent = React.useCallback(
+    (eventId: string) => {
+      if (search !== null) {
+        setSearch(null);
+        setSearchResults(null);
+        setSearchHasMore(false);
+        setSearchLoading(false);
+      }
+      setPendingJumpEventId(eventId);
+    },
+    [search],
+  );
+
+  const jumpToReplyTarget = React.useCallback(
+    async (eventId: string) => {
+      const loaded = eventById.get(eventId);
+      if (loaded) {
+        if (loaded.redacted_at) {
+          setReplyJumpState((prev) => ({
+            ...prev,
+            [eventId]: { status: "error", message: "Original message is no longer available." },
+          }));
+          return;
+        }
+        setReplyJumpState((prev) => {
+          const next = { ...prev };
+          delete next[eventId];
+          return next;
+        });
+        queueJumpToEvent(eventId);
+        return;
+      }
+
+      if (lookupTargetRef.current) return;
+      lookupTargetRef.current = eventId;
+      setReplyJumpState((prev) => ({ ...prev, [eventId]: { status: "loading" } }));
+      setLoadingOlder(true);
+      try {
+        let cursor = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+        let found: Event | null = null;
+        for (let page = 0; page < 10 && cursor; page += 1) {
+          const older = await api.events(room.room_id, cursor, PAGE_SIZE);
+          if (older.length === 0) {
+            setHasMore(false);
+            break;
+          }
+          setEvents((prev) => {
+            const known = new Set(prev.map((e) => e.event_id));
+            const fresh: LocalEvent[] = older
+              .filter((e) => !known.has(e.event_id))
+              .map((e) => ({
+                ...e,
+                is_final: true,
+                _status: e.sender_handle === myUsername ? ("delivered" as MessageStatus) : undefined,
+              }));
+            return [...fresh, ...prev];
+          });
+          found = older.find((e) => e.event_id === eventId) ?? null;
+          if (found) break;
+          if (older.length < PAGE_SIZE) {
+            setHasMore(false);
+            break;
+          }
+          cursor = older.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+        }
+
+        if (found?.redacted_at) {
+          setReplyJumpState((prev) => ({
+            ...prev,
+            [eventId]: { status: "error", message: "Original message is no longer available." },
+          }));
+          return;
+        }
+        if (found) {
+          setReplyJumpState((prev) => {
+            const next = { ...prev };
+            delete next[eventId];
+            return next;
+          });
+          queueJumpToEvent(eventId);
+        } else {
+          setReplyJumpState((prev) => ({
+            ...prev,
+            [eventId]: { status: "error", message: "Couldn’t find the original message." },
+          }));
+        }
+      } catch (e) {
+        const message =
+          e instanceof ApiError && (e.status === 401 || e.status === 403)
+            ? "You don’t have access to that message."
+            : "Couldn’t find the original message.";
+        setReplyJumpState((prev) => ({ ...prev, [eventId]: { status: "error", message } }));
+      } finally {
+        lookupTargetRef.current = null;
+        setLoadingOlder(false);
+      }
+    },
+    [eventById, events, myUsername, queueJumpToEvent, room.room_id],
+  );
+
   // ----- Optimistic send plumbing -----
   const onOptimisticAdd = React.useCallback(
     (clientId: string, payload: OptimisticPayload) => {
@@ -1752,39 +1916,55 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               !!a &&
               a.sender_handle === e.sender_handle &&
               a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
+            const renderedId = e.event_id;
             return (
-              <MessageBubble
+              <div
                 key={e._clientId ?? e.event_id}
-                event={e}
-                isMine={isMyEvent(e, myUsername)}
-                myHandle={myUsername}
-                replyToEvent={e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined}
-                isDirect={room.kind === "direct"}
-                status={e._status}
-                senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
-                senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
-                senderAvatarKind={e.sender_kind}
-                senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
-                onSenderClick={openSenderProfile}
-                onTakeBack={readOnly ? undefined : onTakeBack}
-                showSender={!sameAs(prev)}
-                showTime={!sameAs(next)}
-                reactions={reactionsByTarget.get(e.event_id) ?? undefined}
-                onReply={readOnly ? undefined : onReply}
-                onReact={readOnly ? undefined : onReact}
-                onForward={readOnly ? undefined : onForward}
-                onSelect={readOnly ? undefined : onSelect}
-                selectMode={selectMode}
-                selected={selectedEventIds.has(e.event_id)}
-                onToggleSelect={readOnly ? undefined : toggleSelect}
-                onRetry={readOnly ? undefined : retrySend}
-                onDelete={
-                  readOnly || (room.kind === "direct" && peer?.kind === "silicon")
-                    ? undefined
-                    : onSelfDelete
-                }
-                pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
-              />
+                ref={(node) => {
+                  if (node) messageNodeRefs.current.set(renderedId, node);
+                  else messageNodeRefs.current.delete(renderedId);
+                }}
+                data-event-id={renderedId}
+                tabIndex={-1}
+                className={cn(
+                  "scroll-mt-24 rounded-sm transition-[background-color,box-shadow] duration-300 focus:outline-none",
+                  highlightedEventId === renderedId && "bg-primary/5 ring-2 ring-primary/40",
+                )}
+              >
+                <MessageBubble
+                  event={e}
+                  isMine={isMyEvent(e, myUsername)}
+                  myHandle={myUsername}
+                  replyToEvent={e.reply_to_event_id ? eventById.get(e.reply_to_event_id) : undefined}
+                  onJumpToEvent={jumpToReplyTarget}
+                  replyJumpState={e.reply_to_event_id ? replyJumpState[e.reply_to_event_id] : undefined}
+                  isDirect={room.kind === "direct"}
+                  status={e._status}
+                  senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
+                  senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
+                  senderAvatarKind={e.sender_kind}
+                  senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
+                  onSenderClick={openSenderProfile}
+                  onTakeBack={readOnly ? undefined : onTakeBack}
+                  showSender={!sameAs(prev)}
+                  showTime={!sameAs(next)}
+                  reactions={reactionsByTarget.get(e.event_id) ?? undefined}
+                  onReply={readOnly ? undefined : onReply}
+                  onReact={readOnly ? undefined : onReact}
+                  onForward={readOnly ? undefined : onForward}
+                  onSelect={readOnly ? undefined : onSelect}
+                  selectMode={selectMode}
+                  selected={selectedEventIds.has(e.event_id)}
+                  onToggleSelect={readOnly ? undefined : toggleSelect}
+                  onRetry={readOnly ? undefined : retrySend}
+                  onDelete={
+                    readOnly || (room.kind === "direct" && peer?.kind === "silicon")
+                      ? undefined
+                      : onSelfDelete
+                  }
+                  pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
+                />
+              </div>
             );
           })}
         </div>

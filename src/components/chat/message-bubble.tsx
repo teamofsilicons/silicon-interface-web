@@ -189,6 +189,10 @@ interface Props {
   myHandle?: string | null;
   /** The message this one is replying to, if any — rendered as a quote. */
   replyToEvent?: Event;
+  /** Jump to the replied-to event, loading older history if needed. */
+  onJumpToEvent?: (eventId: string) => void;
+  /** Per-reply lookup state surfaced inline in the preview. */
+  replyJumpState?: { status: "loading" | "error"; message?: string };
   isOwnSilicon?: boolean;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   /** Send-receipt for messages this Carbon authored. Ignored for received messages. */
@@ -244,6 +248,8 @@ export function MessageBubble({
   isMine,
   myHandle,
   replyToEvent,
+  onJumpToEvent,
+  replyJumpState,
   isOwnSilicon,
   onTakeBack,
   status,
@@ -486,14 +492,15 @@ export function MessageBubble({
                   : "bg-bubble-received"),
           )}
         >
-          {/* Quoted parent so a reply visibly references its target. */}
-          {replyToEvent && !redacted && (
-            <div className="mb-1 border-l-2 border-current/40 pl-2 text-[11px] opacity-70">
-              <div className="font-medium">
-                {replyToEvent.sender_handle ? `@${replyToEvent.sender_handle}` : "message"}
-              </div>
-              <div className="truncate">{replyPreview(replyToEvent)}</div>
-            </div>
+          {/* Quoted parent: clickable backlink to the original message. */}
+          {event.reply_to_event_id && !redacted && (
+            <ReplyPreviewButton
+              replyToEvent={replyToEvent}
+              targetId={event.reply_to_event_id}
+              state={replyJumpState}
+              onJump={onJumpToEvent}
+              isMine={isMine}
+            />
           )}
           {redacted ? (
             <span className="italic">message deleted</span>
@@ -972,6 +979,69 @@ function VoiceTranscript({ text }: { text: string }) {
         </>
       )}
     </div>
+  );
+}
+
+function replyVoiceLabel(ev: Event): string {
+  const c = ev.content as Record<string, unknown>;
+  const duration = typeof c.duration_ms === "number" ? Math.round(c.duration_ms / 1000) : null;
+  if (!duration || duration < 1) return "Voice message";
+  const m = Math.floor(duration / 60);
+  const s = String(duration % 60).padStart(2, "0");
+  return `Voice message · ${m}:${s}`;
+}
+
+function ReplyPreviewButton({
+  replyToEvent,
+  targetId,
+  state,
+  onJump,
+  isMine,
+}: {
+  replyToEvent?: Event;
+  targetId: string;
+  state?: { status: "loading" | "error"; message?: string };
+  onJump?: (eventId: string) => void;
+  isMine: boolean;
+}) {
+  const sender = replyToEvent?.sender_handle ? `@${replyToEvent.sender_handle}` : "message";
+  const label = replyToEvent
+    ? replyToEvent.type === "m.voice"
+      ? replyVoiceLabel(replyToEvent)
+      : replyPreview(replyToEvent)
+    : "Replying to message";
+  const srLabel = replyToEvent?.sender_handle
+    ? `Jump to message from ${replyToEvent.sender_handle}`
+    : replyToEvent?.type === "m.voice"
+      ? "Jump to replied voice message"
+      : "Jump to replied message";
+  const disabled = state?.status === "loading" || !onJump;
+  return (
+    <button
+      type="button"
+      aria-label={srLabel}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        onJump?.(targetId);
+      }}
+      className={cn(
+        "mb-1 block min-h-11 w-full border-l-2 border-current/40 py-1.5 pl-2 pr-2 text-left text-[11px] opacity-80 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 active:bg-muted/70 disabled:cursor-wait disabled:opacity-80",
+        isMine ? "hover:bg-primary-foreground/10" : "hover:bg-muted/50",
+      )}
+    >
+      <div className="font-medium">{replyToEvent ? sender : "reply"}</div>
+      <div className="flex min-w-0 items-center gap-1 truncate">
+        {replyToEvent?.type === "m.voice" && <MusicNote className="h-3 w-3 shrink-0" />}
+        <span className="truncate">
+          {state?.status === "loading"
+            ? "Finding original message..."
+            : state?.status === "error"
+              ? state.message || "Couldn’t find the original message."
+              : label}
+        </span>
+      </div>
+    </button>
   );
 }
 

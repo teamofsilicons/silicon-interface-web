@@ -1010,17 +1010,22 @@ function ReplyPreviewButton({
       ? replyVoiceLabel(replyToEvent)
       : replyPreview(replyToEvent)
     : "Replying to message";
-  const srLabel = replyToEvent?.sender_handle
-    ? `Jump to message from ${replyToEvent.sender_handle}`
-    : replyToEvent?.type === "m.voice"
-      ? "Jump to replied voice message"
-      : "Jump to replied message";
+  const srLabel =
+    state?.status === "continue"
+      ? replyToEvent?.type === "m.voice"
+        ? "Continue looking for replied voice message"
+        : "Continue looking for replied message"
+      : replyToEvent?.sender_handle
+        ? `Jump to message from ${replyToEvent.sender_handle}`
+        : replyToEvent?.type === "m.voice"
+          ? "Jump to replied voice message"
+          : "Jump to replied message";
   const disabled = state?.status === "loading" || !onJump;
   const previewText =
     state?.status === "loading"
       ? "Finding original message..."
       : state?.status === "continue"
-        ? state.message || "Still looking in older history... Continue?"
+        ? state.message || "Still looking farther back. Click to continue."
         : state?.status === "error"
           ? state.message || "Couldn’t find the original message."
           : label;

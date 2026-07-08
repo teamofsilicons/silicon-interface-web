@@ -1267,7 +1267,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               ? {
                   status: "continue",
                   cursor,
-                  message: "Still looking in older history... Continue?",
+                  message: "Still looking farther back. Click to continue.",
                 }
               : { status: "error", message: "Couldn’t find the original message." },
           }));

@@ -2478,7 +2478,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             <Button variant="ghost" onClick={() => setPendingDelete(null)}>
               cancel
             </Button>
-            <Button variant="destructive" onClick={confirmDelete}>
+            <Button
+              onClick={confirmDelete}
+              className="bg-[#eb3b5a] text-white hover:bg-[#eb3b5a]/90"
+            >
               unsend
             </Button>
           </div>

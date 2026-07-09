@@ -788,7 +788,10 @@ function BubbleActions({
           )}
           {(canDelete || canTakeBack) && <DropdownMenuSeparator />}
           {canDelete && onDelete && (
-            <DropdownMenuItem onClick={() => onDelete(event)}>
+            <DropdownMenuItem
+              onClick={() => onDelete(event)}
+              className="text-[#eb3b5a] hover:bg-[#eb3b5a]/10 hover:text-[#eb3b5a] focus:bg-[#eb3b5a]/10 focus:text-[#eb3b5a]"
+            >
               <Trash className="mr-2 h-3.5 w-3.5" />
               unsend
             </DropdownMenuItem>

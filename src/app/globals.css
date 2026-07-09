@@ -115,9 +115,9 @@
   --ring:                 #1a1a1a;
 
   /* --- scrollbars --- */
-  --scrollbar-track:       transparent;
-  --scrollbar-thumb:       #bdb5aa;
-  --scrollbar-thumb-hover: #8f887d;
+  --scrollbar-track:       #e3ddd2;
+  --scrollbar-thumb:       #1a1a1a;
+  --scrollbar-thumb-hover: #1a1a1a;
   --scrollbar-thumb-active: #1a1a1a;
 
   /* --- terminal (inverted blocks: code, KPI emphasis) --- */
@@ -133,8 +133,8 @@
 }
 
 *::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
 }
 
 *::-webkit-scrollbar-track {
@@ -142,25 +142,32 @@
 }
 
 *::-webkit-scrollbar-thumb {
-  min-height: 40px;
-  border: 3px solid transparent;
-  border-radius: 999px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 0;
   background: var(--scrollbar-thumb);
-  background-clip: padding-box;
+  background-clip: border-box;
 }
 
-*::-webkit-scrollbar-thumb:hover {
+*::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:window-inactive {
   background: var(--scrollbar-thumb-hover);
-  background-clip: padding-box;
+  background-clip: border-box;
 }
 
 *::-webkit-scrollbar-thumb:active {
   background: var(--scrollbar-thumb-active);
-  background-clip: padding-box;
+  background-clip: border-box;
 }
 
 *::-webkit-scrollbar-corner {
-  background: transparent;
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 html,

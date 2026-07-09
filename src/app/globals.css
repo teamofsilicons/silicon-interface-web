@@ -115,10 +115,13 @@
   --ring:                 #1a1a1a;
 
   /* --- scrollbars --- */
-  --scrollbar-track:       #e3ddd2;
-  --scrollbar-thumb:       #1a1a1a;
-  --scrollbar-thumb-hover: #1a1a1a;
-  --scrollbar-thumb-active: #1a1a1a;
+  /* Warm taupes keep the control visible without introducing a near-black
+     stripe into the otherwise soft beige surfaces. Interaction states step
+     toward the existing warm charcoal used for muted copy. */
+  --scrollbar-track:        #e3ddd2;
+  --scrollbar-thumb:        #a59c90;
+  --scrollbar-thumb-hover:  #7f776d;
+  --scrollbar-thumb-active: #5d5953;
 
   /* --- terminal (inverted blocks: code, KPI emphasis) --- */
   --terminal-bg:          #1a1a1a;

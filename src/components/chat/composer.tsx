@@ -1277,6 +1277,7 @@ export function Composer({
     onOptimisticAdd(clientId, {
       type: "m.voice",
       content: { duration_ms: durationMs, mime, local_url: localUrl },
+      reply_to_event_id: replyTo?.event_id,
     });
     const peaksPromise = computePeaks(blob)
       .then((peaks) => {
@@ -1289,6 +1290,7 @@ export function Composer({
               local_url: localUrl,
               peaks: peaks.peaks,
             },
+            reply_to_event_id: replyTo?.event_id,
           });
         }
         return peaks;
@@ -1333,10 +1335,12 @@ export function Composer({
             mime,
             duration_ms: peaks?.duration_ms || durationMs,
           },
+          reply_to_event_id: replyTo?.event_id,
         },
         clientId, // §2.3
       );
       onAck(clientId, real);
+      onClearReply?.();
       // §6.4 — Succeeded: the recording is safely on the server, so drop the
       // retained blob.
       setPendingVoice(null);

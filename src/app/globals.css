@@ -114,6 +114,12 @@
   --input:                #d4cfc7;
   --ring:                 #1a1a1a;
 
+  /* --- scrollbars --- */
+  --scrollbar-track:       transparent;
+  --scrollbar-thumb:       #bdb5aa;
+  --scrollbar-thumb-hover: #8f887d;
+  --scrollbar-thumb-active: #1a1a1a;
+
   /* --- terminal (inverted blocks: code, KPI emphasis) --- */
   --terminal-bg:          #1a1a1a;
   --terminal-fg:          #ede8e0;
@@ -122,6 +128,39 @@
 
 * {
   border-color: var(--border);
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 40px;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: var(--scrollbar-thumb-active);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 html,

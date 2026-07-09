@@ -96,6 +96,8 @@ export function VoiceRecordingProvider({
   const recRef = React.useRef<MediaRecorder | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const chunksRef = React.useRef<Blob[]>([]);
+  const pendingAppendsRef = React.useRef<Set<Promise<void>>>(new Set());
+  const deletingDraftIdsRef = React.useRef<Set<string>>(new Set());
   const chunkSeqRef = React.useRef(0);
   const startedAtRef = React.useRef(0);
   const stoppingIntentRef = React.useRef<"draft" | "discard">("draft");
@@ -130,8 +132,37 @@ export function VoiceRecordingProvider({
     recRef.current = null;
   }, []);
 
+  const waitForPendingAppends = React.useCallback(async () => {
+    while (pendingAppendsRef.current.size > 0) {
+      await Promise.allSettled([...pendingAppendsRef.current]);
+    }
+  }, []);
+
+  const stopActiveRecorder = React.useCallback(
+    (intent: "draft" | "discard" = "draft") => {
+      stoppingIntentRef.current = intent;
+      try {
+        if (recRef.current?.state === "recording") {
+          recRef.current.requestData();
+          recRef.current.stop();
+        }
+      } catch {
+        stopTracks();
+      }
+    },
+    [stopTracks],
+  );
+
   React.useEffect(() => {
     if (!ownerKey) {
+      const cur = draftRef.current;
+      if (cur?.status === "recording") {
+        stopActiveRecorder("discard");
+        bcRef.current?.postMessage({ ownerKey: cur.ownerKey, active: false });
+        api.activity(cur.roomId, "recording", false).catch(() => undefined);
+      }
+      chunksRef.current = [];
+      pendingAppendsRef.current.clear();
       void clearAllVoiceDrafts().catch(() => undefined);
       queueMicrotask(() => setDraft(null));
       return;
@@ -140,12 +171,32 @@ export function VoiceRecordingProvider({
       await openVoiceDraftDb();
       await cleanupStaleVoiceDrafts(ownerKey);
       const drafts = await listVoiceMetas(ownerKey);
-      const recoverable = drafts
-        .filter((d) => d.status !== "sending")
-        .sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null;
-      if (recoverable) setDraft({ ...recoverable, status: recoverable.status === "recording" ? "draft" : recoverable.status });
+      const recoverable = drafts.sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null;
+      if (recoverable) {
+        const recovered =
+          recoverable.status === "sending"
+            ? {
+                ...recoverable,
+                status: "failed" as const,
+                error: "Send may not have completed. Your recording is still saved.",
+              }
+            : { ...recoverable, status: recoverable.status === "recording" ? ("draft" as const) : recoverable.status };
+        setDraft(recovered);
+        void putVoiceMeta(recovered);
+      }
     })().catch(() => undefined);
-  }, [ownerKey]);
+  }, [ownerKey, stopActiveRecorder]);
+
+  React.useEffect(() => {
+    return () => {
+      const cur = draftRef.current;
+      if (cur?.status === "recording") {
+        stopActiveRecorder("draft");
+        bcRef.current?.postMessage({ ownerKey: cur.ownerKey, active: false });
+        api.activity(cur.roomId, "recording", false).catch(() => undefined);
+      }
+    };
+  }, [stopActiveRecorder]);
 
   React.useEffect(() => {
     const bc = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("silicon-voice-recording") : null;
@@ -247,9 +298,10 @@ export function VoiceRecordingProvider({
         rec.ondataavailable = (e) => {
           if (!e.data || e.data.size === 0) return;
           const blob = e.data;
+          if (deletingDraftIdsRef.current.has(draftId)) return;
           chunksRef.current.push(blob);
           const seq = chunkSeqRef.current++;
-          void appendVoiceChunk(draftId, seq, blob)
+          const appendPromise = appendVoiceChunk(draftId, seq, blob)
             .then(() => {
               const cur = draftRef.current;
               if (!cur || cur.draftId !== draftId) return;
@@ -268,6 +320,8 @@ export function VoiceRecordingProvider({
                 /* ignore */
               }
             });
+          pendingAppendsRef.current.add(appendPromise);
+          void appendPromise.finally(() => pendingAppendsRef.current.delete(appendPromise));
         };
         rec.onstop = () => {
           stopTracks();
@@ -275,7 +329,10 @@ export function VoiceRecordingProvider({
           api.activity(roomId, "recording", false).catch(() => undefined);
           const cur = draftRef.current;
           if (!cur || stoppingIntentRef.current === "discard") return;
-          void persistMeta({ status: "draft", durationMs: Date.now() - startedAtRef.current });
+          void (async () => {
+            await waitForPendingAppends();
+            await persistMeta({ status: "draft", durationMs: Date.now() - startedAtRef.current });
+          })();
         };
         rec.start(1000);
       } catch (e) {
@@ -286,44 +343,41 @@ export function VoiceRecordingProvider({
         stopTracks();
       }
     },
-    [ownerKey, onReturnToRoom, persistMeta, remoteActive, roomName, stopTracks],
+    [ownerKey, onReturnToRoom, persistMeta, remoteActive, roomName, stopTracks, waitForPendingAppends],
   );
 
   const stop = React.useCallback(() => {
-    stoppingIntentRef.current = "draft";
     try {
-      recRef.current?.requestData();
-      recRef.current?.stop();
+      stopActiveRecorder("draft");
     } catch {
       void persistMeta({ status: "draft" });
       stopTracks();
     }
-  }, [persistMeta, stopTracks]);
+  }, [persistMeta, stopActiveRecorder, stopTracks]);
 
   const discard = React.useCallback(async () => {
     const cur = draftRef.current;
     if (!cur) return;
     if (!window.confirm("Discard this voice recording? This cannot be undone.")) return;
-    stoppingIntentRef.current = "discard";
-    try {
-      if (recRef.current?.state === "recording") recRef.current.stop();
-    } catch {
-      /* ignore */
-    }
+    deletingDraftIdsRef.current.add(cur.draftId);
+    stopActiveRecorder("discard");
     stopTracks();
     bcRef.current?.postMessage({ ownerKey, active: false });
     api.activity(cur.roomId, "recording", false).catch(() => undefined);
+    await waitForPendingAppends();
     await deleteVoiceDraft(cur.draftId).catch(() => undefined);
+    deletingDraftIdsRef.current.delete(cur.draftId);
     chunksRef.current = [];
     draftRef.current = null;
     setDraft(null);
-  }, [ownerKey, stopTracks]);
+  }, [ownerKey, stopActiveRecorder, stopTracks, waitForPendingAppends]);
 
   const blobForDraft = React.useCallback(async (cur: VoiceDraftMeta): Promise<Blob> => {
+    await waitForPendingAppends();
+    if (chunksRef.current.length > 0) return new Blob(chunksRef.current, { type: cur.mime || "audio/webm" });
     const chunks = await readVoiceChunks(cur.draftId).catch(() => []);
-    const source = chunks.length ? chunks : chunksRef.current;
-    return new Blob(source, { type: cur.mime || "audio/webm" });
-  }, []);
+    return new Blob(chunks, { type: cur.mime || "audio/webm" });
+  }, [waitForPendingAppends]);
 
   const send = React.useCallback(async () => {
     const cur = draftRef.current;
@@ -352,7 +406,10 @@ export function VoiceRecordingProvider({
         reply_to_event_id: cur.replyToEventId,
       });
       track.messageSent({ room_id: cur.roomId, message_type: "m.voice", has_attachment: true, is_reply: Boolean(cur.replyToEventId) });
+      deletingDraftIdsRef.current.add(cur.draftId);
+      await waitForPendingAppends();
       await deleteVoiceDraft(cur.draftId);
+      deletingDraftIdsRef.current.delete(cur.draftId);
       chunksRef.current = [];
       draftRef.current = null;
       setDraft(null);
@@ -364,7 +421,7 @@ export function VoiceRecordingProvider({
       await persistMeta({ status: "failed", error: message });
       toast.error(message);
     }
-  }, [blobForDraft, persistMeta]);
+  }, [blobForDraft, persistMeta, waitForPendingAppends]);
 
   const download = React.useCallback(async () => {
     const cur = draftRef.current;

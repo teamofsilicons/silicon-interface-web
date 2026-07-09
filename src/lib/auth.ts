@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { identifyCarbon, resetAnalytics } from "./analytics";
 import type { AuthSession, Carbon } from "./types";
+import { clearAllVoiceDrafts, deleteVoiceDraftsForOwner } from "./voice-drafts";
 
 const ACCESS_KEY = "silicon-interface:access";
 const REFRESH_KEY = "silicon-interface:refresh";
@@ -101,6 +102,12 @@ export const authStore = {
     emit();
   },
   clear() {
+    const carbon = authStore.getCarbon();
+    if (carbon?.carbon_id) {
+      void deleteVoiceDraftsForOwner(`carbon:${carbon.carbon_id}`).catch(() => undefined);
+    } else {
+      void clearAllVoiceDrafts().catch(() => undefined);
+    }
     safeSet(ACCESS_KEY, null);
     safeSet(REFRESH_KEY, null);
     safeSet(CARBON_KEY, null);

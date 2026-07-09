@@ -64,6 +64,7 @@ export interface Silicon {
   owner_team_id: number;
   capabilities: Record<string, unknown>;
   is_active: boolean;
+  connection_state?: "online" | "connecting" | "offline" | string;
   created_at: string;
 }
 
@@ -77,6 +78,7 @@ export interface SiliconPublic {
   /** Owner team — lets the profile offer "invite people to this silicon". */
   owner_team_slug?: string;
   owner_team_name?: string;
+  connection_state?: "online" | "connecting" | "offline" | string;
 }
 
 export interface RoomPeer {
@@ -89,6 +91,7 @@ export interface RoomPeer {
   profile_photo_url: string | null;
   /** Delights §0a — colored ASCII treatment of the photo; preferred for avatars. */
   profile_ascii_url?: string | null;
+  connection_state?: "online" | "connecting" | "offline" | string;
 }
 
 /** A cron a silicon scheduled. Carbons see these read-only. */

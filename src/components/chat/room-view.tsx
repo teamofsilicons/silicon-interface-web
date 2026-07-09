@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Clock, Eye, MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
+import { Clock, Eye, MagnifyingGlass, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -196,6 +196,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // header title (saved name vs @id), avatar, and the Save Contact button.
   const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
   const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
+  const [siliconConnectionState, setSiliconConnectionState] = React.useState(
+    peer?.kind === "silicon" ? peer.connection_state || "online" : "online",
+  );
+  React.useEffect(() => {
+    setSiliconConnectionState(
+      peer?.kind === "silicon" ? peer.connection_state || "online" : "online",
+    );
+  }, [peer?.id, peer?.kind, peer?.connection_state, room.room_id]);
+  const siliconUnavailable = peer?.kind === "silicon" && siliconConnectionState !== "online";
   const [saveOpen, setSaveOpen] = React.useState(false);
   const headerTitle = peer
     ? contact?.name || null // null → render the styled @id below
@@ -209,6 +218,29 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   // no read-receipts (I'm not a member, so the read POST would 403 anyway).
   const readOnly = !!room.observed;
   const showsProgressForReplies = !readOnly && room.peers.some((p) => p.kind === "silicon");
+
+  React.useEffect(() => {
+    if (!siliconUnavailable || peer?.kind !== "silicon") return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const next = await api.roomDetail(room.room_id);
+        const nextPeer =
+          next.kind === "direct" ? next.peers.find((item) => item.kind === "silicon") : null;
+        if (alive && nextPeer) {
+          setSiliconConnectionState(nextPeer.connection_state || "online");
+        }
+      } catch {
+        /* keep the offline flag and retry on the next tick */
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [peer?.kind, room.room_id, siliconUnavailable]);
 
   const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -2433,28 +2465,41 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           read-only - you can&rsquo;t send messages here.
         </div>
       ) : (
-        <Composer
-          roomId={room.room_id}
-          onOptimisticAdd={onOptimisticAdd}
-          onAck={onAck}
-          onFail={onFail}
-          onOptimisticUpdate={onOptimisticUpdate}
-          droppedFile={droppedFile}
-          onDroppedFileConsumed={() => setDroppedFile(null)}
-          replyTo={replyTo}
-          onClearReply={() => setReplyTo(null)}
-          delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
-          onHoldStateChange={setHoldingMessage}
-          cancelQueuedRef={cancelQueuedRef}
-          mentionCandidates={mentionCandidates}
-          editingEvent={editingEvent}
-          onEditComplete={() => setEditingEvent(null)}
-          onPersistedEdit={persistEdit}
-          onRequestEditLast={requestEditLast}
-          restoreDraft={restoreDraft}
-          onRestoreDraftConsumed={() => setRestoreDraft(null)}
-          onCancelHeldLast={cancelLatestHeld}
-        />
+        <>
+          {siliconUnavailable && (
+            <div className="flex items-center justify-center gap-2 border-t border-input bg-muted/40 px-6 py-3 text-xs text-muted-foreground">
+              <WarningCircle className="h-3.5 w-3.5 text-destructive" />
+              <span>
+                This silicon is not available right now. Don&rsquo;t worry, the message you write
+                here will be saved in draft.
+              </span>
+            </div>
+          )}
+          <Composer
+            roomId={room.room_id}
+            onOptimisticAdd={onOptimisticAdd}
+            onAck={onAck}
+            onFail={onFail}
+            onOptimisticUpdate={onOptimisticUpdate}
+            droppedFile={droppedFile}
+            onDroppedFileConsumed={() => setDroppedFile(null)}
+            replyTo={replyTo}
+            onClearReply={() => setReplyTo(null)}
+            delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
+            onHoldStateChange={setHoldingMessage}
+            cancelQueuedRef={cancelQueuedRef}
+            mentionCandidates={mentionCandidates}
+            editingEvent={editingEvent}
+            onEditComplete={() => setEditingEvent(null)}
+            onPersistedEdit={persistEdit}
+            onRequestEditLast={requestEditLast}
+            restoreDraft={restoreDraft}
+            onRestoreDraftConsumed={() => setRestoreDraft(null)}
+            onCancelHeldLast={cancelLatestHeld}
+            sendDisabled={siliconUnavailable}
+            sendDisabledReason="This silicon is not available right now."
+          />
+        </>
       )}
 
       {/* Visual hint while a file is hovering over the chat surface. */}

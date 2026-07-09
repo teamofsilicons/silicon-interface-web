@@ -137,6 +137,9 @@ interface Props {
   onRestoreDraftConsumed?: () => void;
   /** Keyboard path for cancelling the latest held message. */
   onCancelHeldLast?: () => void;
+  /** Keep draft editing available while blocking new sends. */
+  sendDisabled?: boolean;
+  sendDisabledReason?: string;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -625,6 +628,8 @@ export function Composer({
   restoreDraft,
   onRestoreDraftConsumed,
   onCancelHeldLast,
+  sendDisabled = false,
+  sendDisabledReason = "sending is disabled",
 }: Props) {
   const [text, setText] = React.useState("");
   // Multiple attachments can be staged at once; each uploads in the background
@@ -1546,6 +1551,10 @@ export function Composer({
   };
 
   const send = async () => {
+    if (sendDisabled) {
+      toast.message(sendDisabledReason);
+      return;
+    }
     if (editingEvent) {
       await confirmEdit();
       return;
@@ -2146,6 +2155,10 @@ export function Composer({
                 // browsers still report during composition.
                 if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 e.preventDefault();
+                if (sendDisabled) {
+                  toast.message(sendDisabledReason);
+                  return;
+                }
                 send();
               }
             }}
@@ -2158,7 +2171,7 @@ export function Composer({
               setRecording(true);
               api.activity(roomId, "recording", true).catch(() => undefined);
             }}
-            disabled={busy}
+            disabled={busy || sendDisabled}
             title="record voice message"
             aria-label="record voice message"
             className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
@@ -2169,7 +2182,13 @@ export function Composer({
           <button
             type="button"
             onClick={send}
-            disabled={busy || editSaving || anyUploading || (isEditing && editingEvent?.type === "m.text" && !text.trim())}
+            disabled={
+              sendDisabled ||
+              busy ||
+              editSaving ||
+              anyUploading ||
+              (isEditing && editingEvent?.type === "m.text" && !text.trim())
+            }
             aria-label={isEditing ? "save edit" : "send"}
             className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >

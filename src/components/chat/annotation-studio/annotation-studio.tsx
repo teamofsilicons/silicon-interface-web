@@ -463,6 +463,13 @@ export function AnnotationStudio({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="flex h-[95vh] w-[min(96vw,1200px)] max-w-none flex-col gap-0 overflow-hidden p-0"
+        onInteractOutside={(e) => {
+          // The studio is often launched from the media preview dialog. During
+          // that handoff, Radix can see focus/pointer changes from the old
+          // dialog as an outside interaction and dismiss this one. Keep closing
+          // explicit via X/Esc/Attach so a fresh studio cannot disappear.
+          e.preventDefault();
+        }}
         onEscapeKeyDown={(e) => {
           // Escape peels back one layer at a time instead of nuking the studio:
           // comment gate → confirm-close guard → (default) close attempt.

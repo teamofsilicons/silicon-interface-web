@@ -33,7 +33,7 @@ import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import type { MentionTarget } from "@/lib/mentions";
 
-import { downloadAsset, MediaPreviewer } from "./media-previewer";
+import { downloadAsset, MediaPreviewer, type AnnotationOpenRequest } from "./media-previewer";
 
 import { Badge } from "@/components/ui/badge";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -95,12 +95,14 @@ function AttachmentPin({
   roomId,
   eventId,
   onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   content: Record<string, unknown>;
   tilt: number;
   roomId?: string;
   eventId?: string;
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   const mediaId = String(content.media_id ?? "");
   const mime = String(content.mime ?? "").toLowerCase();
@@ -186,6 +188,7 @@ function AttachmentPin({
           sourceMediaId={mediaId}
           sourceEventId={eventId}
           onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       )}
     </>
@@ -268,6 +271,7 @@ interface Props {
   roomId?: string;
   /** Stage annotations as a composer draft (reply-linked to this message). */
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }
 
 export function MessageBubble({
@@ -304,6 +308,7 @@ export function MessageBubble({
   onMentionClick,
   roomId,
   onAttachAnnotations,
+  onOpenAnnotation,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
   // early return so the Hook order is stable across render branches.
@@ -500,6 +505,7 @@ export function MessageBubble({
                 roomId={roomId}
                 eventId={att.event_id}
                 onAttachAnnotations={onAttachAnnotations}
+                onOpenAnnotation={onOpenAnnotation}
               />
             ))}
           </div>
@@ -552,6 +558,7 @@ export function MessageBubble({
               onMentionClick={onMentionClick}
               roomId={roomId}
               onAttachAnnotations={onAttachAnnotations}
+              onOpenAnnotation={onOpenAnnotation}
             />
           )}
 
@@ -1120,6 +1127,7 @@ function Body({
   onMentionClick,
   roomId,
   onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   event: Event;
   isMine?: boolean;
@@ -1128,6 +1136,7 @@ function Body({
   onMentionClick?: (target: MentionTarget) => void;
   roomId?: string;
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   // #17 — forwarded chip rendered above the bubble body for *every* message
   // type (text, images, files, voice…), not just text. Telegram style:
@@ -1144,6 +1153,7 @@ function Body({
         onMentionClick={onMentionClick}
         roomId={roomId}
         onAttachAnnotations={onAttachAnnotations}
+        onOpenAnnotation={onOpenAnnotation}
       />
     );
   }
@@ -1158,6 +1168,7 @@ function Body({
         onMentionClick={onMentionClick}
         roomId={roomId}
         onAttachAnnotations={onAttachAnnotations}
+        onOpenAnnotation={onOpenAnnotation}
       />
     </div>
   );
@@ -1171,6 +1182,7 @@ function BodyContent({
   onMentionClick,
   roomId,
   onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   event: Event;
   isMine?: boolean;
@@ -1179,6 +1191,7 @@ function BodyContent({
   onMentionClick?: (target: MentionTarget) => void;
   roomId?: string;
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   const c = event.content;
   const mentionOptions = {
@@ -1248,6 +1261,7 @@ function BodyContent({
             roomId={roomId}
             eventId={event.event_id}
             onAttachAnnotations={onAttachAnnotations}
+            onOpenAnnotation={onOpenAnnotation}
           />
           {/* The text rides with the image as a normal message line, not a
               tiny grey caption. */}
@@ -1274,6 +1288,7 @@ function BodyContent({
             roomId={roomId}
             eventId={event.event_id}
             onAttachAnnotations={onAttachAnnotations}
+            onOpenAnnotation={onOpenAnnotation}
           />
           {/* New-format messages carry the filename separately, so the caption
               is the user's typed text — render it as a normal message line.

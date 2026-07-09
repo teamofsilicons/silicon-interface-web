@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 
 import { AttachmentCard } from "./attachment-card";
 import { fileGlyph, isPreviewable } from "./file-icon";
-import { MediaPreviewer, downloadAsset } from "./media-previewer";
+import { MediaPreviewer, downloadAsset, type AnnotationOpenRequest } from "./media-previewer";
 import { SiliconAudio } from "./silicon-audio";
 
 /**
@@ -40,6 +40,7 @@ export function MediaAttachment({
   roomId,
   eventId,
   onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   mediaId: string;
   mime?: string;
@@ -51,6 +52,7 @@ export function MediaAttachment({
   eventId?: string;
   /** Stage annotations as a composer draft instead of posting directly. */
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
   /** Pixel dimensions from the event (media_meta) — used to reserve the exact
    *  bubble aspect from the FIRST render so the timeline never shifts when the
    *  image/video actually loads. Falls back to the fetched media dims. */
@@ -369,6 +371,7 @@ export function MediaAttachment({
           sourceMediaId={mediaId}
           sourceEventId={eventId}
           onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       </>
     );
@@ -409,6 +412,7 @@ export function MediaAttachment({
           sourceMediaId={mediaId}
           sourceEventId={eventId}
           onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       </>
     );
@@ -460,6 +464,7 @@ export function MediaAttachment({
           sourceMediaId={mediaId}
           sourceEventId={eventId}
           onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       )}
     </>

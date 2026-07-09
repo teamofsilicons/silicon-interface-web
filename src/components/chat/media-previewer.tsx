@@ -29,6 +29,16 @@ import { AnnotationStudio } from "./annotation-studio/annotation-studio";
 import { MarkdownView } from "./markdown-view";
 import { SourceCodeViewer } from "./source-code-viewer";
 
+export interface AnnotationOpenRequest {
+  url: string;
+  mime: string;
+  filename?: string;
+  roomId: string;
+  sourceMediaId: string;
+  sourceEventId?: string;
+  onAttach?: (draft: AnnotationDraft) => void;
+}
+
 interface Props {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -44,6 +54,8 @@ interface Props {
   sourceEventId?: string;
   /** Stage the annotations as a composer draft instead of posting directly. */
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  /** Let a stable parent own the studio instead of this preview dialog. */
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }
 
 /**
@@ -64,21 +76,24 @@ export function MediaPreviewer({
   sourceMediaId,
   sourceEventId,
   onAttachAnnotations,
+  onOpenAnnotation,
 }: Props) {
   const m = (mime || "").toLowerCase();
+  const name = (filename || "").toLowerCase();
   const language = languageForFile(filename, mime);
   const isSvgDocument = language?.id === "svg";
   const isImage = m.startsWith("image/") && !isSvgDocument;
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/");
-  const name = (filename || "").toLowerCase();
   const isPdf = m.includes("pdf") || name.endsWith(".pdf");
+  // Annotation is offered for images and PDFs when we know where to send the
+  // result (roomId) and what the source is (sourceMediaId).
+  const canAnnotate = Boolean(roomId && sourceMediaId && (isImage || isPdf));
+  const [localStudioOpen, setLocalStudioOpen] = React.useState(false);
   const isMarkdown = language?.id === "markdown";
   const isHtmlDocument = language?.id === "html";
   const hasPreviewPane = hasRenderedSourcePreview(filename, mime);
   const isText = isTextLikeFile(filename, mime);
-  const canAnnotate = Boolean(roomId && sourceMediaId && (isImage || isPdf));
-  const [studioOpen, setStudioOpen] = React.useState(false);
   const defaultSourceMode: SourceViewMode = hasPreviewPane ? "preview" : "code";
   const sourceKey = `${url}\n${defaultSourceMode}`;
   const [sourceModeState, setSourceModeState] = React.useState<{
@@ -155,9 +170,20 @@ export function MediaPreviewer({
                 size="sm"
                 variant="outline"
                 onClick={() => {
-                  // Hand off to the studio; close the read-only previewer so the
-                  // two modals don't stack.
-                  setStudioOpen(true);
+                  if (!roomId || !sourceMediaId) return;
+                  if (!onOpenAnnotation) {
+                    setLocalStudioOpen(true);
+                    return;
+                  }
+                  onOpenAnnotation({
+                    url,
+                    mime,
+                    filename,
+                    roomId,
+                    sourceMediaId,
+                    ...(sourceEventId ? { sourceEventId } : {}),
+                    onAttach: onAttachAnnotations,
+                  });
                   onOpenChange(false);
                 }}
                 aria-label="annotate"
@@ -238,10 +264,10 @@ export function MediaPreviewer({
         </div>
       </DialogContent>
     </Dialog>
-    {canAnnotate && roomId && sourceMediaId && (
+    {!onOpenAnnotation && canAnnotate && roomId && sourceMediaId && (
       <AnnotationStudio
-        open={studioOpen}
-        onOpenChange={setStudioOpen}
+        open={localStudioOpen}
+        onOpenChange={setLocalStudioOpen}
         url={url}
         mime={mime}
         filename={filename}

@@ -282,7 +282,7 @@ export function VoiceRecordingProvider({
         await deleteVoiceDraft(draftId).catch(() => undefined);
         setDraft(null);
         draftRef.current = null;
-        toast.error(e instanceof DOMException && e.name === "NotAllowedError" ? "microphone permission denied" : "couldn’t start protected recorder");
+        toast.error(e instanceof DOMException && e.name === "NotAllowedError" ? "Microphone permission denied." : "Couldn’t start voice recording safely.");
         stopTracks();
       }
     },
@@ -429,20 +429,33 @@ function VoiceRecordingTray() {
   const d = voice.draft;
   if (!d) return null;
   const active = d.status === "recording";
+  const title = active ? "Recording voice note" : d.status === "failed" ? "Voice draft failed to send" : "Voice draft";
+  const liveText = active
+    ? `Recording voice note in ${voice.roomName(d.roomId)}.`
+    : d.status === "failed"
+      ? "Couldn’t send voice note. Your recording is still saved."
+      : `Voice draft saved in ${voice.roomName(d.roomId)}.`;
   return (
-    <div className="fixed inset-x-3 bottom-3 z-50 mx-auto flex max-w-3xl items-center gap-3 border bg-background/95 p-3 text-sm shadow-lg backdrop-blur">
-      {d.status === "failed" ? <WarningCircle className="h-4 w-4 text-destructive" /> : <Microphone className="h-4 w-4 text-destructive" />}
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-medium">
-          {active ? "Recording voice note" : d.status === "failed" ? "Voice draft failed to send" : "Voice draft"} in {voice.roomName(d.roomId)} · {formatElapsed(d.durationMs || (active ? voice.now - d.createdAt : 0))}
+    <div className="fixed inset-x-3 top-3 z-50 mx-auto max-w-3xl border bg-background/95 p-3 text-sm shadow-lg backdrop-blur md:left-[calc(var(--sidebar-w,320px)+0.75rem)] md:right-3 md:mx-0">
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{liveText}</div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          {d.status === "failed" ? <WarningCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" /> : <Microphone className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />}
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium" aria-hidden="true">
+              {title} in {voice.roomName(d.roomId)} · {formatElapsed(d.durationMs || (active ? voice.now - d.createdAt : 0))}
+            </div>
+            {d.error ? <div className="truncate text-xs text-destructive">{d.error}</div> : null}
+          </div>
         </div>
-        {d.error ? <div className="truncate text-xs text-destructive">{d.error}</div> : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" onClick={voice.returnToDraftRoom}>Return</Button>
+          {active ? <Button size="sm" onClick={voice.stop}><Stop className="mr-1 h-3.5 w-3.5" /> Stop</Button> : null}
+          {!active ? <Button size="sm" onClick={voice.send} disabled={d.status === "sending"}><PaperPlaneRight className="mr-1 h-3.5 w-3.5" /> {d.status === "failed" ? "Retry" : "Send"}</Button> : null}
+          {!active ? <Button size="sm" variant="outline" onClick={voice.download}><DownloadSimple className="mr-1 h-3.5 w-3.5" /> Download</Button> : null}
+          <Button size="sm" variant="ghost" onClick={() => void voice.discard()} className="ml-auto text-destructive sm:ml-0"><Trash className="mr-1 h-3.5 w-3.5" /> Discard</Button>
+        </div>
       </div>
-      <Button size="sm" variant="outline" onClick={voice.returnToDraftRoom}>Return</Button>
-      {active ? <Button size="sm" onClick={voice.stop}><Stop className="mr-1 h-3.5 w-3.5" /> Stop</Button> : null}
-      {!active ? <Button size="sm" onClick={voice.send} disabled={d.status === "sending"}><PaperPlaneRight className="mr-1 h-3.5 w-3.5" /> {d.status === "failed" ? "Retry" : "Send"}</Button> : null}
-      {!active ? <Button size="sm" variant="outline" onClick={voice.download}><DownloadSimple className="mr-1 h-3.5 w-3.5" /> Download</Button> : null}
-      <Button size="sm" variant="ghost" onClick={() => void voice.discard()} className="text-destructive"><Trash className="mr-1 h-3.5 w-3.5" /> Discard</Button>
     </div>
   );
 }

@@ -300,7 +300,7 @@ function addSummaryPages(
   const nextName = nextVersionedFilename(sourceFilename);
   const note =
     `Once every point above is implemented, please send back an updated PDF — ` +
-    `with this Annotation Feedback page and any additional feedback pages after that` +
+    `with this Annotation Feedback page and any additional feedback pages after that ` +
     `removed — named "${nextName}".`;
   const noteLines = wrapText(note, italic, 10, maxW - 12);
   const noteH = 14 + noteLines.length * 14 + 6;

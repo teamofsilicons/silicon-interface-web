@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Microphone, PaperPlaneRight, Trash } from "@phosphor-icons/react/dist/ssr";
+import { PaperPlaneRight, Trash } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -512,24 +512,36 @@ export function ProtectedVoiceDraftBar({
 
   const active = d.status === "recording";
   const elapsed = d.durationMs || (active ? voice.now - d.createdAt : 0);
-  const title = away
-    ? `${active ? "Recording" : "Voice draft"} in ${voice.roomName(d.roomId)}`
-    : active
-      ? "Recording voice note"
-      : d.status === "failed"
-        ? "Voice send failed"
-        : "Voice draft";
+  const roomName = voice.roomName(d.roomId);
   const liveText = active
-    ? `${title}. Closing this chat will not discard it.`
+    ? `Being recorded in ${roomName}. Closing this chat will not discard it.`
     : d.status === "failed"
       ? "Couldn’t send voice note. Your recording is still saved."
-      : `${title} saved.`;
+      : `Voice draft saved in ${roomName}.`;
 
   return (
-    <div className="border bg-card px-3 py-2 text-xs">
+    <div className="border border-input bg-card text-xs">
       <div className="sr-only" aria-live="polite" aria-atomic="true">{liveText}</div>
-      <div className="flex items-center gap-3">
-        <Microphone className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="flex items-center justify-between gap-3 border-b bg-background/70 px-3 py-1.5 text-[11px] text-muted-foreground">
+        <span className="min-w-0 truncate">Being recorded in &quot;{roomName}&quot;</span>
+        <button
+          type="button"
+          onClick={voice.returnToDraftRoom}
+          className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
+        >
+          Go to Chat
+        </button>
+      </div>
+      <div className="flex items-center gap-3 px-3 py-2">
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => void voice.discard()}
+          aria-label="discard recording"
+          className="shrink-0 text-destructive hover:bg-destructive/10"
+        >
+          <Trash />
+        </Button>
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <span className="flex shrink-0 items-center gap-1.5 label-mono text-xs">
             <span className="inline-block h-2 w-2 animate-pulse bg-foreground" />
@@ -537,31 +549,17 @@ export function ProtectedVoiceDraftBar({
           </span>
           <VoiceDraftWaveform active={active} />
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => void voice.send()}
-            disabled={d.status === "sending"}
-            aria-label="send recording"
-          >
-            <PaperPlaneRight className="mr-1 h-3.5 w-3.5" /> Send
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => void voice.discard()}
-            className="text-destructive hover:bg-destructive/10"
-            aria-label="discard recording"
-          >
-            <Trash className="mr-1 h-3.5 w-3.5" /> Discard
-          </Button>
-        </div>
+        <Button
+          size="icon"
+          onClick={() => void voice.send()}
+          disabled={d.status === "sending"}
+          aria-label="send recording"
+          className="shrink-0"
+        >
+          <PaperPlaneRight />
+        </Button>
       </div>
-      <div className="mt-1 truncate text-[11px] text-muted-foreground">
-        {d.error ?? title}
-      </div>
+      {d.error ? <div className="px-3 pb-2 text-[11px] text-destructive">{d.error}</div> : null}
     </div>
   );
 }

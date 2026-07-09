@@ -12,6 +12,7 @@ import {
   ImageSquare,
   ListChecks,
   MusicNote,
+  PencilSimple,
   Share,
   Smiley,
   Sparkle,
@@ -25,6 +26,7 @@ import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import type { Event, EventType, ProgressState } from "@/lib/types";
+import { editableTextForEvent, eventShowsEdited } from "@/lib/event-edit";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { emojiOnly } from "@/lib/emoji";
 import { cn, messageTime } from "@/lib/utils";
@@ -238,6 +240,8 @@ interface Props {
   /** Re-send a failed message (same client id — the server dedupes). When set,
    *  the failed receipt becomes a tap-to-retry affordance. */
   onRetry?: (event: Event) => void;
+  /** Load this message back into the composer for editing. */
+  onEdit?: (event: Event) => void;
   /** Attachment events sent alongside this text message — rendered as tilted
    *  pins over the bubble instead of as their own standalone bubbles. */
   pinnedAttachments?: Event[];
@@ -268,6 +272,7 @@ export function MessageBubble({
   onSelect,
   onDelete,
   onRetry,
+  onEdit,
   selectMode = false,
   selected = false,
   onToggleSelect,
@@ -346,7 +351,9 @@ export function MessageBubble({
   // controlled state for that dropdown.
   const [moreOpen, setMoreOpen] = React.useState(false);
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
-  const hasActions = !redacted && !!(onReply || onReact || (onForward && canForward) || onDelete || (onSelect && canForward));
+  const hasActions =
+    !redacted &&
+    !!(onReply || onReact || onEdit || (onForward && canForward) || onDelete || (onSelect && canForward));
   // Multi-select eligibility mirrors the forward gate: a real, settled,
   // non-deleted bubble whose type the backend forward endpoint supports.
   // Streaming/optimistic (`is_final === false`) and deleted messages are never
@@ -524,6 +531,7 @@ export function MessageBubble({
               onReact={onReact}
               onForward={onForward}
               onSelect={selectable ? onSelect : undefined}
+              onEdit={onEdit}
               onDelete={onDelete}
               onTakeBack={onTakeBack}
               onCopied={triggerCopyFlash}
@@ -560,7 +568,7 @@ export function MessageBubble({
             minute) run, so a quick back-to-back exchange shows one common
             timestamp instead of one per line. Streaming indicator escapes
             the gate because it's a live state, not historical metadata. */}
-        {(showTime || mightStream) && (
+        {(showTime || mightStream || eventShowsEdited(event)) && (
           <div
             className={cn(
               "flex items-center gap-1.5 text-[10px] text-muted-foreground",
@@ -568,6 +576,7 @@ export function MessageBubble({
             )}
           >
             {showTime && <HoverTime iso={event.created_at} />}
+            {eventShowsEdited(event) && <span>edited</span>}
             {showTime && isMine && status && (
               status === "failed" && onRetry ? (
                 // Failed → the receipt becomes tap-to-retry (same clientId, so
@@ -614,6 +623,7 @@ function BubbleActions({
   onReact,
   onForward,
   onSelect,
+  onEdit,
   onDelete,
   onTakeBack,
   onCopied,
@@ -630,6 +640,7 @@ function BubbleActions({
   onReact?: (event: Event, emoji: string) => void;
   onForward?: (event: Event) => void;
   onSelect?: (event: Event) => void;
+  onEdit?: (event: Event) => void;
   onDelete?: (event: Event) => void;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   onCopied?: () => void;
@@ -640,6 +651,7 @@ function BubbleActions({
   const canDelete = isMine && within5Min;
   const canTakeBack = isMine && isOwnSilicon;
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false;
+  const canEdit = isMine && !!onEdit && editableTextForEvent(event) !== null;
   const textBody = event.type === "m.text" ? String(event.content.body ?? "") : "";
   const handleCopy = async () => {
     // §7.1 — copyText handles insecure contexts (LAN/http) with an execCommand
@@ -753,6 +765,12 @@ function BubbleActions({
             <DropdownMenuItem onClick={() => onReply(event)}>
               <ArrowBendUpLeft className="mr-2 h-3.5 w-3.5" />
               reply
+            </DropdownMenuItem>
+          )}
+          {canEdit && (
+            <DropdownMenuItem onClick={() => onEdit(event)}>
+              <PencilSimple className="mr-2 h-3.5 w-3.5" />
+              edit
             </DropdownMenuItem>
           )}
           {onForward && canForward && (

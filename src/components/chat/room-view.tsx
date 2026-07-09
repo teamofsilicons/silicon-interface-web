@@ -26,6 +26,7 @@ import {
 } from "@/lib/pending-preview";
 import { advanceEventCursor } from "@/lib/event-cursor";
 import { ackOutbox } from "@/lib/outbox";
+import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -274,6 +275,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     handle: string;
   } | null>(null);
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
+  const [editingEvent, setEditingEvent] = React.useState<Event | null>(null);
   const [search, setSearch] = React.useState<string | null>(null);
   // Backend message search (/events/search) — covers the whole history, not just
   // the loaded window. `searchResults` is null when no query is active.
@@ -521,6 +523,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     clearReceiptTimer();
     setActivities({});
     setReplyTo(null);
+    setEditingEvent(null);
     setFocusSender(null);
     setProfileOpen(false);
     setUnseenBelow(false);
@@ -616,6 +619,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (f.type === "event") {
       const incoming = f.event;
       const mine = incoming.sender_handle && incoming.sender_handle === myUsername;
+      const updatesExisting = events.some((e) => e.event_id === incoming.event_id);
       if (incoming.type === "m.progress") {
         const state = (incoming.content.state as ProgressState) || "thinking";
         clearReceiptTimer(); // real progress takes over from any receipt line
@@ -640,12 +644,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         }
         return;
       }
-      if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) {
+      if (!updatesExisting && !mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) {
         clearReceiptTimer();
         setActiveProgress(null);
       }
       // §1.9 — a new message from someone else while scrolled up: surface a pill.
-      if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type) && !stickToBottomRef.current) {
+      if (!updatesExisting && !mine && PROGRESS_MESSAGE_TYPES.has(incoming.type) && !stickToBottomRef.current) {
         setUnseenBelow(true);
       }
       // The received tone is played once, globally, by the chat page (so it
@@ -653,12 +657,13 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       setEvents((prev) => {
         const existsIdx = prev.findIndex((e) => e.event_id === incoming.event_id);
         if (existsIdx >= 0) {
-          if (!mine) return prev;
           const updated = [...prev];
           const cur = updated[existsIdx];
-          if (cur._status !== "read") {
-            updated[existsIdx] = { ...cur, _status: "delivered" };
-          }
+          updated[existsIdx] = {
+            ...incoming,
+            _clientId: cur._clientId,
+            _status: mine ? bestStatus(cur._status, "delivered") : cur._status,
+          };
           return updated;
         }
         if (mine) {
@@ -906,6 +911,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (ev.event_id.startsWith("temp-") && clientId) {
       cancelQueuedRef.current?.(clientId);
       setHoldingMessage(false);
+      setEditingEvent((cur) => (cur?.event_id === ev.event_id ? null : cur));
       setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
       return;
     }
@@ -1003,9 +1009,66 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   };
 
   const onReply = (ev: Event) => {
+    setEditingEvent(null);
     setReplyTo(ev);
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
   };
+
+  const roomIncludesSilicon = room.peers.some((p) => p.kind === "silicon");
+  const canEditMessage = React.useCallback(
+    (ev: LocalEvent | Event) => {
+      if (!isMyEvent(ev, myUsername)) return false;
+      if (ev.redacted_at || ev.is_final === false) return false;
+      if (editableTextForEvent(ev) === null) return false;
+      if (roomIncludesSilicon) {
+        return ev.event_id.startsWith("temp-") && Boolean((ev as LocalEvent)._clientId);
+      }
+      return true;
+    },
+    [myUsername, roomIncludesSilicon],
+  );
+
+  const beginEdit = React.useCallback(
+    (ev: Event) => {
+      if (!canEditMessage(ev)) return;
+      setReplyTo(null);
+      setEditingEvent(ev);
+    },
+    [canEditMessage],
+  );
+
+  const persistEdit = React.useCallback(
+    async (ev: Event, body: string) => {
+      const editedAt = new Date().toISOString();
+      const snapshot = events.find((item) => item.event_id === ev.event_id);
+      setEvents((prev) =>
+        prev.map((item) =>
+          item.event_id === ev.event_id ? withEditedText(item, body, editedAt) : item,
+        ),
+      );
+      try {
+        const real = await api.editEvent(ev.event_id, body);
+        setEvents((prev) =>
+          prev.map((item) =>
+            item.event_id === real.event_id
+              ? {
+                  ...real,
+                  _clientId: item._clientId,
+                  _status: item._status,
+                }
+              : item,
+          ),
+        );
+      } catch (e) {
+        if (snapshot) {
+          setEvents((prev) => prev.map((item) => (item.event_id === snapshot?.event_id ? snapshot : item)));
+        }
+        toast.error(e instanceof ApiError ? e.message : String(e));
+        throw e;
+      }
+    },
+    [events],
+  );
 
   // #17 — Forward picker. Setting `forwardingEvent` opens the dialog; the
   // dialog handles room selection and re-posting with forward_from metadata.
@@ -1102,6 +1165,16 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       ),
     [events],
   );
+
+  const requestEditLast = React.useCallback(() => {
+    for (let i = visibleEvents.length - 1; i >= 0; i--) {
+      const event = visibleEvents[i];
+      if (canEditMessage(event)) {
+        beginEdit(event);
+        return;
+      }
+    }
+  }, [beginEdit, canEditMessage, visibleEvents]);
 
   // Lookup so a reply can render the message it's quoting.
   const eventById = React.useMemo(() => {
@@ -1307,7 +1380,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         reply_to_event_id: payload.reply_to_event_id ?? "",
         is_final: true,
         created_at: now,
-        edited_at: null,
+        edited_at: payload.edited_at ?? null,
         redacted_at: null,
         redaction_reason: "",
         _status: "pending",
@@ -1416,6 +1489,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                 type: payload.type,
                 content: payload.content ?? {},
                 reply_to_event_id: payload.reply_to_event_id ?? "",
+                edited_at: payload.edited_at ?? e.edited_at,
               }
             : e,
         ),
@@ -1986,6 +2060,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   onReact={readOnly ? undefined : onReact}
                   onForward={readOnly ? undefined : onForward}
                   onSelect={readOnly ? undefined : onSelect}
+                  onEdit={readOnly || !canEditMessage(e) ? undefined : beginEdit}
                   selectMode={selectMode}
                   selected={selectedEventIds.has(e.event_id)}
                   onToggleSelect={readOnly ? undefined : toggleSelect}
@@ -2006,6 +2081,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   };
 
   // The composer's "holding…" pre-send state — rendered in the Virtuoso footer.
+  const holdingLabel =
+    editingEvent?.event_id.startsWith("temp-")
+      ? "holding this message until you finish editing."
+      : "holding the message until you finish typing.";
   const holdingNode = holdingMessage ? (
     <div className="my-2 flex w-full items-center justify-start gap-2">
       <div className="w-7 shrink-0">
@@ -2017,7 +2096,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         />
       </div>
       <span className="text-sm text-muted-foreground">
-        holding the message until you finish typing.
+        {holdingLabel}
       </span>
     </div>
   ) : null;
@@ -2295,6 +2374,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           onHoldStateChange={setHoldingMessage}
           cancelQueuedRef={cancelQueuedRef}
           mentionCandidates={mentionCandidates}
+          editingEvent={editingEvent}
+          onEditComplete={() => setEditingEvent(null)}
+          onPersistedEdit={persistEdit}
+          onRequestEditLast={requestEditLast}
         />
       )}
 

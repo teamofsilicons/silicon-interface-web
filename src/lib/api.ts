@@ -370,6 +370,8 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),
   finalizeEvent: (event_id: string) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/final`, {}),
+  editEvent: (event_id: string, body: string) =>
+    call<Event>("POST", `/api/v1/events/${event_id}/edit`, { body }),
 
   /** Global ULID-cursor backfill across all visible rooms — replays events
    *  created after `after` as WS-shaped frames, for reconnect resync. */

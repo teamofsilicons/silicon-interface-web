@@ -10,6 +10,7 @@ import {
   Microphone,
   Paperclip,
   PaperPlaneRight,
+  PencilSimple,
   X,
 } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
@@ -22,6 +23,7 @@ import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
 import { flushDraft, getDraft, setDraft } from "@/lib/drafts";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
+import { editableTextForEvent } from "@/lib/event-edit";
 import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -77,6 +79,7 @@ export interface OptimisticPayload {
   type: EventType;
   content?: Record<string, unknown>;
   reply_to_event_id?: string;
+  edited_at?: string | null;
 }
 
 interface Props {
@@ -108,6 +111,14 @@ interface Props {
   cancelQueuedRef?: React.MutableRefObject<((clientId: string) => void) | null>;
   /** People in this room offered by the `@` mention autocomplete. */
   mentionCandidates?: MentionCandidate[];
+  /** Message currently being edited in the composer. */
+  editingEvent?: Event | null;
+  /** Clear the parent-held edit target. */
+  onEditComplete?: () => void;
+  /** Persist an edit for an already-sent message. */
+  onPersistedEdit?: (event: Event, body: string) => Promise<void>;
+  /** Ask the parent to select the latest editable message, usually via ↑. */
+  onRequestEditLast?: () => void;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -127,6 +138,7 @@ const SILICON_EMPTY_HOLD_MS = 10_000;
 // "wait 1 more minute" extends the post-empty hold by this much.
 const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
+const EDIT_INACTIVITY_MS = 60_000;
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
 const MAX_ATTACHMENTS = 10;
 
@@ -160,6 +172,7 @@ interface QueuedTextSend {
   replyToEventId?: string;
   holdGroupId: string;
   holdIndex: number;
+  editedAt?: string | null;
 }
 
 /** One staged attachment, uploading in the background until ready to send. */
@@ -583,6 +596,10 @@ export function Composer({
   onHoldStateChange,
   cancelQueuedRef,
   mentionCandidates = [],
+  editingEvent = null,
+  onEditComplete,
+  onPersistedEdit,
+  onRequestEditLast,
 }: Props) {
   const [text, setText] = React.useState("");
   // Multiple attachments can be staged at once; each uploads in the background
@@ -635,6 +652,7 @@ export function Composer({
     [roomId],
   );
   const [busy, setBusy] = React.useState(false);
+  const [editSaving, setEditSaving] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
   // control during the upload, and retain the recorded blob if it fails so the
   // user can retry instead of losing the recording.
@@ -649,6 +667,9 @@ export function Composer({
   const textRef = React.useRef(text);
   const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
   const delayTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftBeforeEditRef = React.useRef("");
+  const editInactivityTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastEditingEventIdRef = React.useRef<string | null>(null);
   // Timer for the post-empty hold: after a paused queue's input goes empty, we
   // wait SILICON_EMPTY_HOLD_MS before sending instead of flushing immediately.
   const emptyHoldTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -665,6 +686,10 @@ export function Composer({
   const [, setWaitExtended] = React.useState(false);
   // Bumped on an interval while the countdown runs so the banner re-renders.
   const [, setHoldTick] = React.useState(0);
+  const editingClientId =
+    ((editingEvent as (Event & { _clientId?: string }) | null)?._clientId ?? null);
+  const editingHeld = Boolean(editingEvent?.event_id.startsWith("temp-") && editingClientId);
+  const isEditing = editingEvent !== null;
 
   React.useEffect(() => {
     textRef.current = text;
@@ -748,6 +773,10 @@ export function Composer({
   // paste. Each is validated, staged, and starts uploading immediately.
   const attachFiles = React.useCallback(
     (list: FileList | File[] | null | undefined) => {
+      if (isEditing) {
+        toast.message("finish editing before adding attachments.");
+        return;
+      }
       const incoming = list ? Array.from(list) : [];
       if (incoming.length === 0) return;
       const room = MAX_ATTACHMENTS - attachmentsRef.current.length;
@@ -785,7 +814,7 @@ export function Composer({
       setAttachments((prev) => [...prev, ...staged]);
       staged.forEach((s) => void uploadOne(s));
     },
-    [uploadOne],
+    [isEditing, uploadOne],
   );
   // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
   // the active token (':grin', ':lol', …) and surface matches in a small
@@ -827,7 +856,7 @@ export function Composer({
     const replaced = before.replace(MENTION_RE, `@${cand.handle} `);
     const nextText = replaced + after;
     setText(nextText);
-    persistDraft(nextText);
+    if (!isEditing) persistDraft(nextText);
     setMentionQuery(null);
     queueMicrotask(() => {
       const ta = taRef.current;
@@ -1002,8 +1031,10 @@ export function Composer({
           hold_group_id: item.holdGroupId,
           hold_index: item.holdIndex,
           hold_count: total,
+          ...(item.editedAt ? { edited_before_send: true } : {}),
         },
         reply_to_event_id: item.replyToEventId,
+        edited_at: item.editedAt ?? null,
       };
     },
     [],
@@ -1060,6 +1091,11 @@ export function Composer({
       const total = items.length;
       for (const item of items) {
         const payload = buildQueuedPayload(item, total);
+        const sendPayload = {
+          type: payload.type,
+          content: payload.content,
+          reply_to_event_id: payload.reply_to_event_id,
+        };
         if (outboxOwner) {
           enqueueOutbox(outboxOwner, {
             roomId,
@@ -1071,7 +1107,7 @@ export function Composer({
           });
         }
         try {
-          const real = await api.sendEvent(roomId, payload, item.clientId); // §2.3
+          const real = await api.sendEvent(roomId, sendPayload, item.clientId); // §2.3
           if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
           if (optimistic) onAck(item.clientId, real);
           track.messageSent({
@@ -1093,6 +1129,33 @@ export function Composer({
       roomId,
     ],
   );
+
+  const restartDelayedFlushTimer = React.useCallback(() => {
+    if (!delayedTextQueueRef.current.length) {
+      clearDelayedQueue();
+      return;
+    }
+    clearDelayTimer();
+    setQueuePaused(false);
+    setEmptyHoldEndsAt(null);
+    setWaitExtended(false);
+    onHoldStateChange?.(false);
+    delayTimerRef.current = setTimeout(() => {
+      delayTimerRef.current = null;
+      if (hasContinuingDraft()) {
+        setQueuePaused(true);
+        onHoldStateChange?.(true);
+      } else {
+        void flushDelayedTextQueue();
+      }
+    }, SILICON_TEXT_SEND_DELAY_MS);
+  }, [
+    clearDelayedQueue,
+    clearDelayTimer,
+    flushDelayedTextQueue,
+    hasContinuingDraft,
+    onHoldStateChange,
+  ]);
 
   const queueDelayedTextSend = React.useCallback(
     (body: string) => {
@@ -1147,9 +1210,154 @@ export function Composer({
     ],
   );
 
+  const clearEditInactivityTimer = React.useCallback(() => {
+    if (editInactivityTimerRef.current) {
+      clearTimeout(editInactivityTimerRef.current);
+      editInactivityTimerRef.current = null;
+    }
+  }, []);
+
+  const finishEdit = React.useCallback(() => {
+    clearEditInactivityTimer();
+    setEditSaving(false);
+    setEmojiQuery(null);
+    setMentionQuery(null);
+    const restore = draftBeforeEditRef.current;
+    textRef.current = restore;
+    setText(restore);
+    persistDraft(restore);
+    onEditComplete?.();
+    queueMicrotask(() => taRef.current?.focus());
+  }, [clearEditInactivityTimer, onEditComplete, persistDraft]);
+
+  const cancelEdit = React.useCallback(() => {
+    if (!editingEvent) return;
+    const wasHeld = editingHeld;
+    finishEdit();
+    if (wasHeld) restartDelayedFlushTimer();
+  }, [editingEvent, editingHeld, finishEdit, restartDelayedFlushTimer]);
+
+  const confirmEdit = React.useCallback(async () => {
+    if (!editingEvent) return;
+    const original = editableTextForEvent(editingEvent);
+    if (original === null) {
+      finishEdit();
+      return;
+    }
+    const nextBody = text.trim();
+    if (editingEvent.type === "m.text" && !nextBody) {
+      toast.error("message body is required.");
+      return;
+    }
+
+    if (editingHeld && editingClientId) {
+      const current = delayedTextQueueRef.current;
+      const editedAt = new Date().toISOString();
+      const next = current.map((item) =>
+        item.clientId === editingClientId
+          ? { ...item, body: nextBody, editedAt }
+          : item,
+      );
+      delayedTextQueueRef.current = next;
+      setQueuedTextCount(next.length);
+      for (const queued of next) {
+        onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, next.length));
+      }
+      finishEdit();
+      void flushDelayedTextQueue();
+      return;
+    }
+
+    if (nextBody === original.trim()) {
+      finishEdit();
+      return;
+    }
+    if (!onPersistedEdit) {
+      finishEdit();
+      return;
+    }
+    setEditSaving(true);
+    try {
+      await onPersistedEdit(editingEvent, nextBody);
+      finishEdit();
+    } catch {
+      setEditSaving(false);
+    }
+  }, [
+    buildQueuedPayload,
+    editingClientId,
+    editingEvent,
+    editingHeld,
+    finishEdit,
+    flushDelayedTextQueue,
+    onOptimisticUpdate,
+    onPersistedEdit,
+    text,
+  ]);
+
+  React.useEffect(() => {
+    if (!editingEvent) {
+      lastEditingEventIdRef.current = null;
+      return;
+    }
+    const current = editableTextForEvent(editingEvent);
+    if (current === null) {
+      onEditComplete?.();
+      return;
+    }
+    if (lastEditingEventIdRef.current !== editingEvent.event_id) {
+      draftBeforeEditRef.current = textRef.current;
+      lastEditingEventIdRef.current = editingEvent.event_id;
+    }
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setText(current);
+      setEmojiQuery(null);
+      setMentionQuery(null);
+      onClearReply?.();
+      if (editingHeld) {
+        clearDelayTimer();
+        setQueuePaused(true);
+        setEmptyHoldEndsAt(null);
+        setWaitExtended(false);
+        setQueuedTextCount(delayedTextQueueRef.current.length);
+        onHoldStateChange?.(true);
+      }
+      taRef.current?.focus();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    clearDelayTimer,
+    editingEvent,
+    editingHeld,
+    onClearReply,
+    onEditComplete,
+    onHoldStateChange,
+  ]);
+
+  React.useEffect(() => {
+    if (!editingEvent) return;
+    clearEditInactivityTimer();
+    editInactivityTimerRef.current = setTimeout(() => {
+      void confirmEdit();
+    }, EDIT_INACTIVITY_MS);
+    return clearEditInactivityTimer;
+  }, [clearEditInactivityTimer, confirmEdit, editingEvent, text]);
+
   React.useEffect(() => {
     // Not paused → no post-empty countdown should be pending.
     if (!queuePaused || queuedTextCount === 0) {
+      if (emptyHoldTimerRef.current) {
+        clearTimeout(emptyHoldTimerRef.current);
+        emptyHoldTimerRef.current = null;
+        setEmptyHoldEndsAt(null);
+      }
+      return;
+    }
+    if (editingHeld) {
       if (emptyHoldTimerRef.current) {
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
@@ -1178,7 +1386,7 @@ export function Composer({
       // cancelled us; only send if the box is still empty.
       if (!hasContinuingDraft()) void flushDelayedTextQueue();
     }, SILICON_EMPTY_HOLD_MS);
-  }, [flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
+  }, [editingHeld, flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
 
   // Re-render once a second while the countdown is live so "will send in {N}s"
   // ticks down.
@@ -1214,6 +1422,11 @@ export function Composer({
         (chain, item) =>
           chain.then(async () => {
             const payload = buildQueuedPayload(item, total);
+            const sendPayload = {
+              type: payload.type,
+              content: payload.content,
+              reply_to_event_id: payload.reply_to_event_id,
+            };
             if (outboxOwner) {
               enqueueOutbox(outboxOwner, {
                 roomId,
@@ -1225,7 +1438,7 @@ export function Composer({
               });
             }
             try {
-              await api.sendEvent(roomId, payload, item.clientId);
+              await api.sendEvent(roomId, sendPayload, item.clientId);
               if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
             } catch (err) {
               toast.error(err instanceof ApiError ? err.message : String(err));
@@ -1277,6 +1490,11 @@ export function Composer({
   };
 
   const send = async () => {
+    if (editingEvent) {
+      await confirmEdit();
+      return;
+    }
+
     let body = text.trim();
 
     // §7a/§7e — slash command palette (text only; a "/" with files is just text).
@@ -1510,6 +1728,27 @@ export function Composer({
           </button>
         </div>
       )}
+      {editingEvent && (
+        <div className="flex items-center gap-2 border-l-2 border-foreground/60 bg-card px-2 py-1 text-xs">
+          <PencilSimple className="h-3.5 w-3.5 shrink-0 opacity-60" />
+          <div className="min-w-0 flex-1">
+            <div className="label-mono text-[10px] opacity-60">
+              {editingHeld ? "editing held message" : "editing message"}
+            </div>
+            <div className="truncate text-foreground/80">
+              {editingEvent.sender_handle ? `@${editingEvent.sender_handle}` : "message"}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={cancelEdit}
+            aria-label="cancel edit"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {attachments.length > 0 && (
         // Inset to line up with the text box (past the 44px attach/send buttons
         // + 8px gap on each side), so attachments are as wide as the chat box.
@@ -1612,14 +1851,20 @@ export function Composer({
           ) : (
             // Still typing — hold open-endedly until they finish.
             <>
-              <span className="min-w-0">holding the message until you finish typing.</span>
-              <button
-                type="button"
-                onClick={() => void flushDelayedTextQueue()}
-                className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
-              >
-                send now
-              </button>
+              <span className="min-w-0">
+                {editingHeld
+                  ? "holding this message until you finish editing."
+                  : "holding the message until you finish typing."}
+              </span>
+              {!editingHeld && (
+                <button
+                  type="button"
+                  onClick={() => void flushDelayedTextQueue()}
+                  className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
+                >
+                  send now
+                </button>
+              )}
             </>
           )}
         </div>
@@ -1659,7 +1904,7 @@ export function Composer({
           onClick={() => fileInputRef.current?.click()}
           title="attach file"
           aria-label="attach file"
-          disabled={busy}
+          disabled={busy || isEditing}
           className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
@@ -1672,7 +1917,7 @@ export function Composer({
             onChange={(e) => {
               const v = e.target.value;
               setText(v);
-              persistDraft(v);
+              if (!isEditing) persistDraft(v);
               if (v) beaconTyping();
               // Detect a `:foo` token at the caret. If found, open picker.
               // The `(?<![\w])` lookbehind stops the trigger firing inside
@@ -1697,7 +1942,7 @@ export function Composer({
                 setMentionQuery(null);
               }
             }}
-            placeholder="message…"
+            placeholder={isEditing ? "edit message…" : "message…"}
             rows={MIN_ROWS}
             className="w-full resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
             onPaste={(e) => {
@@ -1707,6 +1952,10 @@ export function Composer({
               const items = e.clipboardData?.files;
               if (items && items.length > 0) {
                 e.preventDefault();
+                if (isEditing) {
+                  toast.message("finish editing before adding attachments.");
+                  return;
+                }
                 attachFiles(items);
               }
             }}
@@ -1778,7 +2027,7 @@ export function Composer({
                     const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, picked.emoji);
                     const nextText = replaced + after;
                     setText(nextText);
-                    persistDraft(nextText);
+                    if (!isEditing) persistDraft(nextText);
                     setEmojiQuery(null);
                     queueMicrotask(() => {
                       const el = taRef.current;
@@ -1794,6 +2043,23 @@ export function Composer({
                   setEmojiQuery(null);
                   return;
                 }
+              }
+              if (
+                e.key === "ArrowUp" &&
+                !isEditing &&
+                !text.trim() &&
+                attachments.length === 0 &&
+                !replyTo &&
+                onRequestEditLast
+              ) {
+                e.preventDefault();
+                onRequestEditLast();
+                return;
+              }
+              if (e.key === "Escape" && isEditing) {
+                e.preventDefault();
+                cancelEdit();
+                return;
               }
               // Esc cancels an in-progress reply first; preventDefault stops the
               // page-level handler from also closing the chat. With no reply
@@ -1816,7 +2082,7 @@ export function Composer({
             }}
           />
         </div>
-        {!text.trim() && attachments.length === 0 ? (
+        {!isEditing && !text.trim() && attachments.length === 0 ? (
           <button
             type="button"
             onClick={() => {
@@ -1834,11 +2100,11 @@ export function Composer({
           <button
             type="button"
             onClick={send}
-            disabled={busy || anyUploading}
-            aria-label="send"
+            disabled={busy || editSaving || anyUploading || (isEditing && editingEvent?.type === "m.text" && !text.trim())}
+            aria-label={isEditing ? "save edit" : "send"}
             className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            {busy || anyUploading ? (
+            {busy || editSaving || anyUploading ? (
               <CircleNotch className="animate-spin" />
             ) : (
               <PaperPlaneRight />
@@ -1857,7 +2123,7 @@ export function Composer({
               const after = text.slice(caret);
               const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, em);
               setText(replaced + after);
-              persistDraft(replaced + after);
+              if (!isEditing) persistDraft(replaced + after);
               setEmojiQuery(null);
               queueMicrotask(() => taRef.current?.focus());
             }}

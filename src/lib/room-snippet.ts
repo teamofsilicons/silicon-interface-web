@@ -65,6 +65,13 @@ export function appendRoomEventSnippet(roomId: string, event: Event): void {
   if (!event || typeof event.event_id !== "string") return;
   if (event.event_id.startsWith("temp-") || event.type === "m.progress") return;
   const existing = readRoomEventSnippet(roomId) ?? [];
+  const idx = existing.findIndex((e) => e.event_id === event.event_id);
+  if (idx >= 0) {
+    const next = [...existing];
+    next[idx] = event;
+    saveRoomEventSnippet(roomId, next);
+    return;
+  }
   const next = existing.filter((e) => e.event_id !== event.event_id);
   next.push(event);
   saveRoomEventSnippet(roomId, next);

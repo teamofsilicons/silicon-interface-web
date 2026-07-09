@@ -784,12 +784,6 @@ function ChatPageInner() {
       // Every observed event advances the global resync cursor.
       if (ownerId) advanceEventCursor(ownerId, ev.event_id);
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
-      // Received-message sound — global (any room), once per event.
-      // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
-      if (!quiet && !mine && isCountableEvent(ev)) {
-        if (ev.sender_kind === "silicon") playReceivedSilicon();
-        else playReceived();
-      }
       const rid = f.room_id;
       const room = roomsRef.current.find((r) => r.room_id === rid);
       if (!room) {
@@ -797,6 +791,14 @@ function ChatPageInner() {
         return;
       }
       const isOpen = selectedRef.current === rid;
+      const updatesExistingEvent = Boolean(ev.edited_at);
+      const patchesLastEvent = room.last_event?.event_id === ev.event_id;
+      // Received-message sound — global (any room), once per new event.
+      // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
+      if (!quiet && !updatesExistingEvent && !mine && isCountableEvent(ev)) {
+        if (ev.sender_kind === "silicon") playReceivedSilicon();
+        else playReceived();
+      }
       // For a CLOSED room, fold the incoming event into its cached snippet so
       // it's already there when the user opens the chat — no ~1s wait for the
       // api.events fetch to surface a message that already arrived over the WS.
@@ -809,7 +811,7 @@ function ChatPageInner() {
       // auto-read catches up when the user returns.
       const present = userPresent();
       const attended = isOpen && present;
-      const countableIncoming = isCountableEvent(ev) && !mine && !attended;
+      const countableIncoming = !updatesExistingEvent && isCountableEvent(ev) && !mine && !attended;
       // Observer rooms (inter-silicon chats I only watch) never raise a
       // notification, browser alert, or toast — read-only visibility shouldn't
       // ping me. The unread indicator below still updates so the Observing tab
@@ -851,7 +853,7 @@ function ChatPageInner() {
           return {
             ...r,
             last_event:
-              preview !== null
+              preview !== null && (!updatesExistingEvent || patchesLastEvent)
                 ? {
                     event_id: ev.event_id,
                     preview,
@@ -859,7 +861,7 @@ function ChatPageInner() {
                     sender_handle: ev.sender_handle,
                     sender_kind: ev.sender_kind ?? null,
                     type: ev.type,
-                    read: false,
+                    read: updatesExistingEvent ? (r.last_event?.read ?? false) : false,
                   }
                 : r.last_event,
             unread: countableIncoming ? true : r.unread,
@@ -871,7 +873,7 @@ function ChatPageInner() {
       );
       // A real event landed for this room — clear any "waiting" sidebar
       // preview so it doesn't linger beside the now-current last message.
-      if (preview !== null) dropPendingPreview(rid);
+      if (preview !== null && !updatesExistingEvent) dropPendingPreview(rid);
     } else if (f.type === "read_receipt") {
       // Receipts are broadcast on EVERY mark-read — including my own, from any
       // device. A self-receipt (member_handle is mine) means I read this room

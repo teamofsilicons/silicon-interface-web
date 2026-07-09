@@ -26,7 +26,7 @@ import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
-import { VoiceRecorder } from "@/components/chat/voice-recorder";
+import { useVoiceRecording } from "@/components/chat/voice-recording-provider";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
 import { MediaPreviewer } from "@/components/chat/media-previewer";
@@ -528,6 +528,13 @@ function runSlashCommand(body: string): {
   }
 }
 
+function formatVoiceDraftElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+}
+
 export function Composer({
   roomId,
   onOptimisticAdd,
@@ -574,25 +581,7 @@ export function Composer({
     },
     [roomId],
   );
-  const [recording, setRecording] = React.useState(false);
-  // §6.5 — Mirror `recording` in a ref so the unmount cleanup can clear a
-  // dangling "recording…" beacon for the *current* room even if the room
-  // switches while we're mid-record.
-  const recordingRef = React.useRef(false);
-  React.useEffect(() => {
-    recordingRef.current = recording;
-  }, [recording]);
-  React.useEffect(
-    () => () => {
-      // On unmount (e.g. switching rooms while recording), explicitly clear the
-      // peer "recording…" beacon — otherwise it sticks until it times out
-      // server-side. The VoiceRecorder's own cleanup stops the MediaStream.
-      if (recordingRef.current) {
-        api.activity(roomId, "recording", false).catch(() => undefined);
-      }
-    },
-    [roomId],
-  );
+  const voiceRecording = useVoiceRecording();
   const [busy, setBusy] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
   // control during the upload, and retain the recorded blob if it fails so the
@@ -1369,28 +1358,6 @@ export function Composer({
     }
   };
 
-  const onVoiceSubmit = (blob: Blob, durationMs: number) => {
-    setRecording(false);
-    api.activity(roomId, "recording", false).catch(() => undefined);
-    void uploadVoice(blob, durationMs);
-  };
-
-  // Render the recorder in place of the textarea row when active.
-  if (recording) {
-    return (
-      <div className="border-t bg-background p-3">
-        <VoiceRecorder
-          active
-          onCancel={() => {
-            setRecording(false);
-            api.activity(roomId, "recording", false).catch(() => undefined);
-          }}
-          onSubmit={onVoiceSubmit}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
@@ -1417,6 +1384,33 @@ export function Composer({
             className="text-muted-foreground hover:text-foreground"
           >
             <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+      {voiceRecording.draft?.roomId === roomId && (
+        <div className="flex items-center justify-between gap-3 border bg-card px-3 py-2 text-xs">
+          <Microphone className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1">
+            {voiceRecording.draft.status === "recording"
+              ? `Recording... ${formatVoiceDraftElapsed(voiceRecording.draft.durationMs || voiceRecording.now - voiceRecording.draft.createdAt)}`
+              : `Voice draft · ${formatVoiceDraftElapsed(voiceRecording.draft.durationMs)}`}
+          </span>
+          {voiceRecording.draft.status === "recording" ? (
+            <button type="button" onClick={voiceRecording.stop} className="font-medium underline-offset-2 hover:underline">
+              Stop
+            </button>
+          ) : (
+            <>
+              <button type="button" onClick={() => void voiceRecording.play()} className="font-medium underline-offset-2 hover:underline">
+                Play
+              </button>
+              <button type="button" onClick={() => void voiceRecording.send()} className="font-medium underline-offset-2 hover:underline">
+                Send
+              </button>
+            </>
+          )}
+          <button type="button" onClick={() => void voiceRecording.discard()} className="text-destructive underline-offset-2 hover:underline">
+            Discard
           </button>
         </div>
       )}
@@ -1730,8 +1724,7 @@ export function Composer({
           <button
             type="button"
             onClick={() => {
-              setRecording(true);
-              api.activity(roomId, "recording", true).catch(() => undefined);
+              void voiceRecording.start(roomId, replyTo?.event_id);
             }}
             disabled={busy}
             title="record voice message"

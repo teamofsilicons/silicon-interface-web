@@ -114,6 +114,7 @@ import { RoomList, type DisplayFolder, type GroupSection } from "@/components/ch
 import { GroupNameDialog } from "@/components/chat/group-name-dialog";
 import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
+import { VoiceRecordingProvider } from "@/components/chat/voice-recording-provider";
 import { CommandMenu } from "@/components/chat/command-menu";
 import { KeymapCheatsheet } from "@/components/chat/keymap-cheatsheet";
 import {
@@ -1287,7 +1288,7 @@ function ChatPageInner() {
   }, [filtered, selected, navigate]);
 
   return (
-    <>
+    <VoiceRecordingProvider rooms={rooms} onReturnToRoom={(roomId) => navigate(`/chat?room=${roomId}`)}>
       {/* §7b — Cmd+K jump menu (rooms / people / dev). */}
       <CommandMenu rooms={rooms} isStaff={carbon?.is_staff} />
       {/* §7d — Shift+? keyboard cheatsheet. */}
@@ -1415,6 +1416,6 @@ function ChatPageInner() {
         }}
         onConfirm={confirmGroupPrompt}
       />
-    </>
+    </VoiceRecordingProvider>
   );
 }

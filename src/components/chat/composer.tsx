@@ -26,7 +26,7 @@ import type { Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
-import { useVoiceRecording } from "@/components/chat/voice-recording-provider";
+import { ProtectedVoiceDraftBar, useVoiceRecording } from "@/components/chat/voice-recording-provider";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
 import { MediaPreviewer } from "@/components/chat/media-previewer";
@@ -528,12 +528,6 @@ function runSlashCommand(body: string): {
   }
 }
 
-function formatVoiceDraftElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
-}
 
 export function Composer({
   roomId,
@@ -1387,33 +1381,7 @@ export function Composer({
           </button>
         </div>
       )}
-      {voiceRecording.draft?.roomId === roomId && (
-        <div className="flex items-center justify-between gap-3 border bg-card px-3 py-2 text-xs">
-          <Microphone className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1">
-            {voiceRecording.draft.status === "recording"
-              ? `Recording... ${formatVoiceDraftElapsed(voiceRecording.draft.durationMs || voiceRecording.now - voiceRecording.draft.createdAt)}`
-              : `Voice draft · ${formatVoiceDraftElapsed(voiceRecording.draft.durationMs)}`}
-          </span>
-          {voiceRecording.draft.status === "recording" ? (
-            <button type="button" onClick={voiceRecording.stop} className="font-medium underline-offset-2 hover:underline">
-              Stop
-            </button>
-          ) : (
-            <>
-              <button type="button" onClick={() => void voiceRecording.play()} className="font-medium underline-offset-2 hover:underline">
-                Play
-              </button>
-              <button type="button" onClick={() => void voiceRecording.send()} className="font-medium underline-offset-2 hover:underline">
-                Send
-              </button>
-            </>
-          )}
-          <button type="button" onClick={() => void voiceRecording.discard()} className="text-destructive underline-offset-2 hover:underline">
-            Discard
-          </button>
-        </div>
-      )}
+      <ProtectedVoiceDraftBar currentRoomId={roomId} />
       {attachments.length > 0 && (
         // Inset to line up with the text box (past the 44px attach/send buttons
         // + 8px gap on each side), so attachments are as wide as the chat box.

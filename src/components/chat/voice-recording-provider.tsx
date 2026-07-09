@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { DownloadSimple, Microphone, PaperPlaneRight, Stop, Trash, WarningCircle } from "@phosphor-icons/react/dist/ssr";
+import { Microphone, PaperPlaneRight, Trash } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -100,7 +100,8 @@ export function VoiceRecordingProvider({
   const deletingDraftIdsRef = React.useRef<Set<string>>(new Set());
   const chunkSeqRef = React.useRef(0);
   const startedAtRef = React.useRef(0);
-  const stoppingIntentRef = React.useRef<"draft" | "discard">("draft");
+  const stoppingIntentRef = React.useRef<"draft" | "discard" | "send">("draft");
+  const sendRef = React.useRef<(() => Promise<void>) | null>(null);
   const [now, setNow] = React.useState(() => Date.now());
   const bcRef = React.useRef<BroadcastChannel | null>(null);
   const [remoteActive, setRemoteActive] = React.useState(false);
@@ -139,7 +140,7 @@ export function VoiceRecordingProvider({
   }, []);
 
   const stopActiveRecorder = React.useCallback(
-    (intent: "draft" | "discard" = "draft") => {
+    (intent: "draft" | "discard" | "send" = "draft") => {
       stoppingIntentRef.current = intent;
       try {
         if (recRef.current?.state === "recording") {
@@ -337,10 +338,14 @@ export function VoiceRecordingProvider({
           bcRef.current?.postMessage({ ownerKey, active: false });
           api.activity(roomId, "recording", false).catch(() => undefined);
           const cur = draftRef.current;
-          if (!cur || stoppingIntentRef.current === "discard") return;
+          const intent = stoppingIntentRef.current;
+          if (!cur || intent === "discard") return;
           void (async () => {
             await waitForPendingAppends();
             await persistMeta({ status: "draft", durationMs: Date.now() - startedAtRef.current });
+            if (intent === "send") {
+              window.setTimeout(() => void sendRef.current?.(), 0);
+            }
           })();
         };
         rec.start(1000);
@@ -390,7 +395,11 @@ export function VoiceRecordingProvider({
 
   const send = React.useCallback(async () => {
     const cur = draftRef.current;
-    if (!cur || cur.status === "recording" || cur.status === "sending") return;
+    if (!cur || cur.status === "sending") return;
+    if (cur.status === "recording") {
+      stopActiveRecorder("send");
+      return;
+    }
     await persistMeta({ status: "sending", error: undefined });
     try {
       const blob = await blobForDraft(cur);
@@ -430,7 +439,11 @@ export function VoiceRecordingProvider({
       await persistMeta({ status: "failed", error: message });
       toast.error(message);
     }
-  }, [blobForDraft, persistMeta, waitForPendingAppends]);
+  }, [blobForDraft, persistMeta, stopActiveRecorder, waitForPendingAppends]);
+
+  React.useEffect(() => {
+    sendRef.current = send;
+  }, [send]);
 
   const download = React.useCallback(async () => {
     const cur = draftRef.current;
@@ -482,46 +495,109 @@ export function VoiceRecordingProvider({
     [discard, download, draft, now, play, remoteActive, returnToDraftRoom, roomName, send, start, stop],
   );
 
-  return (
-    <VoiceRecordingContext.Provider value={value}>
-      {children}
-      <VoiceRecordingTray />
-    </VoiceRecordingContext.Provider>
-  );
+  return <VoiceRecordingContext.Provider value={value}>{children}</VoiceRecordingContext.Provider>;
 }
 
-function VoiceRecordingTray() {
+export function ProtectedVoiceDraftBar({
+  currentRoomId,
+  away = false,
+}: {
+  currentRoomId: string;
+  away?: boolean;
+}) {
   const voice = useVoiceRecording();
   const d = voice.draft;
   if (!d) return null;
+  if (away ? d.roomId === currentRoomId : d.roomId !== currentRoomId) return null;
+
   const active = d.status === "recording";
-  const title = active ? "Recording voice note" : d.status === "failed" ? "Voice draft failed to send" : "Voice draft";
+  const elapsed = d.durationMs || (active ? voice.now - d.createdAt : 0);
+  const title = away
+    ? `${active ? "Recording" : "Voice draft"} in ${voice.roomName(d.roomId)}`
+    : active
+      ? "Recording voice note"
+      : d.status === "failed"
+        ? "Voice send failed"
+        : "Voice draft";
   const liveText = active
-    ? `Recording voice note in ${voice.roomName(d.roomId)}.`
+    ? `${title}. Closing this chat will not discard it.`
     : d.status === "failed"
       ? "Couldn’t send voice note. Your recording is still saved."
-      : `Voice draft saved in ${voice.roomName(d.roomId)}.`;
+      : `${title} saved.`;
+
   return (
-    <div className="fixed inset-x-3 top-3 z-50 mx-auto max-w-3xl border bg-background/95 p-3 text-sm shadow-lg backdrop-blur md:left-[calc(var(--sidebar-w,320px)+0.75rem)] md:right-3 md:mx-0">
+    <div className="border bg-card px-3 py-2 text-xs">
       <div className="sr-only" aria-live="polite" aria-atomic="true">{liveText}</div>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="flex min-w-0 flex-1 items-start gap-3">
-          {d.status === "failed" ? <WarningCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" /> : <Microphone className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />}
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-medium" aria-hidden="true">
-              {title} in {voice.roomName(d.roomId)} · {formatElapsed(d.durationMs || (active ? voice.now - d.createdAt : 0))}
-            </div>
-            {d.error ? <div className="truncate text-xs text-destructive">{d.error}</div> : null}
-          </div>
+      <div className="flex items-center gap-3">
+        <Microphone className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="flex shrink-0 items-center gap-1.5 label-mono text-xs">
+            <span className="inline-block h-2 w-2 animate-pulse bg-foreground" />
+            {formatElapsed(elapsed)}
+          </span>
+          <VoiceDraftWaveform active={active} />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" onClick={voice.returnToDraftRoom}>Return</Button>
-          {active ? <Button size="sm" onClick={voice.stop}><Stop className="mr-1 h-3.5 w-3.5" /> Stop</Button> : null}
-          {!active ? <Button size="sm" onClick={voice.send} disabled={d.status === "sending"}><PaperPlaneRight className="mr-1 h-3.5 w-3.5" /> {d.status === "failed" ? "Retry" : "Send"}</Button> : null}
-          {!active ? <Button size="sm" variant="outline" onClick={voice.download}><DownloadSimple className="mr-1 h-3.5 w-3.5" /> Download</Button> : null}
-          <Button size="sm" variant="ghost" onClick={() => void voice.discard()} className="ml-auto text-destructive sm:ml-0"><Trash className="mr-1 h-3.5 w-3.5" /> Discard</Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void voice.send()}
+            disabled={d.status === "sending"}
+            aria-label="send recording"
+          >
+            <PaperPlaneRight className="mr-1 h-3.5 w-3.5" /> Send
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => void voice.discard()}
+            className="text-destructive hover:bg-destructive/10"
+            aria-label="discard recording"
+          >
+            <Trash className="mr-1 h-3.5 w-3.5" /> Discard
+          </Button>
         </div>
       </div>
+      <div className="mt-1 truncate text-[11px] text-muted-foreground">
+        {d.error ?? title}
+      </div>
+    </div>
+  );
+}
+
+export function VoiceRecordingAwayOverlay({ currentRoomId }: { currentRoomId: string }) {
+  const voice = useVoiceRecording();
+  if (!voice.draft || voice.draft.roomId === currentRoomId) return null;
+  return (
+    <div className="border-t bg-background px-2 py-2">
+      <ProtectedVoiceDraftBar currentRoomId={currentRoomId} away />
+    </div>
+  );
+}
+
+function VoiceDraftWaveform({ active }: { active: boolean }) {
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 80);
+    return () => window.clearInterval(id);
+  }, [active]);
+  const bars = React.useMemo(() => Array.from({ length: 48 }, (_, i) => i), []);
+  return (
+    <div className="flex h-7 min-w-0 flex-1 items-center gap-[2px] overflow-hidden" aria-hidden="true">
+      {bars.map((i) => {
+        const wave = active
+          ? 0.25 + Math.abs(Math.sin((tick + i) / 3)) * 0.75
+          : 0.18 + Math.abs(Math.sin(i / 3)) * 0.35;
+        return (
+          <span
+            key={i}
+            className="inline-block w-[3px] shrink-0 bg-foreground/70"
+            style={{ height: `${Math.max(3, wave * 100)}%` }}
+          />
+        );
+      })}
     </div>
   );
 }

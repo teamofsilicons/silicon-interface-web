@@ -43,6 +43,7 @@ import {
   type OptimisticPayload,
 } from "@/components/chat/composer";
 import { ForwardDialog } from "@/components/chat/forward-dialog";
+import { VoiceRecordingAwayOverlay } from "@/components/chat/voice-recording-provider";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 import { CronDrawer } from "@/components/chat/cron-drawer";
@@ -2254,6 +2255,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           ↓ new messages
         </button>
       ) : null}
+
+      <VoiceRecordingAwayOverlay currentRoomId={room.room_id} />
 
       {selectMode ? (
         // Dope #79 — selection action bar, shown in place of the composer while

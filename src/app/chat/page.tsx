@@ -523,6 +523,7 @@ function ChatPageInner() {
     selectedRef.current = selected;
   }, [selected]);
   const roomsCacheOwnerRef = React.useRef<string | null>(null);
+  const roomsCacheReadyRef = React.useRef(false);
   // Guards group persistence so the initial load for a new owner doesn't echo
   // back an empty array before the stored groups are read in.
   const groupsOwnerRef = React.useRef<string | null>(null);
@@ -628,7 +629,11 @@ function ChatPageInner() {
     const run = (async () => {
       setRefreshing(true);
       try {
-        const next = normalizeRooms(await api.rooms());
+        const rawRooms = await api.rooms();
+        const next = normalizeRooms(rawRooms);
+        if (Array.isArray(rawRooms) && rawRooms.length > 0 && next.length === 0) {
+          console.warn("rooms response normalized to zero rows", rawRooms);
+        }
         setRooms(next);
         if (ownerId) {
           saveCachedRooms(ownerId, next);
@@ -641,6 +646,7 @@ function ChatPageInner() {
         toast.error(e instanceof ApiError ? e.message : String(e));
       } finally {
         roomsCacheOwnerRef.current = ownerId;
+        roomsCacheReadyRef.current = true;
         setLoading(false);
         setRefreshing(false);
       }
@@ -655,22 +661,21 @@ function ChatPageInner() {
 
   React.useEffect(() => {
     roomsCacheOwnerRef.current = null;
+    roomsCacheReadyRef.current = false;
     const cached = ownerId ? loadCachedRooms(ownerId) : null;
     if (cached) {
+      roomsCacheReadyRef.current = true;
       setRooms(cached);
       setLoading(false);
     } else {
       setRooms([]);
       setLoading(true);
     }
-    queueMicrotask(() => {
-      roomsCacheOwnerRef.current = ownerId;
-    });
     void refresh();
   }, [ownerId, refresh]);
 
   React.useEffect(() => {
-    if (!ownerId || roomsCacheOwnerRef.current !== ownerId) return;
+    if (!ownerId || !roomsCacheReadyRef.current || roomsCacheOwnerRef.current !== ownerId) return;
     saveCachedRooms(ownerId, rooms);
   }, [ownerId, rooms]);
 
@@ -1147,6 +1152,12 @@ function ChatPageInner() {
     });
     return list;
   }, [rooms, filters, sidebarQuery, roomTeams]);
+
+  const filtersActive = filters.unread || filters.kinds.length > 0 || filters.teams.length > 0;
+  React.useEffect(() => {
+    if (loading || sidebarQuery.trim() || !filtersActive) return;
+    if (rooms.length > 0 && filtered.length === 0) setFilters(EMPTY_FILTERS);
+  }, [filtered.length, filtersActive, loading, rooms.length, sidebarQuery]);
 
   // Folders aggregate across the teams currently in view: the selected teams,
   // or — when no team is selected — ALL teams (so folders still show by

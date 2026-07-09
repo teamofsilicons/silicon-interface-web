@@ -136,7 +136,7 @@ export function RoomList({
   // drilled-in empty group keeps its back header.
   const topLevelEmpty = grouped
     ? !openSection &&
-      groupSections!.length === 0 &&
+      groupSections!.every((section) => section.rooms.length === 0) &&
       (ungroupedRooms?.length ?? 0) === 0
     : rooms.length === 0;
   if (!loading && topLevelEmpty) {
@@ -186,9 +186,11 @@ export function RoomList({
           ) : (
             // Top level: group rows (open into their own view) then ungrouped chats.
             <div>
-              {groupSections!.length > 0 && (
+              {groupSections!.some((section) => section.rooms.length > 0) && (
                 <ul className="divide-y border-b">
-                  {groupSections!.map(({ group, rooms: groupRooms }) => (
+                  {groupSections!
+                    .filter(({ rooms: groupRooms }) => groupRooms.length > 0)
+                    .map(({ group, rooms: groupRooms }) => (
                     <GroupRow
                       key={group.id}
                       group={group}

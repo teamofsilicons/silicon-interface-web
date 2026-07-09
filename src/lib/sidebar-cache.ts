@@ -101,7 +101,8 @@ function write(
 
 export function loadCachedRooms(ownerId: string): Room[] | null {
   const cached = read(ownerId);
-  return cached ? cached.rooms : null;
+  if (!cached || cached.rooms.length === 0) return null;
+  return cached.rooms;
 }
 
 export function saveCachedRooms(ownerId: string, rooms: Room[]) {

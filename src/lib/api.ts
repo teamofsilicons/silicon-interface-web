@@ -349,11 +349,22 @@ export const api = {
       content: client_id ? { ...(payload.content ?? {}), client_id } : payload.content,
     }),
 
-  forwardEvent: (target_room_id: string, source_room_id: string, source_event_id: string) =>
-    call<Event[]>("POST", `/api/v1/rooms/${target_room_id}/forward`, {
+  forwardEvents: (
+    target_room_id: string,
+    source_room_id: string,
+    source_event_ids: string[],
+    comment?: string,
+  ) => {
+    const body: Record<string, unknown> = {
       source_room_id,
-      source_event_id,
-    }),
+      source_event_ids,
+    };
+    const trimmed = comment?.trim();
+    if (trimmed) body.comment = trimmed;
+    return call<Event[]>("POST", `/api/v1/rooms/${target_room_id}/forward`, body);
+  },
+  forwardEvent: (target_room_id: string, source_room_id: string, source_event_id: string) =>
+    api.forwardEvents(target_room_id, source_room_id, [source_event_id]),
 
   appendDelta: (event_id: string, delta: string, seq = 0) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),

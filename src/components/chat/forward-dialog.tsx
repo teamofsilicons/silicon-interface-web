@@ -45,6 +45,7 @@ interface Props {
  */
 export function ForwardDialog({ open, onOpenChange, event, events, rooms, sourceRoomId, onComplete }: Props) {
   const [query, setQuery] = React.useState("");
+  const [comment, setComment] = React.useState("");
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [sending, setSending] = React.useState(false);
 
@@ -62,6 +63,7 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
     if (!open) {
       queueMicrotask(() => {
         setQuery("");
+        setComment("");
         setSelected(new Set());
       });
     }
@@ -95,30 +97,22 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
     try {
       // QA §7.7: the old code `.catch`'d each send and used Promise.all, so the
       // aggregate always resolved and "forwarded to N chats" fired even when
-      // every send failed. Use per-call try/catch and report the real split.
-      //
-      // Ordering: within a single target room the messages must land in send
-      // order, so we forward them SEQUENTIALLY (await each before the next).
-      // Different rooms are independent, so those runs go in PARALLEL.
+      // every send failed. Promise.allSettled reports the real per-room split.
       const targets = Array.from(selected);
-      const perRoom = await Promise.all(
-        targets.map(async (rid) => {
-          const outcomes: PromiseSettledResult<unknown>[] = [];
-          for (const ev of items) {
-            try {
-              const r = await api.forwardEvent(rid, sourceRoomId, ev.event_id);
-              outcomes.push({ status: "fulfilled", value: r });
-            } catch (e) {
-              outcomes.push({ status: "rejected", reason: e });
-            }
-          }
-          return outcomes;
-        }),
+      const sourceEventIds = items.map((ev) => ev.event_id);
+      const trimmedComment = comment.trim();
+      const results = await Promise.allSettled(
+        targets.map((rid) =>
+          api.forwardEvents(
+            rid,
+            sourceRoomId,
+            sourceEventIds,
+            trimmedComment || undefined,
+          ),
+        ),
       );
-      // One result per (message × room) forward call.
-      const results = perRoom.flat();
       const failures = results.filter((r) => r.status === "rejected");
-      const ok = results.length - failures.length;
+      const okRooms = results.length - failures.length;
       const msgN = items.length;
       const roomN = targets.length;
 
@@ -134,8 +128,10 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
         onOpenChange(false);
         onComplete?.();
       } else {
-        if (ok > 0) {
-          toast.success(`forwarded ${ok} of ${results.length}`);
+        if (okRooms > 0) {
+          toast.success(
+            `forwarded to ${okRooms} of ${roomN} ${roomN === 1 ? "chat" : "chats"}`,
+          );
         }
         // Surface the first real error message; the rest are almost always the
         // same transient cause, and N stacked toasts is noise.
@@ -143,7 +139,7 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
         const reason = first.reason;
         const detail = reason instanceof ApiError ? reason.message : "forward failed";
         toast.error(
-          `couldn't forward ${failures.length} ${failures.length === 1 ? "message" : "messages"} - ${detail}`,
+          `couldn't forward to ${failures.length} ${failures.length === 1 ? "chat" : "chats"} - ${detail}`,
         );
         // On partial/total failure keep the picker open so the user can retry.
       }
@@ -154,7 +150,7 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[80vh] max-w-md overflow-hidden p-0">
+      <DialogContent className="flex max-h-[80vh] max-w-md flex-col overflow-hidden p-0">
         <DialogHeader className="border-b px-4 py-3">
           <DialogTitle>Forward to…</DialogTitle>
           <DialogDescription>
@@ -162,6 +158,16 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
             sender will be shown.
           </DialogDescription>
         </DialogHeader>
+        <div className="border-b px-3 py-2">
+          <textarea
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="add a comment (optional)"
+            maxLength={4000}
+            rows={3}
+            className="max-h-28 min-h-16 w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          />
+        </div>
         <div className="flex items-center gap-2 border-b px-3 py-2">
           <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
           <input
@@ -172,7 +178,7 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
             className="h-9 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
-        <ul className="max-h-[40vh] overflow-y-auto py-1">
+        <ul className="min-h-0 flex-1 overflow-y-auto py-1">
           {filtered.length === 0 && (
             <li className="px-4 py-6 text-center text-sm text-muted-foreground">
               no conversations

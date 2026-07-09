@@ -729,7 +729,7 @@ function ChatPageInner() {
             it.roomId,
             {
               type: "m.text",
-              content: { body: it.body },
+              content: { ...(it.content ?? {}), body: it.body },
               reply_to_event_id: it.replyTo,
             },
             it.clientId,

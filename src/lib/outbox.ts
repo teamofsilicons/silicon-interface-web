@@ -25,6 +25,8 @@ export interface OutboxEntry {
   roomId: string;
   clientId: string;
   body: string;
+  /** Extra text-event content to preserve across reload retries. */
+  content?: Record<string, unknown>;
   /** reply_to_event_id, when the send quoted another message. */
   replyTo?: string;
   /** Enqueue time (epoch ms) — drives the 48h prune. */
@@ -49,6 +51,7 @@ function read(ownerId: string): OutboxEntry[] {
         typeof (e as OutboxEntry).roomId === "string" &&
         typeof (e as OutboxEntry).clientId === "string" &&
         typeof (e as OutboxEntry).body === "string" &&
+        ((e as OutboxEntry).content == null || typeof (e as OutboxEntry).content === "object") &&
         typeof (e as OutboxEntry).at === "number",
     );
   } catch {

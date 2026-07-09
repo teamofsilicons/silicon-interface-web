@@ -158,6 +158,8 @@ interface QueuedTextSend {
   clientId: string;
   body: string;
   replyToEventId?: string;
+  holdGroupId: string;
+  holdIndex: number;
 }
 
 /** One staged attachment, uploading in the background until ready to send. */
@@ -935,15 +937,21 @@ export function Composer({
     [],
   );
 
-  const buildQueuedPayload = React.useCallback((items: QueuedTextSend[]): OptimisticPayload => {
-    const replyIds = new Set(items.map((item) => item.replyToEventId || ""));
-    const sharedReplyId = replyIds.size === 1 ? items[0]?.replyToEventId : undefined;
-    return {
-      type: "m.text",
-      content: { body: items.map((item) => item.body).join("\n\n") },
-      reply_to_event_id: sharedReplyId,
-    };
-  }, []);
+  const buildQueuedPayload = React.useCallback(
+    (item: QueuedTextSend, total: number): OptimisticPayload => {
+      return {
+        type: "m.text",
+        content: {
+          body: item.body,
+          hold_group_id: item.holdGroupId,
+          hold_index: item.holdIndex,
+          hold_count: total,
+        },
+        reply_to_event_id: item.replyToEventId,
+      };
+    },
+    [],
+  );
 
   const clearDelayedQueue = React.useCallback(() => {
     delayedTextQueueRef.current = [];
@@ -958,11 +966,22 @@ export function Composer({
   // Drop a held message from the queue when its bubble is deleted — never send.
   const cancelQueued = React.useCallback(
     (clientId: string) => {
-      if (delayedTextQueueRef.current.some((it) => it.clientId === clientId)) {
+      const current = delayedTextQueueRef.current;
+      if (!current.some((it) => it.clientId === clientId)) return;
+      const next = current
+        .filter((it) => it.clientId !== clientId)
+        .map((it, index) => ({ ...it, holdIndex: index }));
+      delayedTextQueueRef.current = next;
+      setQueuedTextCount(next.length);
+      if (next.length === 0) {
         clearDelayedQueue();
+      } else {
+        for (const queued of next) {
+          onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, next.length));
+        }
       }
     },
-    [clearDelayedQueue],
+    [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate],
   );
   React.useEffect(() => {
     if (!cancelQueuedRef) return;
@@ -979,34 +998,35 @@ export function Composer({
         ...(extra ? [extra] : []),
       ];
       if (!items.length) return;
-      const payload = buildQueuedPayload(items);
-      const ackClientId = delayedTextQueueRef.current[0]?.clientId;
       clearDelayedQueue();
-      if (ackClientId) onOptimisticUpdate?.(ackClientId, payload);
-      // Outbox: the merged batch persists under the FIRST queued client id —
-      // the same id the POST is stamped with, so a flush retry dedupes.
-      const outboxOwner = ackClientId ? (authStore.getCarbon()?.carbon_id ?? null) : null;
-      if (outboxOwner && ackClientId) {
-        enqueueOutbox(outboxOwner, {
-          roomId,
-          clientId: ackClientId,
-          body: String(payload.content?.body ?? ""),
-          replyTo: payload.reply_to_event_id,
-          at: Date.now(),
-        });
-      }
-      try {
-        const real = await api.sendEvent(roomId, payload, ackClientId); // §2.3
-        if (outboxOwner && ackClientId) ackOutbox(outboxOwner, ackClientId);
-        if (optimistic && ackClientId) onAck(ackClientId, real);
-        track.messageSent({
-          room_id: roomId,
-          message_type: "m.text",
-          is_reply: Boolean(payload.reply_to_event_id),
-        });
-      } catch (err) {
-        if (optimistic && ackClientId) onFail(ackClientId, err);
-        else toast.error(err instanceof ApiError ? err.message : String(err));
+
+      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+      const total = items.length;
+      for (const item of items) {
+        const payload = buildQueuedPayload(item, total);
+        if (outboxOwner) {
+          enqueueOutbox(outboxOwner, {
+            roomId,
+            clientId: item.clientId,
+            body: item.body,
+            content: payload.content,
+            replyTo: payload.reply_to_event_id,
+            at: Date.now(),
+          });
+        }
+        try {
+          const real = await api.sendEvent(roomId, payload, item.clientId); // §2.3
+          if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
+          if (optimistic) onAck(item.clientId, real);
+          track.messageSent({
+            room_id: roomId,
+            message_type: "m.text",
+            is_reply: Boolean(payload.reply_to_event_id),
+          });
+        } catch (err) {
+          if (optimistic) onFail(item.clientId, err);
+          else toast.error(err instanceof ApiError ? err.message : String(err));
+        }
       }
     },
     [
@@ -1014,7 +1034,6 @@ export function Composer({
       clearDelayedQueue,
       onAck,
       onFail,
-      onOptimisticUpdate,
       roomId,
     ],
   );
@@ -1022,28 +1041,27 @@ export function Composer({
   const queueDelayedTextSend = React.useCallback(
     (body: string) => {
       const clientId = newClientId();
+      const existingQueue = delayedTextQueueRef.current;
+      const holdGroupId = existingQueue[0]?.holdGroupId ?? newClientId();
       const item: QueuedTextSend = {
         clientId,
         body,
         replyToEventId: replyTo?.event_id,
+        holdGroupId,
+        holdIndex: existingQueue.length,
       };
-      // Append to the held batch (don't replace), so a follow-up sent while an
-      // earlier message is still held merges in AND restarts the 5s window —
-      // every send re-enters the hold, instead of the second send flushing
-      // immediately and skipping the hold for the rest of the burst.
-      const isFirst = delayedTextQueueRef.current.length === 0;
-      delayedTextQueueRef.current = [...delayedTextQueueRef.current, item];
+      // Append to the held burst and restart the 5s window, but keep every
+      // user send as its own visible message bubble.
+      delayedTextQueueRef.current = [...existingQueue, item];
       const queue = delayedTextQueueRef.current;
       setQueuedTextCount(queue.length);
-      // Back to the open merge window (not "holding…") — the restarted timer
+      // Back to the open hold window (not "holding…") — the restarted timer
       // re-decides whether to hold once it elapses.
       setQueuePaused(false);
       onHoldStateChange?.(false);
-      if (isFirst) {
-        onOptimisticAdd(clientId, buildQueuedPayload(queue));
-      } else {
-        // Grow the existing pending bubble to show the merged text.
-        onOptimisticUpdate?.(queue[0].clientId, buildQueuedPayload(queue));
+      onOptimisticAdd(clientId, buildQueuedPayload(item, queue.length));
+      for (const queued of queue) {
+        onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, queue.length));
       }
       clearDelayTimer();
       delayTimerRef.current = setTimeout(() => {
@@ -1131,29 +1149,34 @@ export function Composer({
       const queued = delayedTextQueueRef.current;
       if (!queued.length) return;
       clearDelayTimer();
-      const payload = buildQueuedPayload(queued);
       delayedTextQueueRef.current = [];
-      const clientId = queued[0]?.clientId;
-      // Unmount flush is fire-and-forget — persist it to the outbox so a
+      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+      const total = queued.length;
+      // Unmount flush is fire-and-forget — persist each text to the outbox so a
       // failure (or the page dying mid-POST) still gets retried later.
-      const outboxOwner = clientId ? (authStore.getCarbon()?.carbon_id ?? null) : null;
-      if (outboxOwner && clientId) {
-        enqueueOutbox(outboxOwner, {
-          roomId,
-          clientId,
-          body: String(payload.content?.body ?? ""),
-          replyTo: payload.reply_to_event_id,
-          at: Date.now(),
-        });
-      }
-      api
-        .sendEvent(roomId, payload, clientId)
-        .then(() => {
-          if (outboxOwner && clientId) ackOutbox(outboxOwner, clientId);
-        })
-        .catch((err) => {
-          toast.error(err instanceof ApiError ? err.message : String(err));
-        });
+      void queued.reduce<Promise<void>>(
+        (chain, item) =>
+          chain.then(async () => {
+            const payload = buildQueuedPayload(item, total);
+            if (outboxOwner) {
+              enqueueOutbox(outboxOwner, {
+                roomId,
+                clientId: item.clientId,
+                body: item.body,
+                content: payload.content,
+                replyTo: payload.reply_to_event_id,
+                at: Date.now(),
+              });
+            }
+            try {
+              await api.sendEvent(roomId, payload, item.clientId);
+              if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
+            } catch (err) {
+              toast.error(err instanceof ApiError ? err.message : String(err));
+            }
+          }),
+        Promise.resolve(),
+      );
     },
     [buildQueuedPayload, clearDelayTimer, roomId],
   );

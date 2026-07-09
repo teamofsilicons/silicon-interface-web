@@ -406,15 +406,46 @@ export interface MentionCandidate {
   asciiUrl?: string | null;
 }
 
+interface AttachmentMentionCandidate {
+  kind: "attachment";
+  handle: string;
+  name: string;
+  mime: string;
+  status: StagedFile["status"];
+}
+
+type ComposerMentionCandidate = MentionCandidate | AttachmentMentionCandidate;
+
 // `@token` immediately before the caret. The lookbehind stops it firing inside
 // an email ("alice@…") or any word — `@` must follow whitespace / line start.
 const MENTION_RE = /(?<![\w@])@([a-z0-9_.\-]*)$/i;
 
-function filterMentions(candidates: MentionCandidate[], query: string): MentionCandidate[] {
+function filterMentions(candidates: ComposerMentionCandidate[], query: string): ComposerMentionCandidate[] {
   const q = query.toLowerCase();
   return candidates
     .filter((c) => !q || c.handle.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
     .slice(0, 50);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function attachmentRefsForBody(body: string, files: StagedFile[]): Record<string, unknown>[] {
+  const refs: Record<string, unknown>[] = [];
+  for (const file of files) {
+    if (!file.mediaId) continue;
+    const name = file.name.trim();
+    if (!name) continue;
+    const pattern = new RegExp(`(^|\\s)@${escapeRegExp(name)}(?=$|\\s|[.,!?;:)\\]])`, "i");
+    if (!pattern.test(body)) continue;
+    refs.push({
+      filename: name,
+      media_id: file.mediaId,
+      mime: file.mime,
+    });
+  }
+  return refs;
 }
 
 /**
@@ -426,9 +457,9 @@ function MentionQuickPicker({
   selectedIndex,
   onPick,
 }: {
-  results: MentionCandidate[];
+  results: ComposerMentionCandidate[];
   selectedIndex: number;
-  onPick: (c: MentionCandidate) => void;
+  onPick: (c: ComposerMentionCandidate) => void;
 }) {
   const listRef = React.useRef<HTMLDivElement>(null);
   // Keep the keyboard-highlighted row visible as the user arrows through a long
@@ -454,18 +485,26 @@ function MentionQuickPicker({
             i === selectedIndex && "border-foreground bg-accent",
           )}
         >
-          <IdAvatar
-            seed={`${c.kind}:${c.handle}`}
-            src={c.photoUrl}
-            asciiSrc={c.asciiUrl}
-            size={24}
-            family={c.kind === "silicon" ? "silicon" : "carbon"}
-          />
+          {c.kind === "attachment" ? (
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center border bg-background text-muted-foreground">
+              <FileIcon className="h-3.5 w-3.5" />
+            </span>
+          ) : (
+            <IdAvatar
+              seed={`${c.kind}:${c.handle}`}
+              src={c.photoUrl}
+              asciiSrc={c.asciiUrl}
+              size={24}
+              family={c.kind === "silicon" ? "silicon" : "carbon"}
+            />
+          )}
           <span className="min-w-0 flex-1 truncate text-sm">
             <span className="font-medium">{c.name}</span>{" "}
             <span className="text-muted-foreground">@{c.handle}</span>
           </span>
-          <span className="label-mono shrink-0 text-[10px] text-muted-foreground">{c.kind}</span>
+          <span className="label-mono shrink-0 text-[10px] text-muted-foreground">
+            {c.kind === "attachment" ? c.status : c.kind}
+          </span>
         </button>
       ))}
     </div>
@@ -756,14 +795,31 @@ export function Composer({
   // @-mention picker — null when inactive; otherwise the partial handle typed.
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
   const [mentionIdx, setMentionIdx] = React.useState(0);
+  const attachmentMentionCandidates = React.useMemo<AttachmentMentionCandidate[]>(
+    () =>
+      attachments
+        .filter((a) => a.status !== "error")
+        .map((a) => ({
+          kind: "attachment" as const,
+          handle: a.name,
+          name: a.name,
+          mime: a.mime,
+          status: a.status,
+        })),
+    [attachments],
+  );
+  const composerMentionCandidates = React.useMemo<ComposerMentionCandidate[]>(
+    () => [...attachmentMentionCandidates, ...mentionCandidates],
+    [attachmentMentionCandidates, mentionCandidates],
+  );
   const mentionResults = React.useMemo(
-    () => (mentionQuery === null ? [] : filterMentions(mentionCandidates, mentionQuery)),
-    [mentionQuery, mentionCandidates],
+    () => (mentionQuery === null ? [] : filterMentions(composerMentionCandidates, mentionQuery)),
+    [mentionQuery, composerMentionCandidates],
   );
   // Replace the `@token` immediately before the caret with `@handle ` and drop
   // the picker. Shared by keyboard (Tab/Enter) and mouse selection. Plain
   // function so it can reference `persistDraft` (declared below) lazily.
-  const insertMention = (cand: MentionCandidate) => {
+  const insertMention = (cand: ComposerMentionCandidate) => {
     const el = taRef.current;
     const caret = el?.selectionStart ?? text.length;
     const before = text.slice(0, caret);
@@ -1263,8 +1319,19 @@ export function Composer({
         }
         reset();
         // Typed text rides as a *separate* message after the attachments,
-        // carrying the same bundle_id so they render together.
-        if (body) sendTextOptimistic(body, bundleId ? { bundle_id: bundleId } : undefined);
+        // carrying the same bundle_id so they render together. If the user
+        // typed @filename references, persist the resolved attachment ids too.
+        if (body) {
+          const attachmentRefs = attachmentRefsForBody(body, ready);
+          const extraContent = {
+            ...(bundleId ? { bundle_id: bundleId } : {}),
+            ...(attachmentRefs.length > 0 ? { attachment_refs: attachmentRefs } : {}),
+          };
+          sendTextOptimistic(
+            body,
+            Object.keys(extraContent).length > 0 ? extraContent : undefined,
+          );
+        }
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
       } finally {
@@ -1621,9 +1688,9 @@ export function Composer({
               } else {
                 setEmojiQuery(null);
               }
-              // `@handle` autocomplete for the people in this room.
+              // `@handle` autocomplete for people and staged attachments.
               const at = upTo.match(MENTION_RE);
-              if (at && mentionCandidates.length > 0) {
+              if (at && composerMentionCandidates.length > 0) {
                 setMentionQuery(at[1] ?? "");
                 setMentionIdx(0);
               } else {

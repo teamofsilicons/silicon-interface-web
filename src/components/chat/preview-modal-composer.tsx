@@ -18,6 +18,7 @@ export function PreviewModalComposer({ replyToEventId, onSent }: { replyToEventI
   if (!roomSend) return null;
 
   const body = text.trim();
+  const textareaRows = Math.min(Math.max(text.split("\n").length, 1), 5);
 
   const submit = async () => {
     if (!body || sending || roomSend.readOnly) return;
@@ -61,8 +62,8 @@ export function PreviewModalComposer({ replyToEventId, onSent }: { replyToEventI
           placeholder="Message while viewing preview..."
           aria-describedby={statusId}
           disabled={roomSend.readOnly || sending}
-          rows={1}
-          className="max-h-28 min-h-11 flex-1 resize-none overflow-y-auto border bg-card px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground disabled:opacity-60"
+          rows={textareaRows}
+          className="max-h-32 min-h-11 flex-1 resize-y overflow-y-auto border bg-card px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground disabled:opacity-60"
         />
         <Button
           type="button"

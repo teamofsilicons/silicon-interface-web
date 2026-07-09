@@ -23,6 +23,7 @@ import {
 import { cn } from "@/lib/utils";
 
 import { MarkdownView } from "./markdown-view";
+import { PreviewModalComposer } from "./preview-modal-composer";
 import { SourceCodeViewer } from "./source-code-viewer";
 
 interface Props {
@@ -100,7 +101,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[95vh] w-[min(96vw,1100px)] max-w-none gap-0 overflow-hidden p-0">
+      <DialogContent className="flex h-[95vh] w-[min(96vw,1100px)] max-w-none flex-col gap-0 overflow-hidden p-0">
         {/* Required for a11y — Radix throws a console error if there is no
             DialogTitle. We don't want it visible, so wrap in sr-only. */}
         <DialogHeader className="sr-only">
@@ -135,7 +136,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
         </div>
         <div
           className={cn(
-            "flex max-h-[82vh] min-h-[40vh] bg-card",
+            "flex min-h-0 flex-1 bg-card",
             // Text is top-left aligned and scrolls; media is centered.
             isText || isPdf
               ? renderedSourceOpen
@@ -149,11 +150,11 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             <img
               src={url}
               alt={label}
-              className="sdr-media max-h-[80vh] max-w-full object-contain"
+              className="sdr-media max-h-full max-w-full object-contain"
             />
           )}
           {isVideo && (
-            <video src={url} controls autoPlay className="max-h-[80vh] max-w-full" />
+            <video src={url} controls autoPlay className="max-h-full max-w-full" />
           )}
           {isAudio && (
             <audio src={url} controls autoPlay className="w-[min(80vw,520px)] p-6" />
@@ -162,11 +163,11 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             <iframe
               src={url}
               title={label}
-              className="h-[80vh] w-full border-0"
+              className="h-full min-h-[40vh] w-full border-0"
             />
           )}
           {isText && (
-            <div className={cn("w-full", renderedSourceOpen ? "h-[82vh]" : "p-6")}>
+            <div className={cn("w-full", renderedSourceOpen ? "h-full min-h-[40vh]" : "p-6")}>
               {textError ? (
                 <p className="text-sm text-muted-foreground">
                   couldn&rsquo;t load the file - use the download button.
@@ -194,6 +195,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             </p>
           )}
         </div>
+        <PreviewModalComposer />
       </DialogContent>
     </Dialog>
   );

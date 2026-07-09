@@ -5,6 +5,7 @@ import * as React from "react";
 import { api } from "./api";
 import { authStore } from "./auth";
 import { loadCachedTeams, saveCachedTeams } from "./sidebar-cache";
+import { normalizeTeams } from "./team-shape";
 import type { Team } from "./types";
 
 /** Loads the teams the current principal belongs to. */
@@ -23,7 +24,7 @@ export function useTeams() {
 
   const refresh = React.useCallback(async () => {
     try {
-      const next = await api.teams();
+      const next = normalizeTeams(await api.teams());
       setTeams(next);
       if (ownerId) saveCachedTeams(ownerId, next);
     } catch {
@@ -45,7 +46,7 @@ export function useTeams() {
     }
     (async () => {
       try {
-        const next = await api.teams();
+        const next = normalizeTeams(await api.teams());
         if (!alive) return;
         setTeams(next);
         if (ownerId) saveCachedTeams(ownerId, next);
@@ -65,5 +66,5 @@ export function useTeams() {
 /** Is the signed-in Carbon a head of this team? */
 export function isTeamHead(team: Team): boolean {
   const me = authStore.getCarbon();
-  return Boolean(me && team.team_heads.includes(me.carbon_id));
+  return Boolean(me && Array.isArray(team.team_heads) && team.team_heads.includes(me.carbon_id));
 }

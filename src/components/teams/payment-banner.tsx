@@ -14,12 +14,77 @@ import { IdAvatar } from "@/components/profile/id-avatar";
 // Cache the last-seen banner rows so a reload shows them instantly instead of
 // flashing nothing while billing re-fetches.
 const CACHE_KEY = "silicon-interface:payment-banner";
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function str(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function nullableStr(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function number(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizePayment(value: unknown): PaymentStatus | null {
+  const raw = asRecord(value);
+  if (!raw) return null;
+  const state =
+    raw.state === "ok" || raw.state === "warning" || raw.state === "grace" || raw.state === "paused"
+      ? raw.state
+      : "warning";
+  return {
+    state,
+    due_date: nullableStr(raw.due_date),
+    days_left: nullableNumber(raw.days_left),
+    pause_date: nullableStr(raw.pause_date),
+    days_to_pause: nullableNumber(raw.days_to_pause),
+    grace_days: number(raw.grace_days),
+    amount_cents: number(raw.amount_cents),
+    currency: str(raw.currency, "USD"),
+    cycle_id: nullableNumber(raw.cycle_id) ?? undefined,
+  };
+}
+
+function normalizeTeamPayment(value: unknown): TeamPayment | null {
+  const raw = asRecord(value);
+  if (!raw) return null;
+  const slug = str(raw.slug);
+  if (!slug) return null;
+  const payment = normalizePayment(raw.payment);
+  if (!payment) return null;
+  return {
+    slug,
+    name: str(raw.name, slug),
+    logo_url: nullableStr(raw.logo_url),
+    payment,
+  };
+}
+
+function shouldShowPayment(row: TeamPayment): boolean {
+  return row.payment.state !== "ok" && row.payment.amount_cents > 0;
+}
+
 function readCache(): TeamPayment[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = window.sessionStorage.getItem(CACHE_KEY);
-    const arr = raw ? (JSON.parse(raw) as TeamPayment[]) : [];
-    return Array.isArray(arr) ? arr : [];
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr)
+      ? arr
+          .map(normalizeTeamPayment)
+          .filter((row): row is TeamPayment => row !== null)
+          .filter(shouldShowPayment)
+      : [];
   } catch {
     return [];
   }
@@ -27,7 +92,7 @@ function readCache(): TeamPayment[] {
 function writeCache(rows: TeamPayment[]): void {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.setItem(CACHE_KEY, JSON.stringify(rows));
+    window.sessionStorage.setItem(CACHE_KEY, JSON.stringify(rows.filter(shouldShowPayment)));
   } catch {
     /* quota / unavailable — non-fatal */
   }
@@ -41,8 +106,9 @@ interface TeamPayment {
 }
 
 /** Local day delta so the countdown advances daily without re-polling. */
-function daysUntil(due: string): number {
+function daysUntil(due: string): number | null {
   const target = new Date(`${due}T00:00:00`);
+  if (!Number.isFinite(target.getTime())) return null;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return Math.round((target.getTime() - today.getTime()) / 86_400_000);
@@ -72,9 +138,7 @@ export function PaymentBanner() {
   const { teams } = useTeams();
   // Seed from cache so the banner shows instantly on reload (dropping any stale
   // $0 rows so they don't flash before the re-fetch).
-  const [rows, setRows] = React.useState<TeamPayment[]>(() =>
-    readCache().filter((r) => r.payment.amount_cents > 0),
-  );
+  const [rows, setRows] = React.useState<TeamPayment[]>(readCache);
   const [index, setIndex] = React.useState(0);
   const [, setDay] = React.useState(() => new Date().toDateString());
 
@@ -95,17 +159,16 @@ export function PaymentBanner() {
         headTeams.map(async (t) => {
           try {
             const b = await api.teamBilling(t.slug);
+            const payment = normalizePayment(b.payment);
             // Nothing owed ($0.00) ⇒ no banner, even if state isn't "ok".
-            return b.payment && b.payment.state !== "ok" && b.payment.amount_cents > 0
-              ? { ...t, payment: b.payment }
-              : null;
+            return payment && shouldShowPayment({ ...t, payment }) ? { ...t, payment } : null;
           } catch {
             return null;
           }
         }),
       );
       if (alive) {
-        const next = out.filter(Boolean) as TeamPayment[];
+        const next = (out.filter(Boolean) as TeamPayment[]).filter(shouldShowPayment);
         setRows(next);
         writeCache(next);
       }

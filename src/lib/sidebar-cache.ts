@@ -2,6 +2,7 @@
 
 import type { Contact, Room, Team } from "./types";
 import { normalizeRooms } from "./room-shape";
+import { normalizeTeams } from "./team-shape";
 
 // v3: membership map is keyed by carbon_id/silicon_id (was name/handle in v≤2).
 const VERSION = 3;
@@ -60,7 +61,7 @@ function read(ownerId: string): SidebarCache | null {
       ownerId,
       rooms: normalizeRooms(parsed.rooms),
       contacts: parsed.contacts,
-      teams: Array.isArray(parsed.teams) ? parsed.teams : [],
+      teams: normalizeTeams(parsed.teams),
       memberships:
         parsed.memberships && typeof parsed.memberships === "object"
           ? (parsed.memberships as Record<string, string[]>)
@@ -124,7 +125,7 @@ export function loadCachedTeams(ownerId: string): Team[] | null {
 }
 
 export function saveCachedTeams(ownerId: string, teams: Team[]) {
-  write(ownerId, { teams });
+  write(ownerId, { teams: normalizeTeams(teams) });
 }
 
 /** Returns the cached `${kind}:${handle}` → team-slugs map, or null when there

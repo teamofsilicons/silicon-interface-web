@@ -1065,6 +1065,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   };
 
   const roomIncludesSilicon = room.peers.some((p) => p.kind === "silicon");
+  const canUnsendMessage = React.useCallback(
+    (ev: LocalEvent | Event) => {
+      if (!isMyEvent(ev, myUsername)) return false;
+      if (ev.redacted_at) return false;
+      const local = ev as LocalEvent;
+      const isHeldOrPending = ev.event_id.startsWith("temp-") && Boolean(local._clientId);
+      if (isHeldOrPending) return true;
+      if (roomIncludesSilicon) return false;
+      return local._status !== "read";
+    },
+    [myUsername, roomIncludesSilicon],
+  );
   const canEditMessage = React.useCallback(
     (ev: LocalEvent | Event) => {
       if (!isMyEvent(ev, myUsername)) return false;
@@ -2125,7 +2137,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   onToggleSelect={readOnly ? undefined : toggleSelect}
                   onRetry={readOnly ? undefined : retrySend}
                   onDelete={
-                    readOnly
+                    readOnly || !canUnsendMessage(e)
                       ? undefined
                       : (target) =>
                           onSelfDelete(target, pinsByKey.get(e._clientId ?? e.event_id) ?? [])

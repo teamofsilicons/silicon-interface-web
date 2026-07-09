@@ -158,16 +158,6 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
             sender will be shown.
           </DialogDescription>
         </DialogHeader>
-        <div className="border-b px-3 py-2">
-          <textarea
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            placeholder="add a comment (optional)"
-            maxLength={4000}
-            rows={3}
-            className="max-h-28 min-h-16 w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
         <div className="flex items-center gap-2 border-b px-3 py-2">
           <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
           <input
@@ -218,6 +208,16 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
             );
           })}
         </ul>
+        <div className="border-t px-3 py-2">
+          <textarea
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="add a comment (optional)"
+            maxLength={4000}
+            rows={3}
+            className="max-h-28 min-h-16 w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          />
+        </div>
         <div className="flex items-center justify-between border-t px-4 py-3">
           <span className="label-mono text-[10px] text-muted-foreground">
             {selected.size} selected

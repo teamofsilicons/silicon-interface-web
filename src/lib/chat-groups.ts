@@ -86,7 +86,12 @@ function migrateV1(groups: LegacyGroup[]): GroupStore {
 
 export function loadGroupStore(ownerId: string): GroupStore {
   if (typeof window === "undefined" || !ownerId) return empty();
-  const raw = window.localStorage.getItem(key(ownerId));
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(key(ownerId));
+  } catch {
+    return empty();
+  }
   if (!raw) return empty();
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;

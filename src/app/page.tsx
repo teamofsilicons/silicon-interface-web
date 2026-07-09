@@ -2,20 +2,24 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 
 import { authStore } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
 
 export default function HomePage() {
-  const router = useRouter();
   // Already signed in → straight to the chats. The auth check runs only after
   // mount (localStorage is client-only); the landing renders identically on the
   // server and first client render, so there's no hydration mismatch.
   React.useEffect(() => {
-    if (authStore.getAccess() || authStore.getSiliconKey()) router.replace("/chat");
-  }, [router]);
+    if (authStore.getAccess() || authStore.getSiliconKey()) {
+      // Use a document navigation here, not an App Router transition. If a
+      // long-idle tab has stale route/chunk state, a soft transition from the
+      // landing page can fall through to Next's global "page couldn't load"
+      // screen. A hard replace gives /chat a clean boot from the latest HTML.
+      window.location.replace("/chat");
+    }
+  }, []);
 
   return (
     <main className="stagger-fade-in bg-dots flex h-screen flex-col items-center justify-center overflow-hidden px-6 text-center">

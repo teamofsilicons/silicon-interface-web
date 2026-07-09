@@ -3,6 +3,7 @@ import { JetBrains_Mono, TikTok_Sans } from "next/font/google";
 import { Toaster } from "sonner";
 
 import { PushInit } from "@/components/push-init";
+import { RouteRecovery } from "@/components/route-recovery";
 
 import "./globals.css";
 
@@ -33,6 +34,7 @@ export default function RootLayout({
           other auth/landing pages by virtue of their own min-h-screen flex
           containers, which still render correctly inside an h-full body. */}
       <body className="flex h-full flex-col bg-background text-foreground">
+        <RouteRecovery />
         <PushInit />
         {children}
         {/* Sonner — brand-themed. richColors would override our palette, so

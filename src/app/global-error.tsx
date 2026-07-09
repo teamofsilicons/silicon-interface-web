@@ -1,0 +1,46 @@
+"use client";
+
+import * as React from "react";
+
+import { markRecoveryAttempt } from "@/lib/recovery";
+
+export default function GlobalError({
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  React.useEffect(() => {
+    if (markRecoveryAttempt("global-error", 10_000)) {
+      window.location.reload();
+    }
+  }, []);
+
+  return (
+    <html lang="en">
+      <body
+        style={{
+          margin: 0,
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          background: "#ede8e0",
+          color: "#1a1a1a",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        }}
+      >
+        <main style={{ display: "grid", gap: 16, justifyItems: "center", textAlign: "center" }}>
+          <div style={{ fontSize: 14 }}>interface hit a bad page state</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={() => window.location.reload()}>
+              Reload
+            </button>
+            <button type="button" onClick={reset}>
+              Try again
+            </button>
+          </div>
+        </main>
+      </body>
+    </html>
+  );
+}

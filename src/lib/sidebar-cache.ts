@@ -37,7 +37,12 @@ function empty(ownerId: string): SidebarCache {
 
 function read(ownerId: string): SidebarCache | null {
   if (typeof window === "undefined" || !ownerId) return null;
-  const raw = window.localStorage.getItem(key(ownerId));
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(key(ownerId));
+  } catch {
+    return null;
+  }
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<SidebarCache>;
@@ -84,7 +89,11 @@ function write(
     try {
       window.localStorage.setItem(key(ownerId), JSON.stringify(pruned));
     } catch {
-      window.localStorage.removeItem(key(ownerId));
+      try {
+        window.localStorage.removeItem(key(ownerId));
+      } catch {
+        /* storage unavailable — cache is best-effort */
+      }
     }
   }
 }

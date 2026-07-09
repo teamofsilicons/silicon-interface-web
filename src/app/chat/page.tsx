@@ -164,8 +164,12 @@ function saveOpenFolder(ownerId: string | null, teamSlug: string | null, groupId
 
 function loadSidebarWidth(): number {
   if (typeof window === "undefined") return SB_DEFAULT;
-  const v = Number(window.localStorage.getItem(SB_STORAGE));
-  return Number.isFinite(v) && v >= SB_MIN && v <= SB_MAX ? v : SB_DEFAULT;
+  try {
+    const v = Number(window.localStorage.getItem(SB_STORAGE));
+    return Number.isFinite(v) && v >= SB_MIN && v <= SB_MAX ? v : SB_DEFAULT;
+  } catch {
+    return SB_DEFAULT;
+  }
 }
 
 // Persist the sidebar filters (team selection, unread, kinds) so a reload keeps

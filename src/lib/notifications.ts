@@ -48,7 +48,12 @@ function notify(ownerId: string) {
 function read(ownerId: string): StoredNotifications {
   const empty: StoredNotifications = { version: VERSION, ownerId, items: [], unreadExtra: 0 };
   if (typeof window === "undefined" || !ownerId) return empty;
-  const raw = window.localStorage.getItem(key(ownerId));
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(key(ownerId));
+  } catch {
+    return empty;
+  }
   if (!raw) return empty;
   try {
     const parsed = JSON.parse(raw) as Partial<StoredNotifications>;
@@ -109,7 +114,11 @@ function persist(ownerId: string, items: InterfaceNotification[], unreadExtra: n
       // folding the additionally-dropped items into unreadExtra (handled in write).
       write(30, unreadExtra);
     } catch {
-      window.localStorage.removeItem(key(ownerId));
+      try {
+        window.localStorage.removeItem(key(ownerId));
+      } catch {
+        /* storage unavailable — notification cache is best-effort */
+      }
     }
   }
   notify(ownerId);

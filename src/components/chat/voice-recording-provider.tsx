@@ -156,15 +156,22 @@ export function VoiceRecordingProvider({
   React.useEffect(() => {
     if (!ownerKey) {
       const cur = draftRef.current;
+      if (cur) {
+        deletingDraftIdsRef.current.add(cur.draftId);
+        draftRef.current = null;
+        setDraft(null);
+      }
       if (cur?.status === "recording") {
         stopActiveRecorder("discard");
         bcRef.current?.postMessage({ ownerKey: cur.ownerKey, active: false });
         api.activity(cur.roomId, "recording", false).catch(() => undefined);
       }
       chunksRef.current = [];
-      pendingAppendsRef.current.clear();
-      void clearAllVoiceDrafts().catch(() => undefined);
-      queueMicrotask(() => setDraft(null));
+      void (async () => {
+        await waitForPendingAppends();
+        await clearAllVoiceDrafts().catch(() => undefined);
+        if (cur) deletingDraftIdsRef.current.delete(cur.draftId);
+      })();
       return;
     }
     void (async () => {
@@ -185,7 +192,7 @@ export function VoiceRecordingProvider({
         void putVoiceMeta(recovered);
       }
     })().catch(() => undefined);
-  }, [ownerKey, stopActiveRecorder]);
+  }, [ownerKey, stopActiveRecorder, waitForPendingAppends]);
 
   React.useEffect(() => {
     return () => {
@@ -302,16 +309,18 @@ export function VoiceRecordingProvider({
           chunksRef.current.push(blob);
           const seq = chunkSeqRef.current++;
           const appendPromise = appendVoiceChunk(draftId, seq, blob)
-            .then(() => {
+            .then(async () => {
+              if (deletingDraftIdsRef.current.has(draftId)) return;
               const cur = draftRef.current;
               if (!cur || cur.draftId !== draftId) return;
-              void persistMeta({
+              await persistMeta({
                 bytes: cur.bytes + blob.size,
                 chunkCount: Math.max(cur.chunkCount, seq + 1),
                 durationMs: Date.now() - startedAtRef.current,
               });
             })
             .catch(() => {
+              if (deletingDraftIdsRef.current.has(draftId)) return;
               toast.error("Storage is full. We stopped and kept this recording in memory only.");
               try {
                 rec.requestData();

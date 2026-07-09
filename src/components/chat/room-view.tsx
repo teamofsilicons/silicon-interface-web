@@ -25,7 +25,8 @@ import {
   failPendingPreview,
 } from "@/lib/pending-preview";
 import { advanceEventCursor } from "@/lib/event-cursor";
-import { ackOutbox } from "@/lib/outbox";
+import { track } from "@/lib/analytics";
+import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
 
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,7 @@ import {
   type OptimisticPayload,
 } from "@/components/chat/composer";
 import { ForwardDialog } from "@/components/chat/forward-dialog";
+import { RoomSendProvider } from "@/components/chat/room-send-context";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 import { CronDrawer } from "@/components/chat/cron-drawer";
@@ -101,6 +103,11 @@ interface ProgressEntry {
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
+
+function newClientId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 /** One-line text for an outgoing (optimistic) message, shown in the sidebar
  *  preview while it's waiting / in flight. No emojis — the row renders an icon. */
@@ -1673,6 +1680,44 @@ export function RoomView({
     }
   }, [sayingHi, onOptimisticAdd, onAck, onFail, room.room_id]);
 
+  const sendPreviewText = React.useCallback(
+    async (body: string, options?: { replyToEventId?: string }) => {
+      if (readOnly) throw new Error("room is read-only");
+      const clientId = newClientId();
+      const payload: OptimisticPayload = {
+        type: "m.text",
+        content: { body },
+        reply_to_event_id: options?.replyToEventId,
+      };
+      onOptimisticAdd(clientId, payload);
+      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+      if (outboxOwner) {
+        enqueueOutbox(outboxOwner, {
+          roomId: room.room_id,
+          clientId,
+          body,
+          replyTo: options?.replyToEventId,
+          at: Date.now(),
+        });
+      }
+      try {
+        const real = await api.sendEvent(room.room_id, payload, clientId);
+        if (outboxOwner) ackOutbox(outboxOwner, clientId);
+        onAck(clientId, real);
+        track.messageSent({ room_id: room.room_id, message_type: "m.text", is_reply: Boolean(options?.replyToEventId) });
+      } catch (e) {
+        onFail(clientId, e);
+        throw e;
+      }
+    },
+    [onAck, onFail, onOptimisticAdd, readOnly, room.room_id],
+  );
+
+  const roomSendValue = React.useMemo(
+    () => ({ roomId: room.room_id, readOnly, sendText: sendPreviewText }),
+    [readOnly, room.room_id, sendPreviewText],
+  );
+
   // ----- Drag-and-drop a file onto the chat surface -----
   const onDragEnter = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes("Files")) return;
@@ -2224,11 +2269,12 @@ export function RoomView({
   const searching = !!search?.trim();
 
   return (
-    // `min-h-0` is the key — without it, a flex child grows to its content's
-    // intrinsic height, the chat list overflows the viewport, and the
-    // sidebar/composer get pushed down. With min-h-0 the section participates
-    // in flex sizing properly and only the inner ScrollArea scrolls.
-    <section
+    <RoomSendProvider value={roomSendValue}>
+      {/* `min-h-0` is the key — without it, a flex child grows to its content's
+          intrinsic height, the chat list overflows the viewport, and the
+          sidebar/composer get pushed down. With min-h-0 the section participates
+          in flex sizing properly and only the inner ScrollArea scrolls. */}
+      <section
       ref={sectionRef}
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
@@ -2560,7 +2606,8 @@ export function RoomView({
           </div>
         </DialogContent>
       </Dialog>
-    </section>
+      </section>
+    </RoomSendProvider>
   );
 }
 

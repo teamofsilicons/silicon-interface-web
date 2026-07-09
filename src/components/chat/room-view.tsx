@@ -171,11 +171,58 @@ function ChatListHeader({ loadingOlder }: { loadingOlder: boolean }) {
 }
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const MAX_PROGRESS_LINE_CHARS = 64;
-// Initial window + pagination page size. Matches ROOM_SNIPPET_LIMIT so the
-// cached paint and the first server fetch cover the same recent messages — a
-// near-identical list, so hydration doesn't reflow/glitch. Older history loads
-// a page at a time as you scroll up.
+// Visible-message target for the initial window and each older-history load.
+// Matches ROOM_SNIPPET_LIMIT so the cache can paint roughly the same timeline
+// while the raw server events reconcile in the background.
 const PAGE_SIZE = 30;
+// Glass caps a room-events request at 200 rows. Once a raw page is dominated
+// by hidden metadata (progress, reactions, redactions), use the larger page to
+// reach the next visible messages without issuing dozens of tiny requests.
+const RAW_SCAN_PAGE_SIZE = 200;
+
+function isTimelineEvent(event: Event): boolean {
+  return event.type !== "m.reaction" && event.type !== "m.progress" && !event.redacted_at;
+}
+
+/**
+ * Load roughly one timeline page, not merely one raw-event page. Progress and
+ * reaction rows are still returned so live state remains correct, but they do
+ * not count toward the visible-message target. Without this scan, a silicon's
+ * progress-heavy tail can fill the latest API page and make an established
+ * conversation look empty with no scroll surface available to reach history.
+ */
+async function loadTimelineWindow(roomId: string, before?: string) {
+  const pages: Event[][] = [];
+  const seenCursors = new Set<string>();
+  let cursor = before;
+  let visibleCount = 0;
+  let requestLimit = PAGE_SIZE;
+  let hasMore = false;
+
+  while (visibleCount < PAGE_SIZE) {
+    const page = await api.events(roomId, cursor, requestLimit);
+    if (page.length === 0) {
+      hasMore = false;
+      break;
+    }
+
+    pages.unshift(page);
+    visibleCount += page.filter(isTimelineEvent).length;
+    hasMore = page.length >= requestLimit;
+    if (!hasMore || visibleCount >= PAGE_SIZE) break;
+
+    const nextCursor = page[0]?.event_id;
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      hasMore = false;
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+    requestLimit = RAW_SCAN_PAGE_SIZE;
+  }
+
+  return { events: pages.flat(), hasMore };
+}
 
 // Receipt progression is monotonic — pending → sent → delivered → read. The WS
 // echo ("delivered") and read_receipts ("read") often land BEFORE the HTTP send
@@ -558,16 +605,15 @@ export function RoomView({
   );
 
   // ----- Initial events load -----
-  // Single fetch on mount / room-switch. We don't poll thereafter — the WS
-  // delivers events and read_receipts in real time, and re-polling just
-  // duplicates work and (worse) cascades into extra `api.read` calls via the
-  // auto-read effect below. The 10s "ping" the design asks for is just a
-  // re-render tick for `relativeTime`, not a network fetch.
+  // Load on mount / room-switch. We don't poll thereafter — the WS delivers
+  // events and read_receipts in real time, and re-polling just duplicates work
+  // and (worse) cascades into extra `api.read` calls via the auto-read effect
+  // below. The 10s "ping" is just a re-render tick for `relativeTime`.
   React.useEffect(() => {
     let mounted = true;
     const roomId = room.room_id;
     const cachedEvents = readRoomEventSnippet(roomId);
-    setLoading(false);
+    setLoading(!cachedEvents?.some(isTimelineEvent));
     setHydrated(false);
     // Messages present when the chat opens are historical — force them final so
     // a missed finalize frame doesn't replay the "streaming…" state as if the
@@ -587,9 +633,8 @@ export function RoomView({
     setUnseenBelow(false);
     deltaBufferRef.current.clear();
     firstContactRef.current = false;
-    api
-      .events(roomId, undefined, PAGE_SIZE)
-      .then((evs) => {
+    loadTimelineWindow(roomId)
+      .then(({ events: evs, hasMore }) => {
         if (!mounted) return;
         // Room loads count as "seen" for the global resync cursor.
         const owner = authStore.getCarbon()?.carbon_id;
@@ -601,7 +646,7 @@ export function RoomView({
           const finalized = evs.map((e) => ({ ...e, is_final: true }));
           return mergeServerEvents(pending, finalized, myUsername);
         });
-        setHasMore(evs.length >= PAGE_SIZE); // a full window may have older history
+        setHasMore(hasMore);
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
         setLoading(false);
       })
@@ -1272,10 +1317,7 @@ export function RoomView({
     // render a "Silicon finished" row — and, worse, it sat between two of a
     // silicon's messages and broke the (sender, minute) run, so avatars showed
     // on some of its messages and not others.
-    () =>
-      events.filter(
-        (e) => e.type !== "m.reaction" && e.type !== "m.progress" && !e.redacted_at,
-      ),
+    () => events.filter(isTimelineEvent),
     [events],
   );
 
@@ -2099,7 +2141,10 @@ export function RoomView({
     if (!oldest) return;
     setLoadingOlder(true);
     try {
-      const older = await api.events(room.room_id, oldest.event_id, PAGE_SIZE);
+      const { events: older, hasMore: olderHasMore } = await loadTimelineWindow(
+        room.room_id,
+        oldest.event_id,
+      );
       if (older.length === 0) {
         setHasMore(false);
         return;
@@ -2122,7 +2167,7 @@ export function RoomView({
           }));
         return [...fresh, ...prev];
       });
-      setHasMore(older.length >= PAGE_SIZE);
+      setHasMore(olderHasMore);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {

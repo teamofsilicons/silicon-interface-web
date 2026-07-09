@@ -201,9 +201,10 @@ export function RoomView({
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
+  const peers = React.useMemo(() => (Array.isArray(room.peers) ? room.peers : []), [room.peers]);
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
   // header title (saved name vs @id), avatar, and the Save Contact button.
-  const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
+  const peer = room.kind === "direct" && peers.length === 1 ? peers[0] : null;
   const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
   const [siliconConnectionState, setSiliconConnectionState] = React.useState(
     peer?.kind === "silicon" ? peer.connection_state || "online" : "online",
@@ -227,7 +228,7 @@ export function RoomView({
   // room I may only watch. No composer, no reactions/replies/take-backs, and
   // no read-receipts (I'm not a member, so the read POST would 403 anyway).
   const readOnly = !!room.observed;
-  const showsProgressForReplies = !readOnly && room.peers.some((p) => p.kind === "silicon");
+  const showsProgressForReplies = !readOnly && peers.some((p) => p.kind === "silicon");
 
   React.useEffect(() => {
     if (peer?.kind !== "silicon" || connectionStatePending) return;
@@ -374,24 +375,24 @@ export function RoomView({
   // Build a (kind, id) → handle lookup so activity frames can name a sender.
   const memberHandleLookup = React.useMemo(() => {
     const m = new Map<string, string>();
-    for (const p of room.peers) {
+    for (const p of peers) {
       m.set(`${p.kind}.${p.handle}`, p.handle);
     }
     return m;
-  }, [room.peers]);
+  }, [peers]);
   const handleFor = React.useCallback(
     (kind: "carbon" | "silicon", id: number): string | null => {
       // We don't reliably know peer member_id ↔ handle on the client (Glass
       // doesn't expose Carbon.id). For 1-on-1 rooms there's exactly one
       // peer — assume it's them. For groups we'd need an extra projection;
       // until then we degrade gracefully to a generic "typing…".
-      if (room.peers.length === 1) return room.peers[0].handle;
+      if (peers.length === 1) return peers[0].handle;
       // Fallback: any peer whose kind matches.
-      return room.peers.find((p) => p.kind === kind)?.handle ?? null;
+      return peers.find((p) => p.kind === kind)?.handle ?? null;
     },
     // memberHandleLookup is used for future group lookups; kept in deps so
     // a future projection refresh re-evaluates.
-    [room.peers, memberHandleLookup],
+    [peers, memberHandleLookup],
   );
 
   const sectionRef = React.useRef<HTMLElement>(null);
@@ -424,9 +425,9 @@ export function RoomView({
   // ----- Photo URL lookup per sender (for in-message avatars) -----
   const peerByHandle = React.useMemo(() => {
     const m = new Map<string, Room["peers"][number]>();
-    for (const p of room.peers) m.set(p.handle, p);
+    for (const p of peers) m.set(p.handle, p);
     return m;
-  }, [room.peers]);
+  }, [peers]);
   // In a team chat, `@` should offer everyone on the team — not just whoever is
   // already a peer in this room. Load the team roster when the room belongs to a
   // team; direct/Others chats fall back to the room peers alone.
@@ -462,8 +463,8 @@ export function RoomView({
       if (p.name) idByLabel.set(`${p.kind}:${p.name.toLowerCase()}`, p.id);
       if (p.handle) idByLabel.set(`${p.kind}:${p.handle.toLowerCase()}`, p.id);
     };
-    for (const r of allRooms) for (const p of r.peers) indexPeer(p);
-    for (const p of room.peers) indexPeer(p);
+    for (const r of allRooms) for (const p of Array.isArray(r.peers) ? r.peers : []) indexPeer(p);
+    for (const p of peers) indexPeer(p);
 
     const seen = new Map<string, MentionCandidate>();
     const add = (c: MentionCandidate) => {
@@ -471,7 +472,7 @@ export function RoomView({
       if (!seen.has(key)) seen.set(key, c);
     };
     // Room peers first — their `id` is the canonical @-mention handle.
-    for (const p of room.peers) {
+    for (const p of peers) {
       add({
         kind: p.kind,
         handle: p.id,
@@ -495,7 +496,7 @@ export function RoomView({
       });
     }
     return [...seen.values()];
-  }, [room.peers, allRooms, teamRoster, myUsername]);
+  }, [peers, allRooms, teamRoster, myUsername]);
   const contactForSender = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
@@ -508,15 +509,15 @@ export function RoomView({
   );
   const peerPhotoByHandle = React.useMemo(() => {
     const m = new Map<string, string | null>();
-    for (const p of room.peers) m.set(p.handle, p.profile_photo_url);
+    for (const p of peers) m.set(p.handle, p.profile_photo_url);
     return m;
-  }, [room.peers]);
+  }, [peers]);
   // §0a — per-handle ASCII treatment, parallel to the photo map.
   const peerAsciiByHandle = React.useMemo(() => {
     const m = new Map<string, string | null>();
-    for (const p of room.peers) m.set(p.handle, p.profile_ascii_url ?? null);
+    for (const p of peers) m.set(p.handle, p.profile_ascii_url ?? null);
     return m;
-  }, [room.peers]);
+  }, [peers]);
   const myPhotoUrl = carbon?.profile_photo_url ?? null;
   const myAscii = carbon?.profile_ascii_url ?? null;
   const photoFor = React.useCallback(
@@ -1106,7 +1107,7 @@ export function RoomView({
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
   };
 
-  const roomIncludesSilicon = room.peers.some((p) => p.kind === "silicon");
+  const roomIncludesSilicon = peers.some((p) => p.kind === "silicon");
   const canUnsendMessage = React.useCallback(
     (ev: LocalEvent | Event) => {
       if (!isMyEvent(ev, myUsername)) return false;

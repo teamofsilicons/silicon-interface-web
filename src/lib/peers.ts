@@ -26,12 +26,13 @@ export interface RoomDisplay {
  * derived from the member kinds) and a subtitle that summarizes membership.
  */
 export function roomDisplay(room: Room): RoomDisplay {
+  const peers = Array.isArray(room.peers) ? room.peers : [];
   if (room.kind === "direct") {
     // Observer view: a silicon↔silicon room excludes no one (I'm not a member),
     // so both participants land in `peers`. Label it with both names so the
     // spectated conversation reads as "Ada ↔ Babbage".
-    if (room.observed && room.peers.length >= 2) {
-      const [a, b] = room.peers;
+    if (room.observed && peers.length >= 2) {
+      const [a, b] = peers;
       const label = (p: RoomPeer) => p.name?.trim() || p.handle;
       return {
         name: `${label(a)} ↔ ${label(b)}`,
@@ -42,8 +43,8 @@ export function roomDisplay(room: Room): RoomDisplay {
         subtitle: "Silicon ↔ Silicon",
       };
     }
-    if (room.peers.length > 0) {
-      const peer = room.peers[0];
+    if (peers.length > 0) {
+      const peer = peers[0];
       return {
         name: peer.name?.trim() || peer.handle,
         handle: peer.handle,
@@ -74,8 +75,8 @@ export function roomDisplay(room: Room): RoomDisplay {
     asciiUrl: null,
     peer: null,
     subtitle:
-      room.peers.length > 0
-        ? `${room.peers.length + 1} members`
+      peers.length > 0
+        ? `${peers.length + 1} members`
         : (room.topic || "group"),
   };
 }

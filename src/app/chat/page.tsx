@@ -20,6 +20,7 @@ import { playReceived, playReceivedSilicon } from "@/lib/sounds";
 import type { Contact, Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, setRoomProgress } from "@/lib/progress-cache";
 import { appendRoomEventSnippet } from "@/lib/room-snippet";
+import { normalizeRoom, normalizeRooms } from "@/lib/room-shape";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
@@ -409,7 +410,7 @@ function ChatPageInner() {
     for (const r of rooms) {
       const slugs = new Set<string>();
       if (r.team_slug) slugs.add(r.team_slug);
-      for (const p of r.peers) {
+      for (const p of Array.isArray(r.peers) ? r.peers : []) {
         const s = peerTeams.get(`${p.kind}:${p.id}`);
         if (s) for (const slug of s) slugs.add(slug);
       }
@@ -527,11 +528,13 @@ function ChatPageInner() {
   const groupsOwnerRef = React.useRef<string | null>(null);
 
   const upsertRoom = React.useCallback((room: Room) => {
+    const normalized = normalizeRoom(room);
+    if (!normalized) return;
     setRooms((prev) => {
-      const idx = prev.findIndex((r) => r.room_id === room.room_id);
-      if (idx === -1) return [...prev, room];
+      const idx = prev.findIndex((r) => r.room_id === normalized.room_id);
+      if (idx === -1) return [...prev, normalized];
       const next = prev.slice();
-      next[idx] = { ...prev[idx], ...room };
+      next[idx] = { ...prev[idx], ...normalized };
       return next;
     });
   }, []);
@@ -625,7 +628,7 @@ function ChatPageInner() {
     const run = (async () => {
       setRefreshing(true);
       try {
-        const next = await api.rooms();
+        const next = normalizeRooms(await api.rooms());
         setRooms(next);
         if (ownerId) {
           saveCachedRooms(ownerId, next);
@@ -1116,10 +1119,11 @@ function ChatPageInner() {
         }
       }
       if (filters.unread && !r.unread) return false;
-      if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
+      const peerKinds = Array.isArray(r.peer_kinds) ? r.peer_kinds : [];
+      if (filters.kinds.length && !filters.kinds.some((k) => peerKinds.includes(k))) return false;
       if (q) {
         const hayName = (r.name || "").toLowerCase();
-        const hayPeer = r.peers
+        const hayPeer = (Array.isArray(r.peers) ? r.peers : [])
           .map((p) => `${p.name} ${p.handle}`)
           .join(" ")
           .toLowerCase();
@@ -1201,7 +1205,8 @@ function ChatPageInner() {
       const resolve = (room: Room): string | null => {
         const o = groupStore.overrides[room.room_id];
         if (o !== undefined) return o === "" || !folderIds.has(o) ? null : o;
-        const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
+        const peers = Array.isArray(room.peers) ? room.peers : [];
+        const peer = room.kind === "direct" && peers.length === 1 ? peers[0] : null;
         if (peer && peer.kind === "silicon") {
           const fid = assignAll[peer.id];
           if (fid && folderIds.has(fid)) return fid;

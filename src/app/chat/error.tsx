@@ -5,19 +5,26 @@ import * as React from "react";
 import { markRecoveryAttempt } from "@/lib/recovery";
 
 export default function ChatError({
+  error,
+  unstable_retry,
   reset,
 }: {
   error: Error & { digest?: string };
-  reset: () => void;
+  unstable_retry?: () => void;
+  reset?: () => void;
 }) {
   React.useEffect(() => {
+    console.error(error);
     if (markRecoveryAttempt("chat-error", 8_000)) {
-      reset();
+      queueMicrotask(() => {
+        if (unstable_retry) unstable_retry();
+        else reset?.();
+      });
     }
-  }, [reset]);
+  }, [error, reset, unstable_retry]);
 
   return (
-    <main className="grid min-h-screen place-items-center bg-background px-6 text-center">
+    <main className="grid h-full min-h-0 w-full flex-1 place-items-center bg-background px-6 text-center">
       <div className="space-y-4">
         <p className="font-mono text-sm text-muted-foreground">chat could not reopen cleanly</p>
         <button

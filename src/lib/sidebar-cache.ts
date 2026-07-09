@@ -1,6 +1,7 @@
 "use client";
 
 import type { Contact, Room, Team } from "./types";
+import { normalizeRooms } from "./room-shape";
 
 // v3: membership map is keyed by carbon_id/silicon_id (was name/handle in v≤2).
 const VERSION = 3;
@@ -57,7 +58,7 @@ function read(ownerId: string): SidebarCache | null {
     return {
       version: VERSION,
       ownerId,
-      rooms: parsed.rooms,
+      rooms: normalizeRooms(parsed.rooms),
       contacts: parsed.contacts,
       teams: Array.isArray(parsed.teams) ? parsed.teams : [],
       memberships:
@@ -104,7 +105,7 @@ export function loadCachedRooms(ownerId: string): Room[] | null {
 }
 
 export function saveCachedRooms(ownerId: string, rooms: Room[]) {
-  write(ownerId, { rooms });
+  write(ownerId, { rooms: normalizeRooms(rooms) });
 }
 
 export function loadCachedContacts(ownerId: string): Contact[] | null {

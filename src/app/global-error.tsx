@@ -5,16 +5,20 @@ import * as React from "react";
 import { markRecoveryAttempt } from "@/lib/recovery";
 
 export default function GlobalError({
+  error,
+  unstable_retry,
   reset,
 }: {
   error: Error & { digest?: string };
-  reset: () => void;
+  unstable_retry?: () => void;
+  reset?: () => void;
 }) {
   React.useEffect(() => {
+    console.error(error);
     if (markRecoveryAttempt("global-error", 10_000)) {
       window.location.reload();
     }
-  }, []);
+  }, [error]);
 
   return (
     <html lang="en">
@@ -35,7 +39,7 @@ export default function GlobalError({
             <button type="button" onClick={() => window.location.reload()}>
               Reload
             </button>
-            <button type="button" onClick={reset}>
+            <button type="button" onClick={() => (unstable_retry ? unstable_retry() : reset?.())}>
               Try again
             </button>
           </div>

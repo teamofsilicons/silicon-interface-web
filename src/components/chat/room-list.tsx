@@ -409,6 +409,7 @@ function RoomRow({
   groupControls,
 }: RowProps) {
   const d = roomDisplay(r);
+  const peers = Array.isArray(r.peers) ? r.peers : [];
   const isHover = hoverRoomId === r.room_id;
   const isWorking = workingRoomIds?.has(r.room_id) ?? false;
   const workingNote = workingNotes?.[r.room_id]?.trim() || "";
@@ -418,7 +419,7 @@ function RoomRow({
   // badge (✓✓ once the other side has read it, ✓ until then).
   const mineLast = !!myHandle && r.last_event?.sender_handle === myHandle;
   // Direct 1-on-1 peer (for @id / saved-contact display).
-  const peer = r.kind === "direct" && r.peers.length === 1 ? r.peers[0] : null;
+  const peer = r.kind === "direct" && peers.length === 1 ? peers[0] : null;
   const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
   const avatarSrc = contact?.photo_url ?? d.photoUrl;
   // §0a — prefer the peer's ASCII treatment, but a custom saved-contact

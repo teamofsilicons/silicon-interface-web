@@ -80,6 +80,16 @@ function ownerKeyFor(carbonId?: string | null): string | null {
   return carbonId ? `carbon:${carbonId}` : null;
 }
 
+function recordingRoomLabel(room: Room): string {
+  const display = roomDisplay(room);
+  const peer = display.peer;
+  if (!peer) return display.name;
+  const savedOrDisplayName = peer.name?.trim();
+  if (savedOrDisplayName) return savedOrDisplayName;
+  const id = peer.id || peer.handle.replace(/^@/, "");
+  return `@${id}`;
+}
+
 export function VoiceRecordingProvider({
   rooms,
   onReturnToRoom,
@@ -113,7 +123,7 @@ export function VoiceRecordingProvider({
   const roomName = React.useCallback(
     (roomId: string) => {
       const room = rooms.find((r) => r.room_id === roomId);
-      return room ? roomDisplay(room).name : "that room";
+      return room ? recordingRoomLabel(room) : "that room";
     },
     [rooms],
   );
@@ -522,16 +532,18 @@ export function ProtectedVoiceDraftBar({
   return (
     <div className="border border-input bg-card text-xs">
       <div className="sr-only" aria-live="polite" aria-atomic="true">{liveText}</div>
-      <div className="flex items-center justify-between gap-3 border-b bg-background/70 px-3 py-1.5 text-[11px] text-muted-foreground">
-        <span className="min-w-0 truncate">Being recorded in &quot;{roomName}&quot;</span>
-        <button
-          type="button"
-          onClick={voice.returnToDraftRoom}
-          className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
-        >
-          Go to Chat
-        </button>
-      </div>
+      {away ? (
+        <div className="flex items-center justify-between gap-3 border-b bg-background/70 px-3 py-1.5 text-[11px] text-muted-foreground">
+          <span className="min-w-0 truncate">Being recorded in &quot;{roomName}&quot;</span>
+          <button
+            type="button"
+            onClick={voice.returnToDraftRoom}
+            className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
+          >
+            Go to Chat
+          </button>
+        </div>
+      ) : null}
       <div className="flex items-center gap-3 px-3 py-2">
         <Button
           size="icon"

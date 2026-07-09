@@ -333,6 +333,7 @@ function ChatPageInner() {
   const contacts = useContacts(ownerId);
   const myUsername = carbon?.username ?? null;
   const selectedRoom = rooms.find((r) => r.room_id === selected);
+  const [roomDetailRefreshing, setRoomDetailRefreshing] = React.useState<string | null>(null);
   const hasObservedRooms = rooms.some((r) => r.observed);
 
   // A direct chat started by id carries no team_slug from the backend, so it
@@ -521,6 +522,24 @@ function ChatPageInner() {
   // back an empty array before the stored groups are read in.
   const groupsOwnerRef = React.useRef<string | null>(null);
 
+  const upsertRoom = React.useCallback((room: Room) => {
+    setRooms((prev) => {
+      const idx = prev.findIndex((r) => r.room_id === room.room_id);
+      if (idx === -1) return [...prev, room];
+      const next = prev.slice();
+      next[idx] = { ...prev[idx], ...room };
+      return next;
+    });
+  }, []);
+
+  const openRoom = React.useCallback(
+    (room: Room) => {
+      upsertRoom(room);
+      navigate(`/chat?room=${encodeURIComponent(room.room_id)}`);
+    },
+    [navigate, upsertRoom],
+  );
+
   const clearHover = React.useCallback(() => {
     if (hoverTimerRef.current) {
       clearTimeout(hoverTimerRef.current);
@@ -647,6 +666,30 @@ function ChatPageInner() {
     if (!ownerId || roomsCacheOwnerRef.current !== ownerId) return;
     saveCachedRooms(ownerId, rooms);
   }, [ownerId, rooms]);
+
+  React.useEffect(() => {
+    if (!selected) {
+      setRoomDetailRefreshing(null);
+      return;
+    }
+    let alive = true;
+    setRoomDetailRefreshing(selected);
+    api
+      .roomDetail(selected)
+      .then((room) => {
+        if (!alive) return;
+        upsertRoom({ ...room, unread: false, unread_count: 0 });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) {
+          setRoomDetailRefreshing((current) => (current === selected ? null : current));
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selected, upsertRoom]);
 
   // Load this user's personal folder store; persist on every change (but only
   // once the current owner's store has been read, mirroring the rooms cache).
@@ -1379,12 +1422,14 @@ function ChatPageInner() {
           socket={{ ready: socket.ready, send: socket.send, subscribe: subscribeFrames }}
           contacts={contacts.byPeer}
           onContactsChanged={contacts.refresh}
+          connectionStatePending={roomDetailRefreshing === selectedRoom.room_id}
         />
       ) : viewedTeam ? (
         <TeamPanel
           slug={viewedTeam.slug}
           initialTab={(search.get("tab") as React.ComponentProps<typeof TeamPanel>["initialTab"]) ?? undefined}
           onClose={() => navigate("/chat")}
+          onRoomOpened={openRoom}
         />
       ) : (
         <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
@@ -1401,10 +1446,7 @@ function ChatPageInner() {
       <NewDirectDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
-        onCreated={(room) => {
-          setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
-          navigate(`/chat?room=${room.room_id}`);
-        }}
+        onCreated={openRoom}
       />
 
       <GroupNameDialog

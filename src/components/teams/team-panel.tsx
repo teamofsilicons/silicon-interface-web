@@ -25,6 +25,7 @@ import type {
   BillingData,
   Invite,
   Invitee,
+  Room,
   Team,
   TeamMembership,
 } from "@/lib/types";
@@ -50,14 +51,22 @@ export function TeamPanel({
   slug,
   onClose,
   initialTab,
+  onRoomOpened,
 }: {
   slug: string;
   onClose?: () => void;
   initialTab?: TeamPanelTab;
+  onRoomOpened?: (room: Room) => void;
 }) {
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-background">
-      <TeamPanelBody key={slug} slug={slug} onClose={onClose} initialTab={initialTab} />
+      <TeamPanelBody
+        key={slug}
+        slug={slug}
+        onClose={onClose}
+        initialTab={initialTab}
+        onRoomOpened={onRoomOpened}
+      />
     </section>
   );
 }
@@ -68,10 +77,12 @@ function TeamPanelBody({
   slug,
   onClose,
   initialTab,
+  onRoomOpened,
 }: {
   slug: string;
   onClose?: () => void;
   initialTab?: TeamPanelTab;
+  onRoomOpened?: (room: Room) => void;
 }) {
   const [team, setTeam] = React.useState<Team | null>(null);
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
@@ -171,7 +182,11 @@ function TeamPanelBody({
           <div className="space-y-6">
             <ReactivityKpi slug={slug} className="w-full p-4 [&_span.font-mono]:text-3xl" />
             <div className="grid gap-6 xl:grid-cols-2">
-              <MembersPreview members={members} onViewAll={() => setTab("members")} />
+              <MembersPreview
+                members={members}
+                onViewAll={() => setTab("members")}
+                onRoomOpened={onRoomOpened}
+              />
               <CronsSection slug={slug} limit={10} onViewAll={() => setTab("crons")} />
             </div>
           </div>
@@ -187,7 +202,9 @@ function TeamPanelBody({
             )}
           </Section>
         )}
-        {tab === "members" && <MembersSection members={members} />}
+        {tab === "members" && (
+          <MembersSection members={members} onRoomOpened={onRoomOpened} />
+        )}
         {tab === "crons" && <CronsSection slug={slug} />}
         {tab === "invites" && head && (
           <div className="space-y-6">
@@ -342,9 +359,11 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
 function MembersPreview({
   members,
   onViewAll,
+  onRoomOpened,
 }: {
   members: TeamMembership[];
   onViewAll: () => void;
+  onRoomOpened?: (room: Room) => void;
 }) {
   const visibleMembers = members;
   const orderedMembers = [...visibleMembers].sort((a, b) => {
@@ -376,7 +395,7 @@ function MembersPreview({
                 </span>
                 <span className="flex shrink-0 items-center gap-2">
                   <span className="label-mono">{m.role}</span>
-                  <MessageMemberButton member={m} />
+                  <MessageMemberButton member={m} onRoomOpened={onRoomOpened} />
                 </span>
               </li>
             );
@@ -392,7 +411,13 @@ function MembersPreview({
   );
 }
 
-function MembersSection({ members }: { members: TeamMembership[] }) {
+function MembersSection({
+  members,
+  onRoomOpened,
+}: {
+  members: TeamMembership[];
+  onRoomOpened?: (room: Room) => void;
+}) {
   const [active, setActive] = React.useState<"carbon" | "silicon">("carbon");
   const visibleMembers = members;
   const carbons = visibleMembers.filter((m) => m.member_kind === "carbon");
@@ -437,7 +462,7 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
                 </span>
                 <span className="flex shrink-0 items-center gap-2">
                   <span className="label-mono">{m.role}</span>
-                  <MessageMemberButton member={m} />
+                  <MessageMemberButton member={m} onRoomOpened={onRoomOpened} />
                 </span>
               </li>
             );
@@ -462,7 +487,13 @@ function teamMemberHandle(m: TeamMembership): string {
 // Opens (or reuses) a direct room with a team member and jumps to it. The
 // member's public id isn't in the membership row, so we resolve it by handle —
 // the same path the new-conversation dialog uses.
-function MessageMemberButton({ member }: { member: TeamMembership }) {
+function MessageMemberButton({
+  member,
+  onRoomOpened,
+}: {
+  member: TeamMembership;
+  onRoomOpened?: (room: Room) => void;
+}) {
   const router = useRouter();
   const [busy, setBusy] = React.useState(false);
   const handle = member.member_handle;
@@ -480,7 +511,8 @@ function MessageMemberButton({ member }: { member: TeamMembership }) {
           : await api.siliconByHandle(handle);
       const id = "carbon_id" in target ? target.carbon_id : target.silicon_id;
       const room = await api.directRoom(kind, id);
-      router.push(`/chat?room=${encodeURIComponent(room.room_id)}`);
+      if (onRoomOpened) onRoomOpened(room);
+      else router.push(`/chat?room=${encodeURIComponent(room.room_id)}`);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {

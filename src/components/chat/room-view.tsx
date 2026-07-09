@@ -67,6 +67,8 @@ interface Props {
   contacts?: Map<string, Contact>;
   /** Called after a contact is saved/edited so the parent can refetch. */
   onContactsChanged?: () => void;
+  /** The parent is confirming fresh room metadata; avoid showing stale offline state. */
+  connectionStatePending?: boolean;
 }
 
 type LocalEvent = Event & {
@@ -188,7 +190,14 @@ function bestStatus(
   return STATUS_RANK[a] >= STATUS_RANK[b] ? a : b;
 }
 
-export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
+export function RoomView({
+  room,
+  allRooms,
+  socket,
+  contacts,
+  onContactsChanged,
+  connectionStatePending = false,
+}: Props) {
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
@@ -204,7 +213,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       peer?.kind === "silicon" ? peer.connection_state || "online" : "online",
     );
   }, [peer?.id, peer?.kind, peer?.connection_state, room.room_id]);
-  const siliconUnavailable = peer?.kind === "silicon" && siliconConnectionState !== "online";
+  const siliconUnavailable =
+    peer?.kind === "silicon" && !connectionStatePending && siliconConnectionState !== "online";
   const [saveOpen, setSaveOpen] = React.useState(false);
   const headerTitle = peer
     ? contact?.name || null // null → render the styled @id below

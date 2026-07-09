@@ -20,6 +20,12 @@ interface MdastNode {
   children?: MdastNode[];
 }
 
+function childrenOf(node: unknown): MdastNode[] | null {
+  if (!node || typeof node !== "object") return null;
+  const children = (node as MdastNode).children;
+  return Array.isArray(children) ? children : null;
+}
+
 // Rewrite every soft line break (a lone "\n" inside a `text` node) into a hard
 // `break` node, so a chat message written as
 //     hello
@@ -31,9 +37,11 @@ interface MdastNode {
 // fenced code and inline code (`code`/`inlineCode` nodes — no `text` children),
 // list/table structure, and blank-line paragraph splits are all left intact.
 function splitSoftBreaks(node: MdastNode): void {
-  if (!node.children) return;
+  const children = childrenOf(node);
+  if (!children) return;
   const next: MdastNode[] = [];
-  for (const child of node.children) {
+  for (const child of children) {
+    if (!child || typeof child !== "object") continue;
     if (child.type === "text" && typeof child.value === "string" && child.value.includes("\n")) {
       const parts = child.value.split("\n");
       parts.forEach((part, i) => {
@@ -50,14 +58,16 @@ function splitSoftBreaks(node: MdastNode): void {
 
 function remarkSoftBreaks() {
   return (tree: unknown) => {
-    splitSoftBreaks(tree as MdastNode);
+    if (tree) splitSoftBreaks(tree as MdastNode);
   };
 }
 
 function linkMentions(node: MdastNode, lookup: ReturnType<typeof buildMentionLookup>): void {
-  if (!node.children || node.type === "link" || node.type === "linkReference") return;
+  const children = childrenOf(node);
+  if (!children || node.type === "link" || node.type === "linkReference") return;
   const next: MdastNode[] = [];
-  for (const child of node.children) {
+  for (const child of children) {
+    if (!child || typeof child !== "object") continue;
     if (child.type === "text" && typeof child.value === "string") {
       for (const piece of splitMentionText(child.value, lookup)) {
         if (piece.kind === "text") {
@@ -78,10 +88,12 @@ function linkMentions(node: MdastNode, lookup: ReturnType<typeof buildMentionLoo
   node.children = next;
 }
 
-function remarkMentions(mentions: MentionTarget[] | undefined) {
+function createRemarkMentions(mentions: MentionTarget[] | undefined) {
   const lookup = buildMentionLookup(mentions);
-  return (tree: unknown) => {
-    if (lookup.size > 0) linkMentions(tree as MdastNode, lookup);
+  return function remarkMentions() {
+    return (tree: unknown) => {
+      if (lookup.size > 0 && tree) linkMentions(tree as MdastNode, lookup);
+    };
   };
 }
 
@@ -111,7 +123,7 @@ export function MarkdownView({
 }) {
   const c = compact;
   const mentionLookup = React.useMemo(() => buildMentionLookup(mentions), [mentions]);
-  const mentionPlugin = React.useMemo(() => remarkMentions(mentions), [mentions]);
+  const mentionPlugin = React.useMemo(() => createRemarkMentions(mentions), [mentions]);
   return (
     <div className={cn("text-sm leading-relaxed text-foreground", className)}>
       <Markdown

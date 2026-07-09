@@ -2,12 +2,21 @@ import * as React from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import {
+  buildMentionLookup,
+  mentionFromHref,
+  mentionHref,
+  MentionLink,
+  splitMentionText,
+  type MentionTarget,
+} from "@/lib/mentions";
 import { cn } from "@/lib/utils";
 
 // Minimal mdast node shape we touch — enough to walk children and split text.
 interface MdastNode {
   type: string;
   value?: string;
+  url?: string;
   children?: MdastNode[];
 }
 
@@ -45,6 +54,37 @@ function remarkSoftBreaks() {
   };
 }
 
+function linkMentions(node: MdastNode, lookup: ReturnType<typeof buildMentionLookup>): void {
+  if (!node.children || node.type === "link" || node.type === "linkReference") return;
+  const next: MdastNode[] = [];
+  for (const child of node.children) {
+    if (child.type === "text" && typeof child.value === "string") {
+      for (const piece of splitMentionText(child.value, lookup)) {
+        if (piece.kind === "text") {
+          if (piece.value) next.push({ type: "text", value: piece.value });
+        } else {
+          next.push({
+            type: "link",
+            url: mentionHref(piece.target),
+            children: [{ type: "text", value: piece.value }],
+          });
+        }
+      }
+    } else {
+      linkMentions(child, lookup);
+      next.push(child);
+    }
+  }
+  node.children = next;
+}
+
+function remarkMentions(mentions: MentionTarget[] | undefined) {
+  const lookup = buildMentionLookup(mentions);
+  return (tree: unknown) => {
+    if (lookup.size > 0) linkMentions(tree as MdastNode, lookup);
+  };
+}
+
 /**
  * Markdown renderer (GFM: tables, task lists, strikethrough, autolinks). We
  * don't use @tailwindcss/typography, so every element is styled by hand below.
@@ -58,16 +98,24 @@ export function MarkdownView({
   source,
   className,
   compact = false,
+  mentions,
+  onMentionClick,
+  mentionInverted = false,
 }: {
   source: string;
   className?: string;
   compact?: boolean;
+  mentions?: MentionTarget[];
+  onMentionClick?: (target: MentionTarget) => void;
+  mentionInverted?: boolean;
 }) {
   const c = compact;
+  const mentionLookup = React.useMemo(() => buildMentionLookup(mentions), [mentions]);
+  const mentionPlugin = React.useMemo(() => remarkMentions(mentions), [mentions]);
   return (
     <div className={cn("text-sm leading-relaxed text-foreground", className)}>
       <Markdown
-        remarkPlugins={[remarkGfm, remarkSoftBreaks]}
+        remarkPlugins={[remarkGfm, remarkSoftBreaks, mentionPlugin]}
         components={{
           h1: ({ children }) => (
             <h1
@@ -122,16 +170,30 @@ export function MarkdownView({
           p: ({ children }) => (
             <p className={cn("first:mt-0 last:mb-0", c ? "my-1.5" : "my-3")}>{children}</p>
           ),
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium underline underline-offset-2 hover:opacity-80"
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => {
+            const mention = mentionFromHref(typeof href === "string" ? href : undefined, mentionLookup);
+            if (mention) {
+              return (
+                <MentionLink
+                  target={mention}
+                  inverted={mentionInverted}
+                  onMentionClick={onMentionClick}
+                >
+                  {children}
+                </MentionLink>
+              );
+            }
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium underline underline-offset-2 hover:opacity-80"
+              >
+                {children}
+              </a>
+            );
+          },
           ul: ({ children }) => (
             <ul
               className={cn(

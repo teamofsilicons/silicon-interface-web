@@ -6,6 +6,11 @@
 // one of the wrappers below, and React escapes children itself.
 
 import * as React from "react";
+import {
+  buildMentionLookup,
+  renderTextWithMentions,
+  type MentionRenderOptions,
+} from "@/lib/mentions";
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"']+/g;
 
@@ -15,8 +20,14 @@ const TOKEN_RE =
   /(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(~~[^~\n]+~~)|(`[^`\n]+`)|(\*[^*\n]+\*)|(_[^_\n]+_)|(\bhttps?:\/\/[^\s<>"']+)/g;
 
 /** Returns an array of React nodes (and bare strings) rendered from `text`. */
-export function renderMarkdown(text: string): React.ReactNode[] {
+export function renderMarkdown(
+  text: string,
+  mentionOptions?: MentionRenderOptions,
+): React.ReactNode[] {
   const out: React.ReactNode[] = [];
+  const resolvedMentionOptions = mentionOptions
+    ? { ...mentionOptions, mentionLookup: buildMentionLookup(mentionOptions.mentions) }
+    : undefined;
   // §2.8 — pull out ```fenced``` blocks first so a silicon's multi-line code
   // dump keeps its monospace + horizontal scroll instead of collapsing into
   // inline text. Odd-indexed split segments are the code between fences.
@@ -42,29 +53,59 @@ export function renderMarkdown(text: string): React.ReactNode[] {
     // Normal text: split on newlines so we can preserve them as <br /> nodes.
     const lines = seg.split("\n");
     lines.forEach((line, i) => {
-      out.push(...inline(line, `${segIdx}-${i}`));
+      out.push(...inline(line, `${segIdx}-${i}`, resolvedMentionOptions));
       if (i < lines.length - 1) out.push(React.createElement("br", { key: `br-${segIdx}-${i}` }));
     });
   });
   return out;
 }
 
-function inline(text: string, base: string): React.ReactNode[] {
+function inline(
+  text: string,
+  base: string,
+  mentionOptions?: MentionRenderOptions,
+): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let cursor = 0;
   let match: RegExpExecArray | null;
   TOKEN_RE.lastIndex = 0;
   let n = 0;
   while ((match = TOKEN_RE.exec(text)) !== null) {
-    if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
+    if (match.index > cursor) {
+      nodes.push(
+        ...renderTextWithMentions(
+          text.slice(cursor, match.index),
+          mentionOptions,
+          `${base}-text-${n}`,
+        ),
+      );
+    }
     const raw = match[0];
     const key = `${base}-${n++}`;
     if (raw.startsWith("**") && raw.endsWith("**")) {
-      nodes.push(React.createElement("strong", { key }, raw.slice(2, -2)));
+      nodes.push(
+        React.createElement(
+          "strong",
+          { key },
+          renderTextWithMentions(raw.slice(2, -2), mentionOptions, `${key}-strong`),
+        ),
+      );
     } else if (raw.startsWith("__") && raw.endsWith("__")) {
-      nodes.push(React.createElement("strong", { key }, raw.slice(2, -2)));
+      nodes.push(
+        React.createElement(
+          "strong",
+          { key },
+          renderTextWithMentions(raw.slice(2, -2), mentionOptions, `${key}-strong`),
+        ),
+      );
     } else if (raw.startsWith("~~") && raw.endsWith("~~")) {
-      nodes.push(React.createElement("del", { key }, raw.slice(2, -2)));
+      nodes.push(
+        React.createElement(
+          "del",
+          { key },
+          renderTextWithMentions(raw.slice(2, -2), mentionOptions, `${key}-del`),
+        ),
+      );
     } else if (raw.startsWith("`") && raw.endsWith("`")) {
       nodes.push(
         React.createElement(
@@ -80,9 +121,21 @@ function inline(text: string, base: string): React.ReactNode[] {
         ),
       );
     } else if (raw.startsWith("*") && raw.endsWith("*")) {
-      nodes.push(React.createElement("em", { key }, raw.slice(1, -1)));
+      nodes.push(
+        React.createElement(
+          "em",
+          { key },
+          renderTextWithMentions(raw.slice(1, -1), mentionOptions, `${key}-em`),
+        ),
+      );
     } else if (raw.startsWith("_") && raw.endsWith("_")) {
-      nodes.push(React.createElement("em", { key }, raw.slice(1, -1)));
+      nodes.push(
+        React.createElement(
+          "em",
+          { key },
+          renderTextWithMentions(raw.slice(1, -1), mentionOptions, `${key}-em`),
+        ),
+      );
     } else if (URL_RE.test(raw)) {
       URL_RE.lastIndex = 0;
       // §2.8 — the URL regex greedily swallows trailing punctuation; pull it
@@ -98,7 +151,8 @@ function inline(text: string, base: string): React.ReactNode[] {
             href,
             target: "_blank",
             rel: "noopener noreferrer",
-            className: "underline underline-offset-2 hover:opacity-80 [overflow-wrap:anywhere] break-all",
+            className:
+              "underline underline-offset-2 hover:opacity-80 [overflow-wrap:anywhere] break-all",
           },
           href,
         ),
@@ -109,7 +163,9 @@ function inline(text: string, base: string): React.ReactNode[] {
     }
     cursor = match.index + raw.length;
   }
-  if (cursor < text.length) nodes.push(text.slice(cursor));
+  if (cursor < text.length) {
+    nodes.push(...renderTextWithMentions(text.slice(cursor), mentionOptions, `${base}-tail`));
+  }
   return nodes;
 }
 

@@ -455,10 +455,8 @@ export function RoomView({
   // carry richer name/photo data), then any remaining team members, deduped by
   // kind+handle. Self is never mentionable.
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
-    // The team roster only carries a member's display name ("Head of Tech
-    // Silicon"); the real @-mention id (e.g. "head-of-tech-silicon-tos") lives
-    // on RoomPeer.id. Build a name/handle → id index from the peers we know
-    // across all rooms so the roster can resolve to the actual id.
+    // Older cached rosters may not have member_public_id, so keep a peer label
+    // index as a fallback for resolving display names to stable public ids.
     const idByLabel = new Map<string, string>();
     const indexPeer = (p: Room["peers"][number]) => {
       if (p.name) idByLabel.set(`${p.kind}:${p.name.toLowerCase()}`, p.id);
@@ -486,7 +484,9 @@ export function RoomView({
       if ((m.member_kind !== "carbon" && m.member_kind !== "silicon") || !m.member_handle) continue;
       if (myUsername && m.member_handle === myUsername) continue;
       const id =
-        idByLabel.get(`${m.member_kind}:${m.member_handle.toLowerCase()}`) ?? m.member_handle;
+        m.member_public_id ??
+        idByLabel.get(`${m.member_kind}:${m.member_handle.toLowerCase()}`) ??
+        m.member_handle;
       add({
         kind: m.member_kind,
         handle: id,
@@ -2100,6 +2100,8 @@ export function RoomView({
             isMine={isMyEvent(item.event, myUsername)}
             myHandle={myUsername}
             isDirect={room.kind === "direct"}
+            mentionTargets={mentionCandidates}
+            onMentionClick={openSenderProfile}
           />
         </>
       );
@@ -2186,6 +2188,8 @@ export function RoomView({
                           onSelfDelete(target, pinsByKey.get(e._clientId ?? e.event_id) ?? [])
                   }
                   pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
+                  mentionTargets={mentionCandidates}
+                  onMentionClick={openSenderProfile}
                 />
               </div>
             );

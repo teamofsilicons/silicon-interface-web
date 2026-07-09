@@ -31,6 +31,7 @@ import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { emojiOnly } from "@/lib/emoji";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
+import type { MentionTarget } from "@/lib/mentions";
 
 import { downloadAsset, MediaPreviewer } from "./media-previewer";
 
@@ -243,6 +244,9 @@ interface Props {
   /** Attachment events sent alongside this text message — rendered as tilted
    *  pins over the bubble instead of as their own standalone bubbles. */
   pinnedAttachments?: Event[];
+  /** Real people that should be linked when mentioned as @handle/@name. */
+  mentionTargets?: MentionTarget[];
+  onMentionClick?: (target: MentionTarget) => void;
 }
 
 export function MessageBubble({
@@ -275,6 +279,8 @@ export function MessageBubble({
   selected = false,
   onToggleSelect,
   pinnedAttachments,
+  mentionTargets,
+  onMentionClick,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
   // early return so the Hook order is stable across render branches.
@@ -510,7 +516,13 @@ export function MessageBubble({
           {redacted ? (
             <span className="italic">message deleted</span>
           ) : (
-            <Body event={event} isMine={isMine} soloEmoji={soloEmoji} />
+            <Body
+              event={event}
+              isMine={isMine}
+              soloEmoji={soloEmoji}
+              mentionTargets={mentionTargets}
+              onMentionClick={onMentionClick}
+            />
           )}
 
           {/* Hover actions: reply / react / more. Floats above the bubble on
@@ -1074,21 +1086,41 @@ function Body({
   event,
   isMine,
   soloEmoji,
+  mentionTargets,
+  onMentionClick,
 }: {
   event: Event;
   isMine?: boolean;
   soloEmoji?: boolean;
+  mentionTargets?: MentionTarget[];
+  onMentionClick?: (target: MentionTarget) => void;
 }) {
   // #17 — forwarded chip rendered above the bubble body for *every* message
   // type (text, images, files, voice…), not just text. Telegram style:
   // "Forwarded from @alice".
   const forwarded = (event.content as { forward_from?: { sender_handle?: string } }).forward_from;
   const forwardedFrom = forwarded?.sender_handle ?? null;
-  if (!forwardedFrom) return <BodyContent event={event} isMine={isMine} soloEmoji={soloEmoji} />;
+  if (!forwardedFrom) {
+    return (
+      <BodyContent
+        event={event}
+        isMine={isMine}
+        soloEmoji={soloEmoji}
+        mentionTargets={mentionTargets}
+        onMentionClick={onMentionClick}
+      />
+    );
+  }
   return (
     <div className="space-y-1">
       <ForwardedFromChip handle={forwardedFrom} isMine={isMine} />
-      <BodyContent event={event} isMine={isMine} soloEmoji={soloEmoji} />
+      <BodyContent
+        event={event}
+        isMine={isMine}
+        soloEmoji={soloEmoji}
+        mentionTargets={mentionTargets}
+        onMentionClick={onMentionClick}
+      />
     </div>
   );
 }
@@ -1097,12 +1129,21 @@ function BodyContent({
   event,
   isMine,
   soloEmoji,
+  mentionTargets,
+  onMentionClick,
 }: {
   event: Event;
   isMine?: boolean;
   soloEmoji?: boolean;
+  mentionTargets?: MentionTarget[];
+  onMentionClick?: (target: MentionTarget) => void;
 }) {
   const c = event.content;
+  const mentionOptions = {
+    mentions: mentionTargets,
+    onMentionClick,
+    mentionInverted: isMine,
+  };
   switch (event.type) {
     case "m.text": {
       // §2.8 — a silicon can emit an empty/whitespace m.text; don't render a
@@ -1137,12 +1178,15 @@ function BodyContent({
                 source={body}
                 compact
                 className={cn("min-w-0 max-w-full text-sm", isMine && "text-primary-foreground")}
+                mentions={mentionTargets}
+                onMentionClick={onMentionClick}
+                mentionInverted={isMine}
               />
               {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
             </div>
           ) : (
             <div className="whitespace-pre-wrap break-words">
-              {renderMarkdown(body)}
+              {renderMarkdown(body, mentionOptions)}
               {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
             </div>
           )}
@@ -1164,7 +1208,7 @@ function BodyContent({
               tiny grey caption. */}
           {c.caption ? (
             <div className="whitespace-pre-wrap break-words text-sm">
-              {renderMarkdown(String(c.caption))}
+              {renderMarkdown(String(c.caption), mentionOptions)}
             </div>
           ) : null}
         </div>
@@ -1189,7 +1233,7 @@ function BodyContent({
               to the chip and don't echo it here. */}
           {c.filename && c.caption ? (
             <div className="whitespace-pre-wrap break-words text-sm">
-              {renderMarkdown(String(c.caption))}
+              {renderMarkdown(String(c.caption), mentionOptions)}
             </div>
           ) : null}
         </div>

@@ -790,7 +790,7 @@ function BubbleActions({
           {canDelete && onDelete && (
             <DropdownMenuItem
               onClick={() => onDelete(event)}
-              className="text-[#eb3b5a] hover:bg-[#eb3b5a]/10 hover:text-[#eb3b5a] focus:bg-[#eb3b5a]/10 focus:text-[#eb3b5a]"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive"
             >
               <Trash className="mr-2 h-3.5 w-3.5" />
               unsend

@@ -1065,20 +1065,6 @@ function ChatPageInner() {
     return () => window.removeEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
   }, [navigate]);
 
-  // Esc closes the open conversation (back to the list / welcome pane). We
-  // bail when the event was already handled — an open dialog, popover, emoji
-  // picker, or in-chat search dismisses itself first (those call
-  // preventDefault / stopPropagation), so Esc only closes the chat as a
-  // last resort.
-  React.useEffect(() => {
-    if (!selected) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) navigate("/chat");
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selected, navigate]);
-
   // Opening a room clears its unread badge locally — RoomView marks it read
   // server-side, but we zero the count immediately so the sidebar matches.
   React.useEffect(() => {
@@ -1254,6 +1240,24 @@ function ChatPageInner() {
   // Persistence key for the drilled-in folder: the single selected team, or a
   // shared key when folders are aggregated across teams.
   const openFolderKey = activeTeamSlug ?? "__all__";
+
+  // Esc unwinds the sidebar one level at a time: close the open conversation
+  // first, then leave the drilled-in folder on the following keypress. Bail
+  // when a dialog, popover, picker, or in-chat search already handled it.
+  React.useEffect(() => {
+    if (!selected && !openGroupId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (selected) {
+        navigate("/chat");
+        return;
+      }
+      setOpenGroupId(null);
+      saveOpenFolder(ownerId, openFolderKey, null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, openGroupId, navigate, ownerId, openFolderKey]);
 
   const groupControls = React.useMemo(() => {
     if (!groupingActive) return undefined;

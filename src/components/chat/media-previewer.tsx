@@ -149,7 +149,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             <img
               src={url}
               alt={label}
-              className="max-h-[80vh] max-w-full object-contain"
+              className="sdr-media max-h-[80vh] max-w-full object-contain"
             />
           )}
           {isVideo && (

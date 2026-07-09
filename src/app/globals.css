@@ -153,6 +153,11 @@ body {
   color: var(--primary);
 }
 
+/* Keep HDR user/media images from glowing brighter than the interface. */
+.sdr-media {
+  dynamic-range-limit: standard;
+}
+
 :focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;

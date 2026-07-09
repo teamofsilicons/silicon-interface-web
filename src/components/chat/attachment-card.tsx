@@ -61,7 +61,7 @@ export function AttachmentCard({
             <video src={thumbnailUrl} muted className="h-full w-full object-cover" />
           ) : (
             // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL
-            <img src={thumbnailUrl} alt="" className="h-full w-full object-cover" />
+            <img src={thumbnailUrl} alt="" className="sdr-media h-full w-full object-cover" />
           )
         ) : textPreview ? (
           <>

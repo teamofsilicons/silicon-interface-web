@@ -281,7 +281,7 @@ function StagedAttachment({
         <div className="relative h-12 w-12 shrink-0 overflow-hidden border bg-muted">
           {isImage && fileUrl ? (
             // eslint-disable-next-line @next/next/no-img-element -- local blob URL
-            <img src={fileUrl} alt="" className="h-full w-full object-cover" />
+            <img src={fileUrl} alt="" className="sdr-media h-full w-full object-cover" />
           ) : isVideo && fileUrl ? (
             <video src={fileUrl} muted className="h-full w-full object-cover" />
           ) : (

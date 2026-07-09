@@ -423,7 +423,7 @@ function OnboardingInner() {
                   <img
                     src={photoPreview}
                     alt="your photo"
-                    className="h-32 w-32 border object-cover"
+                    className="sdr-media h-32 w-32 border object-cover"
                   />
                 ) : (
                   <MarkReveal seed={carbonId || "?"} size={132} />

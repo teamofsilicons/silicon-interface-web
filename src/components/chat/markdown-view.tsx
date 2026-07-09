@@ -202,7 +202,7 @@ export function MarkdownView({
             <img
               src={typeof src === "string" ? src : ""}
               alt={alt || ""}
-              className={cn("max-w-full", c ? "my-2" : "my-3")}
+              className={cn("sdr-media max-w-full", c ? "my-2" : "my-3")}
             />
           ),
         }}

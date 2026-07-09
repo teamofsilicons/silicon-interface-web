@@ -57,7 +57,7 @@ export function IdAvatar({
         width={size}
         height={size}
         style={style}
-        className={cn("shrink-0 border object-cover", className)}
+        className={cn("sdr-media shrink-0 border object-cover", className)}
         onError={() => setFailed(true)}
       />
     );

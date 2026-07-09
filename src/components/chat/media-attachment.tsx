@@ -343,7 +343,7 @@ export function MediaAttachment({
               src={url}
               alt={caption || ""}
               onError={refreshUrl}
-              className="absolute inset-0 h-full w-full object-contain transition-opacity hover:opacity-90"
+              className="sdr-media absolute inset-0 h-full w-full object-contain transition-opacity hover:opacity-90"
             />
             <DownloadOverlay onClick={() => downloadAsset(url, filename)} />
           </div>

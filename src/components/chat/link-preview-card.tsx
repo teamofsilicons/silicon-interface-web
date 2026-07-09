@@ -43,7 +43,7 @@ export function LinkPreviewCard({ preview }: Props) {
         <img
           src={safeImage}
           alt=""
-          className="h-20 w-20 shrink-0 object-cover"
+          className="sdr-media h-20 w-20 shrink-0 object-cover"
         />
       )}
       <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 px-3 py-2">

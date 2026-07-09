@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useRoomSend } from "@/components/chat/room-send-context";
 import { cn } from "@/lib/utils";
 
-export function PreviewModalComposer() {
+export function PreviewModalComposer({ replyToEventId, onSent }: { replyToEventId?: string; onSent?: () => void }) {
   const roomSend = useRoomSend();
   const [text, setText] = React.useState("");
   const [sending, setSending] = React.useState(false);
@@ -24,8 +24,9 @@ export function PreviewModalComposer() {
     setSending(true);
     setError(null);
     try {
-      await roomSend.sendText(body);
+      await roomSend.sendText(body, { replyToEventId });
       setText("");
+      onSent?.();
       window.setTimeout(() => textareaRef.current?.focus(), 0);
     } catch {
       setError("Couldn’t send. Your message is still here.");
@@ -61,7 +62,7 @@ export function PreviewModalComposer() {
           aria-describedby={statusId}
           disabled={roomSend.readOnly || sending}
           rows={1}
-          className="max-h-28 min-h-11 flex-1 resize-none border bg-card px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground disabled:opacity-60"
+          className="max-h-28 min-h-11 flex-1 resize-none overflow-y-auto border bg-card px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus:border-foreground disabled:opacity-60"
         />
         <Button
           type="button"

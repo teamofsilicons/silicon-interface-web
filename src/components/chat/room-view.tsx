@@ -1670,10 +1670,14 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   }, [sayingHi, onOptimisticAdd, onAck, onFail, room.room_id]);
 
   const sendPreviewText = React.useCallback(
-    async (body: string) => {
+    async (body: string, options?: { replyToEventId?: string }) => {
       if (readOnly) throw new Error("room is read-only");
       const clientId = newClientId();
-      const payload: OptimisticPayload = { type: "m.text", content: { body } };
+      const payload: OptimisticPayload = {
+        type: "m.text",
+        content: { body },
+        reply_to_event_id: options?.replyToEventId,
+      };
       onOptimisticAdd(clientId, payload);
       const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
       if (outboxOwner) {
@@ -1681,6 +1685,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           roomId: room.room_id,
           clientId,
           body,
+          replyTo: options?.replyToEventId,
           at: Date.now(),
         });
       }
@@ -1688,7 +1693,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         const real = await api.sendEvent(room.room_id, payload, clientId);
         if (outboxOwner) ackOutbox(outboxOwner, clientId);
         onAck(clientId, real);
-        track.messageSent({ room_id: room.room_id, message_type: "m.text" });
+        track.messageSent({ room_id: room.room_id, message_type: "m.text", is_reply: Boolean(options?.replyToEventId) });
       } catch (e) {
         onFail(clientId, e);
         throw e;

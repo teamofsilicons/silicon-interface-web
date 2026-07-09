@@ -38,6 +38,7 @@ export function MediaAttachment({
   localPeaks,
   width,
   height,
+  replyToEventId,
 }: {
   mediaId: string;
   mime?: string;
@@ -58,6 +59,7 @@ export function MediaAttachment({
   localUrl?: string | null;
   localDurationMs?: number | null;
   localPeaks?: number[] | null;
+  replyToEventId?: string;
 }) {
   // Seed from the session cache so a re-mounted (scrolled-back-to) attachment
   // paints instantly with the right dimensions — no spinner, no aspect snap.
@@ -357,6 +359,7 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          replyToEventId={replyToEventId}
         />
       </>
     );
@@ -393,6 +396,7 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          replyToEventId={replyToEventId}
         />
       </>
     );
@@ -440,6 +444,7 @@ export function MediaAttachment({
           url={url}
           mime={m}
           filename={filename}
+          replyToEventId={replyToEventId}
         />
       )}
     </>

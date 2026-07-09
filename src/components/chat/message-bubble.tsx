@@ -88,7 +88,7 @@ function pinTilt(key: string): number {
  * Clicking opens the attachment in a new tab (image/video/pdf) or downloads it.
  * The cards overlap and tilt over the top edge of the text bubble.
  */
-function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; tilt: number }) {
+function AttachmentPin({ content, tilt, sourceEventId }: { content: Record<string, unknown>; tilt: number; sourceEventId?: string }) {
   const mediaId = String(content.media_id ?? "");
   const mime = String(content.mime ?? "").toLowerCase();
   const filename = String(content.filename ?? content.caption ?? "file");
@@ -169,6 +169,7 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
           url={url}
           mime={mime}
           filename={filename}
+          replyToEventId={sourceEventId}
         />
       )}
     </>
@@ -466,6 +467,7 @@ export function MessageBubble({
                 key={att.event_id || idx}
                 content={att.content as Record<string, unknown>}
                 tilt={pinTilt(att.event_id || String(idx))}
+                sourceEventId={event.event_id}
               />
             ))}
           </div>
@@ -1159,6 +1161,7 @@ function BodyContent({
             showCaption={false}
             width={event.media_meta?.width ?? null}
             height={event.media_meta?.height ?? null}
+            replyToEventId={event.event_id}
           />
           {/* The text rides with the image as a normal message line, not a
               tiny grey caption. */}
@@ -1182,6 +1185,7 @@ function BodyContent({
             showCaption={false}
             width={event.media_meta?.width ?? null}
             height={event.media_meta?.height ?? null}
+            replyToEventId={event.event_id}
           />
           {/* New-format messages carry the filename separately, so the caption
               is the user's typed text — render it as a normal message line.
@@ -1209,6 +1213,7 @@ function BodyContent({
               localUrl={c.local_url ? String(c.local_url) : null}
               localDurationMs={typeof c.duration_ms === "number" ? c.duration_ms : null}
               localPeaks={localPeaks}
+              replyToEventId={event.event_id}
             />
           ) : (
             <div className="flex items-center gap-2 text-xs">
@@ -1226,6 +1231,7 @@ function BodyContent({
             <MediaAttachment
               mediaId={String(c.media_id)}
               mime={c.mime ? String(c.mime) : "audio/mpeg"}
+              replyToEventId={event.event_id}
             />
           ) : (
             <div className="flex items-center gap-2 text-xs">

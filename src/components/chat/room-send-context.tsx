@@ -5,7 +5,7 @@ import * as React from "react";
 interface RoomSendContextValue {
   roomId: string;
   readOnly: boolean;
-  sendText: (body: string) => Promise<void>;
+  sendText: (body: string, options?: { replyToEventId?: string }) => Promise<void>;
 }
 
 const RoomSendContext = React.createContext<RoomSendContextValue | null>(null);

@@ -32,6 +32,7 @@ interface Props {
   url: string;
   mime: string;
   filename?: string;
+  replyToEventId?: string;
 }
 
 /**
@@ -42,7 +43,7 @@ interface Props {
  * The bare `<DialogContent>` doesn't ship with a visible title — we still
  * need one for screen readers, so we render a `sr-only` `DialogTitle`.
  */
-export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Props) {
+export function MediaPreviewer({ open, onOpenChange, url, mime, filename, replyToEventId }: Props) {
   const m = (mime || "").toLowerCase();
   const language = languageForFile(filename, mime);
   const isSvgDocument = language?.id === "svg";
@@ -195,7 +196,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename }: Prop
             </p>
           )}
         </div>
-        <PreviewModalComposer />
+        <PreviewModalComposer replyToEventId={replyToEventId} onSent={() => onOpenChange(false)} />
       </DialogContent>
     </Dialog>
   );

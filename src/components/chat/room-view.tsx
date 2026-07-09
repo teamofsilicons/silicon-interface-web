@@ -1073,6 +1073,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       const isHeldOrPending = ev.event_id.startsWith("temp-") && Boolean(local._clientId);
       if (isHeldOrPending) return true;
       if (roomIncludesSilicon) return false;
+      if (typeof ev.can_unsend === "boolean") return ev.can_unsend;
       return local._status !== "read";
     },
     [myUsername, roomIncludesSilicon],

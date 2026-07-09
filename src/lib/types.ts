@@ -346,6 +346,9 @@ export interface Event {
   edited_at: string | null;
   redacted_at: string | null;
   redaction_reason: string;
+  /** Sender-scoped affordance from Glass. False when read/delivered gates have
+   *  already closed the unsend window for this signed-in user. */
+  can_unsend?: boolean;
   /** #25 — OG-style link preview projection, only set when body contains
    *  exactly one URL. */
   link_preview?: LinkPreview | null;

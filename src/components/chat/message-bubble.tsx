@@ -175,8 +175,6 @@ function AttachmentPin({ content, tilt }: { content: Record<string, unknown>; ti
   );
 }
 
-const FIVE_MIN_MS = 5 * 60 * 1000;
-
 export type MessageStatus =
   | "pending" // optimistic local insert — POST not acked yet
   | "sent" // server acked POST → at server, awaiting broadcast
@@ -235,7 +233,7 @@ interface Props {
   selected?: boolean;
   /** Toggle this message's membership in the selection set. */
   onToggleSelect?: (event: Event) => void;
-  /** Self-delete (5-min carbon window). */
+  /** Unsend this message when the backend read/delivery window allows it. */
   onDelete?: (event: Event) => void;
   /** Re-send a failed message (same client id — the server dedupes). When set,
    *  the failed receipt becomes a tap-to-retry affordance. */
@@ -645,10 +643,7 @@ function BubbleActions({
   onTakeBack?: (eventId: string, force?: boolean) => void;
   onCopied?: () => void;
 }) {
-  // 5-minute self-delete window only applies to my carbon-side messages.
-  const within5Min =
-    Date.now() - new Date(event.created_at).getTime() < FIVE_MIN_MS;
-  const canDelete = isMine && within5Min;
+  const canDelete = isMine && !!onDelete;
   const canTakeBack = isMine && isOwnSilicon;
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false;
   const canEdit = isMine && !!onEdit && editableTextForEvent(event) !== null;
@@ -795,7 +790,7 @@ function BubbleActions({
           {canDelete && onDelete && (
             <DropdownMenuItem onClick={() => onDelete(event)}>
               <Trash className="mr-2 h-3.5 w-3.5" />
-              delete
+              unsend
             </DropdownMenuItem>
           )}
           {canTakeBack && onTakeBack && (

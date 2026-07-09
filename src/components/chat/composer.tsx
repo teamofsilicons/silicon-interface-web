@@ -82,6 +82,19 @@ export interface OptimisticPayload {
   edited_at?: string | null;
 }
 
+export interface ComposerRestoreAttachment {
+  mediaId: string;
+  mime: string;
+  name: string;
+  size?: number;
+}
+
+export interface ComposerRestoreDraft {
+  id: string;
+  text: string;
+  attachments?: ComposerRestoreAttachment[];
+}
+
 interface Props {
   roomId: string;
   /**
@@ -119,6 +132,11 @@ interface Props {
   onPersistedEdit?: (event: Event, body: string) => Promise<void>;
   /** Ask the parent to select the latest editable message, usually via ↑. */
   onRequestEditLast?: () => void;
+  /** Restore an unsent message back into the composer. */
+  restoreDraft?: ComposerRestoreDraft | null;
+  onRestoreDraftConsumed?: () => void;
+  /** Keyboard path for cancelling the latest held message. */
+  onCancelHeldLast?: () => void;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -311,8 +329,12 @@ function StagedAttachment({
           <FileName name={name} className="text-xs font-medium" />
           <div className="label-mono text-[10px] text-muted-foreground">
             {uploading
-              ? `${formatBytes(uploadLoaded ?? (size * (uploadPct ?? 0)) / 100)} / ${formatBytes(size)} (${uploadPct}%)`
-              : formatBytes(size)}
+              ? size > 0
+                ? `${formatBytes(uploadLoaded ?? (size * (uploadPct ?? 0)) / 100)} / ${formatBytes(size)} (${uploadPct}%)`
+                : `${uploadPct}%`
+              : size > 0
+                ? formatBytes(size)
+                : "uploaded"}
           </div>
         </div>
       </button>
@@ -600,6 +622,9 @@ export function Composer({
   onEditComplete,
   onPersistedEdit,
   onRequestEditLast,
+  restoreDraft,
+  onRestoreDraftConsumed,
+  onCancelHeldLast,
 }: Props) {
   const [text, setText] = React.useState("");
   // Multiple attachments can be staged at once; each uploads in the background
@@ -925,6 +950,37 @@ export function Composer({
       flushDraft(roomId);
     };
   }, [roomId]);
+
+  React.useEffect(() => {
+    if (!restoreDraft) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      if (editingEvent) onEditComplete?.();
+      const restoredText = restoreDraft.text;
+      const restoredAttachments = (restoreDraft.attachments ?? []).map((a) => ({
+        id: newClientId(),
+        file: null,
+        name: a.name,
+        size: a.size ?? 0,
+        status: "ready" as const,
+        pct: null,
+        loaded: null,
+        mediaId: a.mediaId,
+        mime: a.mime || "application/octet-stream",
+      }));
+      setText(restoredText);
+      persistDraft(restoredText);
+      setAttachments(restoredAttachments);
+      setEmojiQuery(null);
+      setMentionQuery(null);
+      onRestoreDraftConsumed?.();
+      taRef.current?.focus();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editingEvent, onEditComplete, onRestoreDraftConsumed, persistDraft, restoreDraft]);
 
   // Persist the room's uploaded attachments so a chat-switch / refresh keeps
   // them. Skip the render where roomId just changed (the effect above restores
@@ -2043,6 +2099,19 @@ export function Composer({
                   setEmojiQuery(null);
                   return;
                 }
+              }
+              if (
+                e.ctrlKey &&
+                !e.metaKey &&
+                !e.altKey &&
+                e.key.toLowerCase() === "c" &&
+                !text.trim() &&
+                attachments.length === 0 &&
+                onCancelHeldLast
+              ) {
+                e.preventDefault();
+                onCancelHeldLast();
+                return;
               }
               if (
                 e.key === "ArrowUp" &&

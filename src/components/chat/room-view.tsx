@@ -40,6 +40,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import {
   Composer,
+  type ComposerRestoreDraft,
   type MentionCandidate,
   type OptimisticPayload,
 } from "@/components/chat/composer";
@@ -72,6 +73,11 @@ type LocalEvent = Event & {
   _status?: MessageStatus;
   _clientId?: string;
 };
+
+interface PendingUnsend {
+  event: Event;
+  attachments: Event[];
+}
 
 interface ProgressEntry {
   roomId: string;
@@ -276,6 +282,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   } | null>(null);
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const [editingEvent, setEditingEvent] = React.useState<Event | null>(null);
+  const [restoreDraft, setRestoreDraft] = React.useState<ComposerRestoreDraft | null>(null);
   const [search, setSearch] = React.useState<string | null>(null);
   // Backend message search (/events/search) — covers the whole history, not just
   // the loaded window. `searchResults` is null when no query is active.
@@ -524,6 +531,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     setActivities({});
     setReplyTo(null);
     setEditingEvent(null);
+    setRestoreDraft(null);
     setFocusSender(null);
     setProfileOpen(false);
     setUnseenBelow(false);
@@ -901,10 +909,42 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     }
   };
 
-  // Delete is two-step: clicking it stages the target; the confirm dialog
-  // actually performs the redaction.
-  const [pendingDelete, setPendingDelete] = React.useState<Event | null>(null);
-  const onSelfDelete = (ev: Event) => {
+  const restoreFromEvent = React.useCallback((ev: Event, attachments: Event[] = []) => {
+    const content = ev.content as Record<string, unknown>;
+    const text =
+      ev.type === "m.text"
+        ? String(content.body ?? "")
+        : ev.type === "m.image" || ev.type === "m.file"
+          ? String(content.caption ?? "")
+          : ev.type === "m.voice"
+            ? String(content.transcript ?? "")
+            : "";
+    const mediaEvents =
+      ev.type === "m.image" || ev.type === "m.file" ? [ev, ...attachments] : attachments;
+    const restoredAttachments = mediaEvents
+      .map((item) => {
+        const c = item.content as Record<string, unknown>;
+        const mediaId = typeof c.media_id === "string" ? c.media_id : "";
+        if (!mediaId) return null;
+        return {
+          mediaId,
+          mime: String(c.mime || item.media_meta?.mime || "application/octet-stream"),
+          name: String(c.filename || c.caption || item.type.replace("m.", "") || "attachment"),
+          size: typeof c.size === "number" ? c.size : 0,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    setRestoreDraft({
+      id: `${ev.event_id}:${Date.now()}`,
+      text,
+      attachments: restoredAttachments,
+    });
+  }, []);
+
+  // Unsend is two-step for persisted events: clicking stages the target; the
+  // confirm dialog performs backend redaction and then restores the draft.
+  const [pendingDelete, setPendingDelete] = React.useState<PendingUnsend | null>(null);
+  const onSelfDelete = (ev: Event, attachments: Event[] = []) => {
     // A held/optimistic message that never reached the server: cancel the
     // queued send and drop the bubble — nothing to redact, no confirm needed.
     const clientId = (ev as LocalEvent)._clientId;
@@ -913,44 +953,54 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       setHoldingMessage(false);
       setEditingEvent((cur) => (cur?.event_id === ev.event_id ? null : cur));
       setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
+      restoreFromEvent(ev, attachments);
       return;
     }
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
-    setPendingDelete(ev);
+    setPendingDelete({ event: ev, attachments });
   };
 
   const confirmDelete = async () => {
-    const ev = pendingDelete;
-    if (!ev) return;
+    const pending = pendingDelete;
+    if (!pending) return;
+    const { event: ev, attachments } = pending;
     setPendingDelete(null);
+    const targets = [ev, ...attachments];
+    const deleteTargets = [...attachments, ev];
     // §2.4 — snapshot the prior row so a failed delete can be rolled back
     // instead of leaving it "deleted" until the next refetch reverts it.
-    const snapshot = events.find((e) => e.event_id === ev.event_id);
+    const snapshots = targets
+      .map((target) => events.find((e) => e.event_id === target.event_id))
+      .filter((item): item is LocalEvent => Boolean(item));
     // Optimistically mark redacted so the bubble updates instantly.
     setEvents((prev) =>
       prev.map((e) =>
-        e.event_id === ev.event_id
+        targets.some((target) => target.event_id === e.event_id)
           ? {
               ...e,
               redacted_at: new Date().toISOString(),
-              redaction_reason: "self_delete",
-              content: { redacted: true, reason: "self_delete" },
+              redaction_reason: "unsend",
+              content: { redacted: true, reason: "unsend" },
             }
           : e,
       ),
     );
     const rollback = () => {
-      if (!snapshot) return;
-      setEvents((prev) => prev.map((e) => (e.event_id === ev.event_id ? snapshot : e)));
+      if (!snapshots.length) return;
+      const byId = new Map(snapshots.map((item) => [item.event_id, item]));
+      setEvents((prev) => prev.map((e) => byId.get(e.event_id) ?? e));
     };
     try {
-      const r = await api.deleteEvent(ev.event_id);
-      if (r && "detail" in r) {
-        rollback();
-        toast.error(r.detail);
-      } else {
-        toast.success("deleted successfully");
+      for (const target of deleteTargets) {
+        const r = await api.deleteEvent(target.event_id);
+        if (r && "detail" in r) {
+          rollback();
+          toast.error(r.detail);
+          return;
+        }
       }
+      restoreFromEvent(ev, attachments);
+      toast.success("unsent");
     } catch (e) {
       rollback();
       toast.error(e instanceof ApiError ? e.message : String(e));
@@ -1688,6 +1738,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       pinsByKey: pins,
     };
   }, [filteredEvents]);
+  const cancelLatestHeld = React.useCallback(() => {
+    for (let i = visibleEvents.length - 1; i >= 0; i--) {
+      const event = visibleEvents[i] as LocalEvent;
+      if (!isMyEvent(event, myUsername)) continue;
+      if (!event.event_id.startsWith("temp-") || !event._clientId) continue;
+      onSelfDelete(event, pinsByKey.get(event._clientId ?? event.event_id) ?? []);
+      return;
+    }
+  }, [myUsername, pinsByKey, visibleEvents]);
   const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;
   const latestVisibleEventId = latestVisibleEvent?.event_id ?? null;
   // Show the progress line whenever there's active progress for this room. We
@@ -2066,9 +2125,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
                   onToggleSelect={readOnly ? undefined : toggleSelect}
                   onRetry={readOnly ? undefined : retrySend}
                   onDelete={
-                    readOnly || (room.kind === "direct" && peer?.kind === "silicon")
+                    readOnly
                       ? undefined
-                      : onSelfDelete
+                      : (target) =>
+                          onSelfDelete(target, pinsByKey.get(e._clientId ?? e.event_id) ?? [])
                   }
                   pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
                 />
@@ -2378,6 +2438,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           onEditComplete={() => setEditingEvent(null)}
           onPersistedEdit={persistEdit}
           onRequestEditLast={requestEditLast}
+          restoreDraft={restoreDraft}
+          onRestoreDraftConsumed={() => setRestoreDraft(null)}
+          onCancelHeldLast={cancelLatestHeld}
         />
       )}
 
@@ -2406,9 +2469,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete message?</DialogTitle>
+            <DialogTitle>Unsend message?</DialogTitle>
             <DialogDescription>
-              This removes the message for everyone. This can&rsquo;t be undone.
+              This removes it for everyone and brings it back to your composer.
             </DialogDescription>
           </DialogHeader>
           <div className="flex justify-end gap-2">
@@ -2416,7 +2479,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               cancel
             </Button>
             <Button variant="destructive" onClick={confirmDelete}>
-              delete
+              unsend
             </Button>
           </div>
         </DialogContent>

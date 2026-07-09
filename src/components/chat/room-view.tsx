@@ -230,7 +230,7 @@ export function RoomView({
   const showsProgressForReplies = !readOnly && room.peers.some((p) => p.kind === "silicon");
 
   React.useEffect(() => {
-    if (!siliconUnavailable || peer?.kind !== "silicon") return;
+    if (peer?.kind !== "silicon" || connectionStatePending) return;
     let alive = true;
     const poll = async () => {
       try {
@@ -250,7 +250,7 @@ export function RoomView({
       alive = false;
       window.clearInterval(timer);
     };
-  }, [peer?.kind, room.room_id, siliconUnavailable]);
+  }, [connectionStatePending, peer?.kind, room.room_id]);
 
   const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const [loading, setLoading] = React.useState(true);

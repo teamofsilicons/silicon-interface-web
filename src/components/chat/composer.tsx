@@ -32,6 +32,12 @@ import {
   setDraftReply,
 } from "@/lib/drafts";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
+import {
+  clearVoiceDraft,
+  getVoiceDraft,
+  saveVoiceDraft,
+  type VoiceDraft,
+} from "@/lib/voice-drafts";
 import { editableTextForEvent } from "@/lib/event-edit";
 import { clearAnnotationSession } from "@/lib/annotation-session";
 import type { AnnotationDraft, Event, EventType } from "@/lib/types";
@@ -39,6 +45,7 @@ import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
+import { SiliconAudio } from "@/components/chat/silicon-audio";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
 import { MediaPreviewer } from "@/components/chat/media-previewer";
@@ -65,6 +72,12 @@ export interface ComposerRestoreDraft {
   id: string;
   text: string;
   attachments?: ComposerRestoreAttachment[];
+}
+
+function SavedVoicePlayer({ draft }: { draft: VoiceDraft }) {
+  const [url] = React.useState(() => URL.createObjectURL(draft.blob));
+  React.useEffect(() => () => URL.revokeObjectURL(url), [url]);
+  return <SiliconAudio url={url} durationMs={draft.durationMs} className="max-w-[22rem]" />;
 }
 
 interface Props {
@@ -707,10 +720,7 @@ export function Composer({
   // user can retry instead of losing the recording.
   const voiceXhrRef = React.useRef<XMLHttpRequest | null>(null);
   const [voiceUploadPct, setVoiceUploadPct] = React.useState<number | null>(null);
-  const [pendingVoice, setPendingVoice] = React.useState<{
-    blob: Blob;
-    durationMs: number;
-  } | null>(null);
+  const [pendingVoice, setPendingVoice] = React.useState<VoiceDraft | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
   const textRef = React.useRef(text);
@@ -743,6 +753,18 @@ export function Composer({
   React.useEffect(() => {
     textRef.current = text;
   }, [text]);
+
+  // A room switch remounts Composer. Recover any voice note that was finalized
+  // during that navigation (or retained after a failed upload/reload).
+  React.useEffect(() => {
+    let alive = true;
+    void getVoiceDraft(roomId).then((draft) => {
+      if (alive && draft) setPendingVoice(draft);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [roomId]);
 
   const setTypingActive = React.useCallback((active: boolean) => {
     typingActiveRef.current = active;
@@ -1824,18 +1846,17 @@ export function Composer({
       onClearReply?.();
       // §6.4 — Succeeded: the recording is safely on the server, so drop the
       // retained blob.
+      await clearVoiceDraft(roomId);
       setPendingVoice(null);
       track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
       onFail(clientId, e);
-      // §6.4 — A user-initiated abort isn't a failure to recover from; just
-      // drop it. Any *real* failure retains the blob so the user can retry
-      // instead of losing an unrecoverable recording (the blob URL was the
-      // only handle to the audio).
-      if (e instanceof DOMException && e.name === "AbortError") {
-        setPendingVoice(null);
-      } else {
-        setPendingVoice({ blob, durationMs });
+      // Aborts, offline failures, and room switches all retain the same durable
+      // draft. Only an explicit discard is allowed to delete captured audio.
+      const draft = { blob, durationMs, savedAt: Date.now() };
+      setPendingVoice(draft);
+      await saveVoiceDraft(roomId, draft);
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
         toast.error("voice note failed to send - tap retry to try again.");
       }
     } finally {
@@ -1853,7 +1874,20 @@ export function Composer({
   const onVoiceSubmit = (blob: Blob, durationMs: number) => {
     setRecording(false);
     api.activity(roomId, "recording", false).catch(() => undefined);
-    void uploadVoice(blob, durationMs);
+    const draft = { blob, durationMs, savedAt: Date.now() };
+    setPendingVoice(draft);
+    void (async () => {
+      // Persist before beginning the upload so a refresh/crash during transfer
+      // still leaves a recoverable copy.
+      await saveVoiceDraft(roomId, draft);
+      await uploadVoice(blob, durationMs);
+    })();
+  };
+
+  const onVoicePreserve = (blob: Blob, durationMs: number) => {
+    const draft = { blob, durationMs, savedAt: Date.now() };
+    void saveVoiceDraft(roomId, draft);
+    toast.success("voice note saved to this chat");
   };
 
   // Render the recorder in place of the textarea row when active.
@@ -1867,6 +1901,7 @@ export function Composer({
             api.activity(roomId, "recording", false).catch(() => undefined);
           }}
           onSubmit={onVoiceSubmit}
+          onPreserve={onVoicePreserve}
         />
       </div>
     );
@@ -1978,26 +2013,32 @@ export function Composer({
           </Button>
         </div>
       )}
-      {/* §6.4 — A failed voice note is retained; offer retry / discard so the
-          recording isn't lost to a transient network blip. */}
+      {/* A finalized/failed voice note is durable. It can be previewed and sent
+          after returning to the room; only this explicit discard deletes it. */}
       {pendingVoice && voiceUploadPct === null && (
-        <div className="flex items-center justify-between gap-3 border border-destructive/40 bg-card px-3 py-2 text-xs">
-          <span className="min-w-0 text-destructive">voice note didn&apos;t send.</span>
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-input bg-card px-3 py-2 text-xs">
+          <div className="min-w-0 flex-1">
+            <div className="label-mono mb-1 text-[10px] text-muted-foreground">
+              saved voice note
+            </div>
+            <SavedVoicePlayer key={pendingVoice.savedAt} draft={pendingVoice} />
+          </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
-              onClick={() => {
-                const v = pendingVoice;
-                setPendingVoice(null);
-                void uploadVoice(v.blob, v.durationMs);
-              }}
+              onClick={() => void uploadVoice(pendingVoice.blob, pendingVoice.durationMs)}
+              disabled={busy}
               className="font-medium text-foreground underline-offset-2 hover:underline"
             >
-              retry
+              send
             </button>
             <button
               type="button"
-              onClick={() => setPendingVoice(null)}
+              onClick={() => {
+                setPendingVoice(null);
+                void clearVoiceDraft(roomId);
+              }}
+              disabled={busy}
               className="text-muted-foreground hover:text-foreground"
             >
               discard
@@ -2291,10 +2332,14 @@ export function Composer({
           <button
             type="button"
             onClick={() => {
+              if (pendingVoice) {
+                toast.message("send or discard the saved voice note first");
+                return;
+              }
               setRecording(true);
               api.activity(roomId, "recording", true).catch(() => undefined);
             }}
-            disabled={busy || sendDisabled}
+            disabled={busy || sendDisabled || Boolean(pendingVoice)}
             title="record voice message"
             aria-label="record voice message"
             className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"

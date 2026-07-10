@@ -16,6 +16,8 @@ interface Props {
   onCancel: () => void;
   /** Recording finalized — the parent should upload + send as `m.voice`. */
   onSubmit: (blob: Blob, durationMs: number) => void;
+  /** Navigation finalized the recording — preserve it as a room draft. */
+  onPreserve: (blob: Blob, durationMs: number) => void;
 }
 
 // Use whichever WebM/Opus mime the browser supports; fall back to default.
@@ -46,12 +48,13 @@ function pickMime(): string {
  * the composer to upload + post as an `m.voice` event. The recording does
  * not stop on focus changes — only on user action.
  */
-export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
+export function VoiceRecorder({ active, onCancel, onSubmit, onPreserve }: Props) {
   const recRef = React.useRef<MediaRecorder | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const chunksRef = React.useRef<BlobPart[]>([]);
   const startedAtRef = React.useRef<number>(0);
-  const intentRef = React.useRef<"send" | "cancel">("cancel");
+  const intentRef = React.useRef<"send" | "cancel" | "preserve">("cancel");
+  const finalizedRef = React.useRef(false);
   const [elapsed, setElapsed] = React.useState(0);
   const [armed, setArmed] = React.useState(false);
 
@@ -64,29 +67,30 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
   const [barCount, setBarCount] = React.useState(48);
   const [waves, setWaves] = React.useState<number[]>(() => new Array(48).fill(0));
 
-  const cleanup = React.useCallback(() => {
-    try {
-      recRef.current?.state === "recording" && recRef.current.stop();
-    } catch {
-      /* recorder may already be inactive */
-    }
+  const stopLiveCapture = React.useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     audioCtxRef.current?.close().catch(() => undefined);
-    recRef.current = null;
     streamRef.current = null;
     audioCtxRef.current = null;
     analyserRef.current = null;
-    chunksRef.current = [];
-    setElapsed(0);
-    setArmed(false);
-    setWaves((w) => w.map(() => 0));
   }, []);
+
+  const releaseResources = React.useCallback((updateUi: boolean) => {
+    stopLiveCapture();
+    recRef.current = null;
+    if (updateUi) {
+      setElapsed(0);
+      setArmed(false);
+      setWaves((w) => w.map(() => 0));
+    }
+  }, [stopLiveCapture]);
 
   // Start / stop with the `active` flag.
   React.useEffect(() => {
     if (!active) return;
     let cancelled = false;
     intentRef.current = "cancel";
+    finalizedRef.current = false;
 
     (async () => {
       try {
@@ -104,15 +108,20 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
           if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
         };
         rec.onstop = () => {
+          if (finalizedRef.current) return;
+          finalizedRef.current = true;
           const duration = Date.now() - startedAtRef.current;
           const blob = new Blob(chunksRef.current, { type: mime || "audio/webm" });
-          // Only forward the recording up if the user pressed send; cancel
-          // throws everything away (most of the surprise privacy bug in
-          // recorders comes from emitting on every stop, intentful or not).
+          chunksRef.current = [];
+          // Explicit cancel is the only destructive route. Navigation uses a
+          // third intent so teardown finalizes a recoverable room draft rather
+          // than silently throwing the captured chunks away.
           if (intentRef.current === "send" && blob.size > 0) {
             onSubmit(blob, duration);
+          } else if (intentRef.current === "preserve" && blob.size > 0) {
+            onPreserve(blob, duration);
           }
-          cleanup();
+          releaseResources(!cancelled);
         };
         startedAtRef.current = Date.now();
         rec.start(200); // 200ms timeslice — even pacing for the level meter
@@ -134,22 +143,34 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
             ? "microphone permission denied"
             : "couldn't start recorder",
         );
-        cleanup();
+        releaseResources(!cancelled);
         onCancel();
       }
     })();
 
     return () => {
       cancelled = true;
-      // §6.5 — Actually tear the recorder down on unmount. Previously this
-      // only flipped `cancelled`, so switching rooms mid-record left the
-      // MediaStream open (OS mic indicator stuck on) and the recorder alive.
-      // We set the intent to "cancel" first so the `onstop` handler doesn't
-      // emit a half-finished blob, then stop the stream + close the context.
-      intentRef.current = "cancel";
-      cleanup();
+      // Navigation is not an explicit discard. Stop the recorder so its final
+      // dataavailable event lands, then preserve the resulting Blob for the
+      // original room. Tracks/context are still released immediately so the
+      // microphone never continues invisibly in another chat.
+      const recorder = recRef.current;
+      if (recorder?.state === "recording") {
+        intentRef.current = "preserve";
+        try {
+          recorder.stop();
+          // `stop()` has already queued the final dataavailable/stop events.
+          // Release the physical microphone immediately while leaving chunks
+          // intact for the onstop preservation handler.
+          stopLiveCapture();
+        } catch {
+          releaseResources(false);
+        }
+      } else {
+        releaseResources(false);
+      }
     };
-    // onSubmit/onCancel/cleanup are stable for the lifetime of this hook
+    // Callbacks are stable for the lifetime of this hook invocation.
     // invocation — re-running on every render would tear down the recorder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
@@ -231,7 +252,7 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
     try {
       recRef.current?.stop();
     } catch {
-      cleanup();
+      releaseResources(true);
     }
   };
 
@@ -241,6 +262,8 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
       recRef.current?.stop();
     } catch {
       /* nothing to stop */
+      chunksRef.current = [];
+      releaseResources(true);
     }
     onCancel();
   };

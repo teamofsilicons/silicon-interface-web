@@ -2375,6 +2375,41 @@ export function RoomView({
     [],
   );
 
+  const focusedDirectRoom = React.useMemo(() => {
+    if (!focusSender) return null;
+    return (
+      allRooms.find(
+        (candidate) =>
+          candidate.kind === "direct" &&
+          candidate.peers.some(
+            (candidatePeer) =>
+              candidatePeer.kind === focusSender.kind &&
+              (candidatePeer.id === focusSender.handle ||
+                candidatePeer.handle === focusSender.handle),
+          ),
+      ) ?? null
+    );
+  }, [allRooms, focusSender]);
+
+  const openDirectMessage = React.useCallback(
+    async (target: { kind: "carbon" | "silicon"; handle: string }) => {
+      const existing = allRooms.find(
+        (candidate) =>
+          candidate.kind === "direct" &&
+          candidate.peers.some(
+            (candidatePeer) =>
+              candidatePeer.kind === target.kind &&
+              (candidatePeer.id === target.handle || candidatePeer.handle === target.handle),
+          ),
+      );
+      const destination = existing ?? (await api.directRoom(target.kind, target.handle));
+      setProfileOpen(false);
+      setFocusSender(null);
+      router.push(`/chat?room=${encodeURIComponent(destination.room_id)}`);
+    },
+    [allRooms, router],
+  );
+
   // §2.7 — load the previous page of history (the API supports a `before`
   // cursor). Prepends older events; Virtuoso's firstItemIndex keeps the
   // viewport anchored (see the prepend effect above).
@@ -2695,14 +2730,20 @@ export function RoomView({
         room={room}
         events={events}
         currentUsername={carbon?.username}
-        contact={contact}
-        onEditContact={peer ? () => setSaveOpen(true) : undefined}
+        contact={
+          focusSender
+            ? contactForSender(focusSender.kind, focusSender.handle)
+            : contact
+        }
+        onEditContact={!focusSender && peer ? () => setSaveOpen(true) : undefined}
         open={profileOpen}
         onOpenChange={(v) => {
           setProfileOpen(v);
           if (!v) setFocusSender(null);
         }}
         focusSender={focusSender}
+        contentRoomId={focusSender ? focusedDirectRoom?.room_id ?? null : room.room_id}
+        onMessage={focusSender || peer ? openDirectMessage : undefined}
       />
 
       {/* data-private masks all message text out of PostHog session replays

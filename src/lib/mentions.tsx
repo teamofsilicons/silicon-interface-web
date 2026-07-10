@@ -48,6 +48,16 @@ export function mentionHref(target: MentionTarget): string {
   return `mention://${target.kind}/${encodeURIComponent(target.handle)}`;
 }
 
+/** Shared square mention treatment used in both sent messages and the composer. */
+export function mentionClassName(inverted = false): string {
+  return cn(
+    "inline px-1 font-medium no-underline transition-opacity",
+    inverted
+      ? "bg-primary-foreground/15 text-primary-foreground"
+      : "bg-foreground/10 text-foreground",
+  );
+}
+
 export function mentionFromHref(
   href: string | undefined,
   lookup: MentionLookup,
@@ -127,10 +137,7 @@ export function MentionLink({
         event.stopPropagation();
         onMentionClick(target);
       }}
-      className={cn(
-        "rounded px-0.5 font-medium underline underline-offset-2 transition-opacity hover:opacity-80",
-        inverted ? "bg-primary-foreground/15 text-primary-foreground" : "bg-primary/10 text-primary",
-      )}
+      className={cn(mentionClassName(inverted), "hover:opacity-80")}
     >
       {children}
     </a>

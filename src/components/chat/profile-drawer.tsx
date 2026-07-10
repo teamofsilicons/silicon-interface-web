@@ -1,7 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Copy, FileText, ImageSquare, LinkSimple, MicrophoneStage, SquaresFour } from "@phosphor-icons/react/dist/ssr";
+import {
+  ChatCircleText,
+  Copy,
+  FileText,
+  ImageSquare,
+  LinkSimple,
+  MicrophoneStage,
+  SquaresFour,
+} from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { NotePencil, UserPlus } from "@phosphor-icons/react/dist/ssr";
@@ -40,6 +48,10 @@ interface Props {
   /** Optional override — when set, the drawer shows this specific sender's
    *  profile instead of the room's default counterpart. */
   focusSender?: SenderRef | null;
+  /** Direct room whose shared content belongs to the focused mention. */
+  contentRoomId?: string | null;
+  /** Opens (or creates) the focused person's direct conversation. */
+  onMessage?: (target: SenderRef) => Promise<void> | void;
 }
 
 type TabId = "all" | "images" | "files" | "voice" | "links";
@@ -61,6 +73,8 @@ export function ProfileDrawer({
   open,
   onOpenChange,
   focusSender,
+  contentRoomId,
+  onMessage,
 }: Props) {
   // Sender priority: explicit focus → first non-me sender → first room peer.
   const counterpart: SenderRef | null = React.useMemo(() => {
@@ -84,6 +98,9 @@ export function ProfileDrawer({
   const [profileLoading, setProfileLoading] = React.useState(false);
   const [tab, setTab] = React.useState<TabId>("all");
   const [inviteOpen, setInviteOpen] = React.useState(false);
+  const [focusedEvents, setFocusedEvents] = React.useState<Event[]>([]);
+  const [focusedEventsLoading, setFocusedEventsLoading] = React.useState(false);
+  const [messageOpening, setMessageOpening] = React.useState(false);
 
   // For a silicon profile we can offer "invite people to this silicon" when we
   // know its owner team (the invite API is scoped to that team).
@@ -118,34 +135,86 @@ export function ProfileDrawer({
     };
   }, [open, counterpart]);
 
+  // A mention can point outside the room currently on screen. In that case,
+  // load media/links from the target's direct conversation instead of leaking
+  // the open room's attachments into their profile.
+  React.useEffect(() => {
+    let alive = true;
+    const reset = (loading: boolean) => {
+      queueMicrotask(() => {
+        if (!alive) return;
+        setFocusedEvents([]);
+        setFocusedEventsLoading(loading);
+      });
+    };
+    if (!open || !focusSender) {
+      reset(false);
+      return () => {
+        alive = false;
+      };
+    }
+    if (!contentRoomId) {
+      reset(false);
+      return () => {
+        alive = false;
+      };
+    }
+    if (contentRoomId === room.room_id) {
+      reset(false);
+      return () => {
+        alive = false;
+      };
+    }
+    reset(true);
+    api
+      .events(contentRoomId, undefined, 100)
+      .then((next) => {
+        if (alive) setFocusedEvents(next);
+      })
+      .catch(() => {
+        if (alive) setFocusedEvents([]);
+      })
+      .finally(() => {
+        if (alive) setFocusedEventsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [contentRoomId, focusSender, open, room.room_id]);
+
   // Reset to "all" each time the drawer is freshly opened so users land on
   // the most informative tab by default.
   React.useEffect(() => {
     if (open) setTab("all");
   }, [open]);
 
+  const contentEvents = focusSender
+    ? contentRoomId === room.room_id
+      ? events
+      : focusedEvents
+    : events;
   const images = React.useMemo(
-    () => events.filter((e) => e.type === "m.image" && e.content.media_id),
-    [events],
+    () => contentEvents.filter((e) => e.type === "m.image" && e.content.media_id),
+    [contentEvents],
   );
   const files = React.useMemo(
-    () => events.filter((e) => e.type === "m.file" && e.content.media_id),
-    [events],
+    () => contentEvents.filter((e) => e.type === "m.file" && e.content.media_id),
+    [contentEvents],
   );
   const voice = React.useMemo(
-    () => events.filter((e) => e.type === "m.voice" && e.content.media_id),
-    [events],
+    () => contentEvents.filter((e) => e.type === "m.voice" && e.content.media_id),
+    [contentEvents],
   );
   const links = React.useMemo(() => {
     const out: string[] = [];
-    for (const e of events) {
+    for (const e of contentEvents) {
       if (e.type === "m.text") {
         const found = String(e.content.body ?? "").match(URL_RE);
         if (found) out.push(...found);
       }
     }
     return Array.from(new Set(out));
-  }, [events]);
+  }, [contentEvents]);
 
   const counts: Record<TabId, number> = {
     all: images.length + files.length + voice.length + links.length,
@@ -175,6 +244,18 @@ export function ProfileDrawer({
   const copy = async (label: string, value: string) => {
     if (await copyText(value)) toast.success(`${label} copied`);
     else toast.error("couldn't copy - copy it manually");
+  };
+
+  const message = async () => {
+    if (!counterpart || !onMessage || messageOpening) return;
+    setMessageOpening(true);
+    try {
+      await onMessage(counterpart);
+    } catch {
+      toast.error("couldn't open this conversation");
+    } finally {
+      setMessageOpening(false);
+    }
   };
 
   return (
@@ -241,6 +322,15 @@ export function ProfileDrawer({
 
         {bio && (
           <p className="mt-4 px-1 text-center text-sm text-muted-foreground">{bio}</p>
+        )}
+
+        {counterpart && onMessage && (
+          <div className="mt-4 flex justify-center">
+            <Button size="sm" onClick={() => void message()} disabled={messageOpening} className="gap-1.5">
+              <ChatCircleText className="h-3.5 w-3.5" />
+              {messageOpening ? "opening…" : "Message"}
+            </Button>
+          </div>
         )}
 
         {/* Saved-contact note (private to you) + edit. */}
@@ -313,7 +403,11 @@ export function ProfileDrawer({
           </div>
 
           <div className="mt-4 min-h-32">
-            {tab === "all" && (
+            {focusedEventsLoading ? (
+              <div className="label-mono border border-dashed bg-card px-4 py-8 text-center text-[10px] text-muted-foreground">
+                loading shared content…
+              </div>
+            ) : tab === "all" ? (
               <AllTab
                 images={images}
                 files={files}
@@ -321,11 +415,15 @@ export function ProfileDrawer({
                 links={links}
                 empty={counts.all === 0}
               />
+            ) : tab === "images" ? (
+              <ImagesTab events={images} />
+            ) : tab === "files" ? (
+              <FilesTab events={files} />
+            ) : tab === "voice" ? (
+              <VoiceTab events={voice} />
+            ) : (
+              <LinksTab links={links} />
             )}
-            {tab === "images" && <ImagesTab events={images} />}
-            {tab === "files" && <FilesTab events={files} />}
-            {tab === "voice" && <VoiceTab events={voice} />}
-            {tab === "links" && <LinksTab links={links} />}
           </div>
         </div>
       </DialogContent>

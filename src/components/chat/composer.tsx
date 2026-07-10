@@ -44,6 +44,11 @@ import {
 } from "@/lib/voice-recording-session";
 import { editableTextForEvent } from "@/lib/event-edit";
 import { clearAnnotationSession } from "@/lib/annotation-session";
+import {
+  buildMentionLookup,
+  mentionClassName,
+  splitMentionText,
+} from "@/lib/mentions";
 import type { AnnotationDraft, Event, EventType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -889,6 +894,7 @@ export function Composer({
   // @-mention picker — null when inactive; otherwise the partial handle typed.
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
   const [mentionIdx, setMentionIdx] = React.useState(0);
+  const [mentionInputComposing, setMentionInputComposing] = React.useState(false);
   const attachmentMentionCandidates = React.useMemo<AttachmentMentionCandidate[]>(
     () =>
       attachments
@@ -910,6 +916,15 @@ export function Composer({
     () => (mentionQuery === null ? [] : filterMentions(composerMentionCandidates, mentionQuery)),
     [mentionQuery, composerMentionCandidates],
   );
+  const mentionInputLookup = React.useMemo(
+    () => buildMentionLookup(mentionCandidates),
+    [mentionCandidates],
+  );
+  const mentionInputPieces = React.useMemo(
+    () => splitMentionText(text, mentionInputLookup),
+    [mentionInputLookup, text],
+  );
+  const mentionMirrorRef = React.useRef<HTMLDivElement>(null);
   // Replace the `@token` immediately before the caret with `@handle ` and drop
   // the picker. Shared by keyboard (Tab/Enter) and mouse selection. Plain
   // function so it can reference `persistDraft` (declared below) lazily.
@@ -2188,6 +2203,25 @@ export function Composer({
           <Paperclip />
         </button>
         <div className="relative flex min-h-11 min-w-0 flex-1 items-center border border-input transition-colors focus-within:border-ring">
+          <div
+            ref={mentionMirrorRef}
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-3 py-2.5 text-sm text-foreground",
+              mentionInputComposing && "invisible",
+            )}
+          >
+            {mentionInputPieces.map((piece, index) =>
+              piece.kind === "mention" ? (
+                <span key={`${piece.value}-${index}`} className={mentionClassName(false)}>
+                  {piece.value}
+                </span>
+              ) : (
+                <React.Fragment key={`text-${index}`}>{piece.value}</React.Fragment>
+              ),
+            )}
+            {text.endsWith("\n") ? " " : null}
+          </div>
           <textarea
             ref={taRef}
             autoFocus
@@ -2197,6 +2231,8 @@ export function Composer({
               setDraftFocused(roomId, false);
               flushDraft(roomId);
             }}
+            onCompositionStart={() => setMentionInputComposing(true)}
+            onCompositionEnd={() => setMentionInputComposing(false)}
             onChange={(e) => {
               const v = e.target.value;
               setText(v);
@@ -2227,7 +2263,16 @@ export function Composer({
             }}
             placeholder={isEditing ? "edit message…" : "message…"}
             rows={MIN_ROWS}
-            className="w-full resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
+            className={cn(
+              "relative z-10 w-full resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground",
+              mentionInputComposing ? "text-foreground" : "text-transparent caret-foreground",
+            )}
+            onScroll={(event) => {
+              const mirror = mentionMirrorRef.current;
+              if (!mirror) return;
+              mirror.scrollTop = event.currentTarget.scrollTop;
+              mirror.scrollLeft = event.currentTarget.scrollLeft;
+            }}
             onPaste={(e) => {
               // Paste a screenshot (or any file) to attach it. We only consume
               // the event when the clipboard actually carries a file — a normal

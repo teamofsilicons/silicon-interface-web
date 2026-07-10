@@ -1617,7 +1617,9 @@ export function Composer({
       clearDelayTimer();
       delayedTextQueueRef.current = [];
       heldSendIdsRef.current.clear();
-      cancelledHeldClientIdsRef.current.clear();
+      // Do NOT clear explicit-cancel tombstones here. A held-create request may
+      // still resolve after unmount; its then() must see the tombstone and issue
+      // cancelHeldSend so a user-deleted optimistic message cannot later release.
       setQueuedTextCount(0);
       onHoldStateChange?.(false);
     },

@@ -57,6 +57,7 @@ import { AnnotationStudio } from "@/components/chat/annotation-studio/annotation
 import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { RoomSendProvider } from "@/components/chat/room-send-context";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
+import { sendTimeoutMs } from "@/lib/send-timeout";
 import type { AnnotationOpenRequest } from "@/components/chat/media-previewer";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 import { CronDrawer } from "@/components/chat/cron-drawer";
@@ -86,6 +87,8 @@ interface Props {
 type LocalEvent = Event & {
   _status?: MessageStatus;
   _clientId?: string;
+  _sendTimeoutAt?: string;
+  _sendTimeoutMs?: number;
 };
 
 interface PendingUnsend {
@@ -1678,9 +1681,14 @@ export function RoomView({
 
   // ----- Optimistic send plumbing -----
   const onOptimisticAdd = React.useCallback(
-    (clientId: string, payload: OptimisticPayload) => {
+    (
+      clientId: string,
+      payload: OptimisticPayload,
+      options?: { timeoutMs?: number },
+    ) => {
       if (!myUsername) return;
       const now = new Date().toISOString();
+      const timeoutMs = options?.timeoutMs ?? sendTimeoutMs();
       const placeholder: LocalEvent = {
         event_id: TEMP_ID(clientId),
         room: 0,
@@ -1697,6 +1705,8 @@ export function RoomView({
         redaction_reason: "",
         _status: "pending",
         _clientId: clientId,
+        _sendTimeoutMs: timeoutMs,
+        _sendTimeoutAt: new Date(Date.now() + timeoutMs).toISOString(),
       };
       // Persist before React commits so switching chats immediately after send
       // still paints the outgoing message without waiting on the network.
@@ -1830,6 +1840,52 @@ export function RoomView({
     [room.room_id],
   );
 
+  // A lost response, stalled upload, dead worker, or sleeping tab must not
+  // leave a bubble saying "sending" forever. Deadlines live on the optimistic
+  // row so room switches preserve them. A late ack is still allowed to replace
+  // the failed row, and retry reuses the client id, making both races safe.
+  React.useEffect(() => {
+    const pending = events.filter(
+      (event) => event._status === "pending" && Boolean(event._clientId),
+    );
+    if (pending.length === 0) return;
+
+    const deadlineOf = (event: LocalEvent) => {
+      const explicit = event._sendTimeoutAt
+        ? Date.parse(event._sendTimeoutAt)
+        : Number.NaN;
+      if (Number.isFinite(explicit)) return explicit;
+      const created = Date.parse(event.created_at);
+      return (
+        (Number.isFinite(created) ? created : Date.now()) +
+        (event._sendTimeoutMs ?? sendTimeoutMs())
+      );
+    };
+    const nextDeadline = Math.min(...pending.map(deadlineOf));
+    const timer = window.setTimeout(() => {
+      const now = Date.now();
+      const expiredClientIds = new Set(
+        pending
+          .filter((event) => deadlineOf(event) <= now)
+          .map((event) => event._clientId as string),
+      );
+      if (expiredClientIds.size === 0) return;
+      setEvents((current) =>
+        current.map((event) =>
+          event._status === "pending" &&
+          event._clientId &&
+          expiredClientIds.has(event._clientId)
+            ? { ...event, _status: "failed" as MessageStatus }
+            : event,
+        ),
+      );
+      for (const clientId of expiredClientIds) {
+        failPendingPreview(room.room_id, clientId);
+      }
+    }, Math.max(0, nextDeadline - Date.now()) + 25);
+    return () => window.clearTimeout(timer);
+  }, [events, room.room_id]);
+
   const heldAckRef = React.useRef(onAck);
   React.useEffect(() => {
     heldAckRef.current = onAck;
@@ -1938,7 +1994,15 @@ export function RoomView({
       };
       setEvents((prev) =>
         prev.map((e) =>
-          e._clientId === clientId ? { ...e, _status: "pending" as MessageStatus } : e,
+          e._clientId === clientId
+            ? {
+                ...e,
+                _status: "pending" as MessageStatus,
+                _sendTimeoutAt: new Date(
+                  Date.now() + (e._sendTimeoutMs ?? sendTimeoutMs()),
+                ).toISOString(),
+              }
+            : e,
         ),
       );
       setPendingPreview(room.room_id, {
@@ -2550,6 +2614,7 @@ export function RoomView({
                   replyJumpState={e.reply_to_event_id ? replyJumpState[e.reply_to_event_id] : undefined}
                   isDirect={room.kind === "direct"}
                   status={e._status}
+                  holdCountdownPaused={holdingMessage}
                   senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
                   senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
                   senderAvatarKind={e.sender_kind}

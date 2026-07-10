@@ -60,6 +60,7 @@ import { MarkdownView } from "@/components/chat/markdown-view";
 import { MediaPreviewer } from "@/components/chat/media-previewer";
 import { looksLikeMarkdown } from "@/lib/markdown";
 import { IdAvatar } from "@/components/profile/id-avatar";
+import { sendTimeoutMs } from "@/lib/send-timeout";
 
 
 /** Slice of an `Event` we can fabricate locally before the server responds. */
@@ -95,7 +96,11 @@ interface Props {
    * Called the instant the user presses send, before any network roundtrip,
    * so the parent can insert a "pending" placeholder bubble.
    */
-  onOptimisticAdd: (clientId: string, payload: OptimisticPayload) => void;
+  onOptimisticAdd: (
+    clientId: string,
+    payload: OptimisticPayload,
+    options?: { timeoutMs?: number },
+  ) => void;
   /** Server acked the POST — swap the optimistic placeholder for the real event. */
   onAck: (clientId: string, real: Event) => void;
   /** POST failed — mark the optimistic placeholder as failed. */
@@ -246,6 +251,8 @@ function StagedAttachment({
   mediaId,
   uploadPct,
   uploadLoaded,
+  failed = false,
+  onRetry,
   onRemove,
   roomId,
   onAttachAnnotations,
@@ -261,6 +268,9 @@ function StagedAttachment({
   uploadPct?: number | null;
   /** Real bytes uploaded so far (from the XHR progress event). */
   uploadLoaded?: number | null;
+  /** The upload exceeded its deadline or errored and can be attempted again. */
+  failed?: boolean;
+  onRetry?: () => void;
   onRemove: () => void;
   /** Room the draft will be sent to — enables annotating the staged file. */
   roomId?: string;
@@ -343,7 +353,9 @@ function StagedAttachment({
         <div className="min-w-0 flex-1">
           <FileName name={name} className="text-xs font-medium" />
           <div className="label-mono text-[10px] text-muted-foreground">
-            {uploading
+            {failed
+              ? "upload failed"
+              : uploading
               ? size > 0
                 ? `${formatBytes(uploadLoaded ?? (size * (uploadPct ?? 0)) / 100)} / ${formatBytes(size)} (${uploadPct}%)`
                 : `${uploadPct}%`
@@ -353,6 +365,15 @@ function StagedAttachment({
           </div>
         </div>
       </button>
+      {failed && onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="shrink-0 text-xs font-medium text-destructive underline-offset-2 hover:underline"
+        >
+          retry
+        </button>
+      )}
       <Button
         size="icon"
         variant="ghost"
@@ -787,6 +808,7 @@ export function Composer({
             form,
             (pct, loaded) => updateAttachment(id, { pct, loaded }),
             ref,
+            sendTimeoutMs(file.size),
           );
           // Decode metadata (#22 image dims; #6 audio/video duration) so the
           // bubble reserves the right aspect / shows duration immediately.
@@ -827,6 +849,17 @@ export function Composer({
     xhrRefs.current.delete(id);
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
+
+  const retryAttachment = React.useCallback(
+    (id: string) => {
+      const stage = attachmentsRef.current.find((item) => item.id === id);
+      if (!stage?.file || stage.status !== "error") return;
+      const retrying = { ...stage, status: "uploading" as const, pct: null, loaded: null };
+      setAttachments((prev) => prev.map((item) => (item.id === id ? retrying : item)));
+      void uploadOne(retrying);
+    },
+    [uploadOne],
+  );
 
   // §6.6 / §6.7 — Stage one or more files from the picker, a drag-drop, or a
   // paste. Each is validated, staged, and starts uploading immediately.
@@ -1120,6 +1153,21 @@ export function Composer({
   const typingTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = React.useRef(false);
   const beaconTyping = React.useCallback(() => {
+    // Once a follow-up starts, the existing hold no longer has a truthful ETA:
+    // it must wait for this draft. Pause the real timer immediately as well as
+    // hiding its countdown; RoomView keeps the explanatory holding flag up.
+    if (delayedTextQueueRef.current.length > 0) {
+      if (delayTimerRef.current) {
+        clearTimeout(delayTimerRef.current);
+        delayTimerRef.current = null;
+      }
+      if (emptyHoldTimerRef.current) {
+        clearTimeout(emptyHoldTimerRef.current);
+        emptyHoldTimerRef.current = null;
+      }
+      setQueuePaused(true);
+      onHoldStateChange?.(true);
+    }
     if (!isTypingRef.current) {
       isTypingRef.current = true;
       setTypingActive(true);
@@ -1131,7 +1179,7 @@ export function Composer({
       setTypingActive(false);
       api.activity(roomId, "typing", false).catch(() => undefined);
     }, 3000);
-  }, [roomId, setTypingActive]);
+  }, [onHoldStateChange, roomId, setTypingActive]);
   React.useEffect(() => () => {
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     if (isTypingRef.current) {
@@ -1632,6 +1680,24 @@ export function Composer({
     [clearDelayTimer, onHoldStateChange],
   );
 
+  const sendOptimistic = async (
+    payload: OptimisticPayload,
+    options?: { sizeBytes?: number },
+  ): Promise<boolean> => {
+    const clientId = newClientId();
+    onOptimisticAdd(clientId, payload, {
+      timeoutMs: sendTimeoutMs(options?.sizeBytes),
+    });
+    try {
+      const real = await api.sendEvent(roomId, payload, clientId);
+      onAck(clientId, real);
+      return true;
+    } catch (error) {
+      onFail(clientId, error);
+      return false;
+    }
+  };
+
   const sendTextOptimistic = (body: string, extraContent?: Record<string, unknown>) => {
     const clientId = newClientId();
     const payload: OptimisticPayload = {
@@ -1639,7 +1705,7 @@ export function Composer({
       content: { body, ...(extraContent ?? {}) },
       reply_to_event_id: replyTo?.event_id,
     };
-    onOptimisticAdd(clientId, payload);
+    onOptimisticAdd(clientId, payload, { timeoutMs: sendTimeoutMs() });
     // Persisted outbox: enqueue BEFORE the POST, ack on success. On failure
     // the entry stays — the reconnect/mount flusher (and the failed bubble's
     // tap-to-retry) re-POSTs it with the same client id, which the server
@@ -1715,7 +1781,7 @@ export function Composer({
             // linked to the original so the thread + silicon reference it.
             const d = a.annotation;
             const annType = d.annotatedMime.startsWith("image/") ? "m.image" : "m.file";
-            await api.sendEvent(roomId, {
+            const sent = await sendOptimistic({
               type: annType,
               content: {
                 media_id: d.annotatedMediaId,
@@ -1725,22 +1791,29 @@ export function Composer({
               },
               ...(d.sourceEventId ? { reply_to_event_id: d.sourceEventId } : {}),
             });
-            clearAnnotationSession(roomId, d.sourceMediaId);
-            sentAnnotations = true;
-            track.messageSent({ room_id: roomId, message_type: annType, has_attachment: true });
+            if (sent) {
+              clearAnnotationSession(roomId, d.sourceMediaId);
+              sentAnnotations = true;
+              track.messageSent({ room_id: roomId, message_type: annType, has_attachment: true });
+            }
             continue;
           }
           const fileType = a.mime.startsWith("image/") ? "m.image" : "m.file";
-          await api.sendEvent(roomId, {
-            type: fileType,
-            content: {
-              media_id: a.mediaId,
-              mime: a.mime,
-              filename: a.name,
-              ...(bundleId ? { bundle_id: bundleId } : {}),
+          const sent = await sendOptimistic(
+            {
+              type: fileType,
+              content: {
+                media_id: a.mediaId,
+                mime: a.mime,
+                filename: a.name,
+                ...(bundleId ? { bundle_id: bundleId } : {}),
+              },
             },
-          });
-          track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
+            { sizeBytes: a.size },
+          );
+          if (sent) {
+            track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
+          }
         }
         reset();
         // An attached annotation set carried the reply to the file — clear it so
@@ -1808,11 +1881,15 @@ export function Composer({
     const clientId = newClientId();
     const mime = blob.type || "audio/webm";
     const localUrl = URL.createObjectURL(blob);
-    onOptimisticAdd(clientId, {
-      type: "m.voice",
-      content: { duration_ms: durationMs, mime, local_url: localUrl },
-      reply_to_event_id: replyTo?.event_id,
-    });
+    onOptimisticAdd(
+      clientId,
+      {
+        type: "m.voice",
+        content: { duration_ms: durationMs, mime, local_url: localUrl },
+        reply_to_event_id: replyTo?.event_id,
+      },
+      { timeoutMs: sendTimeoutMs(blob.size) },
+    );
     const peaksPromise = computePeaks(blob)
       .then((peaks) => {
         if (peaks) {
@@ -1850,7 +1927,13 @@ export function Composer({
         // abort path the file picker uses, so a long note on a slow uplink
         // shows progress and can be cancelled instead of an inert spinner.
         setVoiceUploadPct(0);
-        await xhrUpload(r.upload.url, form, setVoiceUploadPct, voiceXhrRef);
+        await xhrUpload(
+          r.upload.url,
+          form,
+          setVoiceUploadPct,
+          voiceXhrRef,
+          sendTimeoutMs(blob.size),
+        );
       }
       // #6 — Send the peaks we computed during recording (durationMs is
       // already known; the recorder reports it). This runs for dev uploads too
@@ -2000,6 +2083,8 @@ export function Composer({
                 mediaId={a.mediaId}
                 uploadPct={a.status === "uploading" ? (a.pct ?? 0) : null}
                 uploadLoaded={a.loaded}
+                failed={a.status === "error"}
+                onRetry={() => retryAttachment(a.id)}
                 onRemove={() => removeAttachment(a.id)}
                 roomId={roomId}
                 onAttachAnnotations={stageAnnotationDraft}

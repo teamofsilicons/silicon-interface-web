@@ -220,6 +220,8 @@ interface Props {
   onTakeBack?: (eventId: string, force?: boolean) => void;
   /** Send-receipt for messages this Carbon authored. Ignored for received messages. */
   status?: MessageStatus;
+  /** The Silicon hold is waiting on typing/editing, so its ETA is not active. */
+  holdCountdownPaused?: boolean;
   /** Photo URL for the sender — used when rendering the message-side avatar. */
   senderPhotoUrl?: string | null;
   /** Delights §0a — colored ASCII treatment for the sender's avatar. */
@@ -284,6 +286,7 @@ export function MessageBubble({
   isOwnSilicon,
   onTakeBack,
   status,
+  holdCountdownPaused = false,
   senderPhotoUrl,
   senderAsciiUrl,
   senderAvatarKind,
@@ -417,7 +420,9 @@ export function MessageBubble({
       ? event.content.hold_release_at
       : null;
   const showHeldCountdown =
-    isMine && status === "pending" && Boolean(holdReleaseAt);
+    isMine && status === "pending" && Boolean(holdReleaseAt) && !holdCountdownPaused;
+  const showPausedHoldClock =
+    isMine && status === "pending" && Boolean(holdReleaseAt) && holdCountdownPaused;
 
   return (
     <div
@@ -620,7 +625,12 @@ export function MessageBubble({
             minute) run, so a quick back-to-back exchange shows one common
             timestamp instead of one per line. Streaming indicator escapes
             the gate because it's a live state, not historical metadata. */}
-        {(showTime || showHeldCountdown || mightStream || eventShowsEdited(event)) && (
+        {(showTime ||
+          showHeldCountdown ||
+          showPausedHoldClock ||
+          status === "failed" ||
+          mightStream ||
+          eventShowsEdited(event)) && (
           <div
             className={cn(
               "flex items-center gap-1.5 text-[10px] text-muted-foreground",
@@ -633,7 +643,8 @@ export function MessageBubble({
               showTime && <HoverTime iso={event.created_at} />
             )}
             {eventShowsEdited(event) && <span>edited</span>}
-            {showTime && isMine && status && !showHeldCountdown && (
+            {(showTime || showPausedHoldClock || status === "failed") &&
+              isMine && status && !showHeldCountdown && (
               status === "failed" && onRetry ? (
                 // Failed → the receipt becomes tap-to-retry (same clientId, so
                 // the server-side idempotency guarantees no duplicate).
@@ -980,7 +991,8 @@ function HeldSendCountdown({ releaseAt }: { releaseAt: string }) {
     ? Math.max(0, Math.ceil((deadline - now) / 1000))
     : 0;
   return (
-    <span className="tabular-nums">
+    <span className="inline-flex items-center gap-1 tabular-nums">
+      <Clock className="h-3 w-3 opacity-60" aria-hidden="true" />
       {seconds > 0 ? `sending in ${seconds}` : "sending…"}
     </span>
   );

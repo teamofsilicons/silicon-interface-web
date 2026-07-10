@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { sendTimeoutMs } from "./send-timeout";
 
 /**
  * Upload to a presigned URL via XHR (fetch can't report upload progress).
@@ -13,11 +14,13 @@ export function xhrUpload(
   form: FormData,
   onProgress: (pct: number, loaded: number) => void,
   xhrRef: { current: XMLHttpRequest | null },
+  timeoutMs?: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhrRef.current = xhr;
     xhr.open("POST", url);
+    if (timeoutMs && timeoutMs > 0) xhr.timeout = timeoutMs;
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100), e.loaded);
     };
@@ -32,6 +35,10 @@ export function xhrUpload(
     xhr.onerror = () => {
       clear();
       reject(new Error("upload failed"));
+    };
+    xhr.ontimeout = () => {
+      clear();
+      reject(new Error("upload timed out - retry to try again"));
     };
     xhr.onabort = () => {
       clear();
@@ -63,7 +70,13 @@ export async function uploadMediaBlob(opts: {
     const form = new FormData();
     for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
     form.append("file", file, filename);
-    await xhrUpload(r.upload.url, form, onProgress ?? (() => {}), xhrRef ?? { current: null });
+    await xhrUpload(
+      r.upload.url,
+      form,
+      onProgress ?? (() => {}),
+      xhrRef ?? { current: null },
+      sendTimeoutMs(file.size),
+    );
     await api.mediaComplete(mediaId, meta ?? {});
   }
   return mediaId;

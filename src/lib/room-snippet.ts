@@ -11,9 +11,10 @@ import type { Event } from "./types";
 // snippet and the first server fetch must cover the same recent messages so
 // the cache → server hydration is a near-identical list (no reflow / glitch).
 const ROOM_SNIPPET_LIMIT = 30;
-// Optimistic rows make an immediate room switch feel instant, but an abandoned
-// request must not leave a permanent "waiting" message after a later reopen.
-const OPTIMISTIC_SNIPPET_MAX_AGE_MS = 2 * 60_000;
+// Keep retryable optimistic rows for the same lifetime as the persisted text
+// outbox. Their own send deadline turns "pending" into "failed" on reopen;
+// dropping them after two minutes used to erase the retry for large uploads.
+const OPTIMISTIC_SNIPPET_MAX_AGE_MS = 48 * 60 * 60_000;
 
 function roomSnippetKey(roomId: string): string {
   return `silicon-interface:room-snippet:${roomId}`;
@@ -26,14 +27,16 @@ export function readRoomEventSnippet(roomId: string): Event[] | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { savedAt?: number; events?: Event[] };
     if (!Array.isArray(parsed.events)) return null;
-    const optimisticExpired =
-      typeof parsed.savedAt !== "number" ||
-      Date.now() - parsed.savedAt > OPTIMISTIC_SNIPPET_MAX_AGE_MS;
     return parsed.events.filter(
-      (event) =>
-        event &&
-        typeof event.event_id === "string" &&
-        (!optimisticExpired || !event.event_id.startsWith("temp-")),
+      (event) => {
+        if (!event || typeof event.event_id !== "string") return false;
+        if (!event.event_id.startsWith("temp-")) return true;
+        const createdAt = Date.parse(event.created_at);
+        const base = Number.isFinite(createdAt) ? createdAt : parsed.savedAt;
+        return (
+          typeof base === "number" && Date.now() - base <= OPTIMISTIC_SNIPPET_MAX_AGE_MS
+        );
+      },
     );
   } catch {
     return null;

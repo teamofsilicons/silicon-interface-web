@@ -61,7 +61,7 @@ export function MediaAttachment({
   /** When false, the caption isn't rendered here — the bubble shows it as a
    *  normal message line instead (so image+text reads like a message). */
   showCaption?: boolean;
-  /** Local blob URL for optimistic voice/file renders before the server ack. */
+  /** Local or trusted remote URL for optimistic media before the server ack. */
   localUrl?: string | null;
   localDurationMs?: number | null;
   localPeaks?: number[] | null;

@@ -418,6 +418,10 @@ export function MessageBubble({
     !(event.content as { forward_from?: unknown }).forward_from &&
     emojiMeta.ok &&
     emojiMeta.count === 1;
+  const bareGif =
+    event.type === "m.image" &&
+    !redacted &&
+    String(event.content.mime ?? "").toLowerCase() === "image/gif";
   const holdReleaseAt =
     typeof event.content.hold_release_at === "string"
       ? event.content.hold_release_at
@@ -532,13 +536,14 @@ export function MessageBubble({
             // padding, label, time) reveals the actions — not just the text.
             "relative min-w-0 max-w-full",
             !inSelect && "select-text",
-            // §125 — a lone emoji renders bare: no bubble background, shadow, or
-            // padded box, just the big glyph. Everything else keeps the bubble.
-            soloEmoji ? "py-0.5" : "p-3 text-sm shadow-sm",
+            // Lone emoji and GIFs render bare: no bubble background, frame, or
+            // padding around the visual itself.
+            soloEmoji || bareGif ? "py-0.5" : "p-3 text-sm shadow-sm",
             copyFlash && "copy-flash",
             // Selected bubbles get a highlight ring in select-mode.
             selected && "ring-2 ring-primary",
             !soloEmoji &&
+              !bareGif &&
               (redacted
                 ? "border bg-muted text-muted-foreground italic"
                 : isMine
@@ -1302,15 +1307,16 @@ function BodyContent({
       );
     }
     case "m.image":
-      return c.media_id ? (
+      return c.media_id || c.local_url ? (
         <div className="space-y-1.5">
           <MediaAttachment
-            mediaId={String(c.media_id)}
+            mediaId={c.media_id ? String(c.media_id) : ""}
             mime={c.mime ? String(c.mime) : undefined}
+            localUrl={c.local_url ? String(c.local_url) : null}
             caption={c.caption ? String(c.caption) : undefined}
             showCaption={false}
-            width={event.media_meta?.width ?? null}
-            height={event.media_meta?.height ?? null}
+            width={event.media_meta?.width ?? (typeof c.width === "number" ? c.width : null)}
+            height={event.media_meta?.height ?? (typeof c.height === "number" ? c.height : null)}
             replyToEventId={event.event_id}
             roomId={roomId}
             eventId={event.event_id}

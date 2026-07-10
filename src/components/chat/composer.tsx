@@ -1780,6 +1780,24 @@ export function Composer({
 
   const sendGif = async (gif: GifResult) => {
     if (sendDisabled || busy || isEditing || stagingGif) return;
+    const safeTitle = gif.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 48);
+    const filename = `${safeTitle || gif.id}.gif`;
+    const clientId = newClientId();
+    onOptimisticAdd(clientId, {
+      type: "m.image",
+      content: {
+        local_url: gif.downloadUrl,
+        mime: "image/gif",
+        filename,
+        width: gif.width,
+        height: gif.height,
+      },
+      ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
+    });
     setGifOpen(false);
     setStagingGif(true);
     api.activity(roomId, "uploading", true).catch(() => undefined);
@@ -1787,12 +1805,7 @@ export function Composer({
       const response = await fetch(gif.downloadUrl, { mode: "cors" });
       if (!response.ok) throw new Error(`GIF download failed (${response.status})`);
       const blob = await response.blob();
-      const safeTitle = gif.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 48);
-      const file = new File([blob], `${safeTitle || gif.id}.gif`, { type: "image/gif" });
+      const file = new File([blob], filename, { type: "image/gif" });
       const validationError = validateFile(file);
       if (validationError) throw new Error(validationError);
 
@@ -1822,7 +1835,8 @@ export function Composer({
         );
       }
 
-      const sent = await sendOptimistic(
+      const real = await api.sendEvent(
+        roomId,
         {
           type: "m.image",
           content: {
@@ -1832,14 +1846,13 @@ export function Composer({
           },
           ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
         },
-        { sizeBytes: file.size },
+        clientId,
       );
-      if (sent) {
-        track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
-        onClearReply?.();
-      }
+      onAck(clientId, real);
+      track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
+      onClearReply?.();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn’t send this GIF");
+      onFail(clientId, error);
     } finally {
       api.activity(roomId, "uploading", false).catch(() => undefined);
       setStagingGif(false);

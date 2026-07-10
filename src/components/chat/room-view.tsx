@@ -1043,7 +1043,6 @@ export function RoomView({
   // staleness (the silicon crashed / backend restarted with no `done` frame).
   React.useEffect(() => {
     if (!activeProgress) return;
-    setProgressNow(Date.now());
     const id = window.setInterval(() => setProgressNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [activeProgress]);

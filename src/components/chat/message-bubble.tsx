@@ -313,6 +313,7 @@ export function MessageBubble({
   // §4c — flash the bubble briefly when its text is copied. Declared before any
   // early return so the Hook order is stable across render branches.
   const [copyFlash, setCopyFlash] = React.useState(false);
+  const [moreOpen, setMoreOpen] = React.useState(false);
   const triggerCopyFlash = React.useCallback(() => {
     setCopyFlash(false);
     requestAnimationFrame(() => setCopyFlash(true));
@@ -381,7 +382,6 @@ export function MessageBubble({
   // Message actions are reached via the 3-dot button (and the hover reply/react
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
   // controlled state for that dropdown.
-  const [moreOpen, setMoreOpen] = React.useState(false);
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
   const hasActions =
     !redacted &&
@@ -924,13 +924,12 @@ ActionIconButton.displayName = "ActionIconButton";
  */
 const STREAM_IDLE_MS = 5000;
 function StreamingPill({ body }: { body: string }) {
-  const [idle, setIdle] = React.useState(false);
+  const [idleBody, setIdleBody] = React.useState<string | null>(null);
   React.useEffect(() => {
-    setIdle(false);
-    const t = window.setTimeout(() => setIdle(true), STREAM_IDLE_MS);
+    const t = window.setTimeout(() => setIdleBody(body), STREAM_IDLE_MS);
     return () => window.clearTimeout(t);
   }, [body]);
-  if (idle) return null;
+  if (idleBody === body) return null;
   return <span className="text-primary">streaming…</span>;
 }
 

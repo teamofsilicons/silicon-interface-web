@@ -735,8 +735,9 @@ export function Composer({
   // read for the label (the flush button always reads "send now"), but the
   // setter still resets the flag across hold cycles.
   const [, setWaitExtended] = React.useState(false);
-  // Bumped on an interval while the countdown runs so the banner re-renders.
-  const [, setHoldTick] = React.useState(0);
+  // Updated on an interval while the countdown runs so the banner re-renders
+  // without calling impure Date.now() during render.
+  const [holdNowMs, setHoldNowMs] = React.useState(0);
   const editingClientId =
     ((editingEvent as (Event & { _clientId?: string }) | null)?._clientId ?? null);
   const editingHeld = Boolean(editingEvent?.event_id.startsWith("temp-") && editingClientId);
@@ -1575,7 +1576,9 @@ export function Composer({
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
     setWaitExtended(false);
-    setEmptyHoldEndsAt(Date.now() + SILICON_EMPTY_HOLD_MS);
+    const now = Date.now();
+    setHoldNowMs(now);
+    setEmptyHoldEndsAt(now + SILICON_EMPTY_HOLD_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
       setEmptyHoldEndsAt(null);
@@ -1589,7 +1592,7 @@ export function Composer({
   // ticks down.
   React.useEffect(() => {
     if (emptyHoldEndsAt == null) return;
-    const id = window.setInterval(() => setHoldTick((t) => t + 1), 250);
+    const id = window.setInterval(() => setHoldNowMs(Date.now()), 250);
     return () => window.clearInterval(id);
   }, [emptyHoldEndsAt]);
 
@@ -1597,7 +1600,9 @@ export function Composer({
   const waitOneMoreMinute = React.useCallback(() => {
     if (emptyHoldTimerRef.current) clearTimeout(emptyHoldTimerRef.current);
     setWaitExtended(true);
-    setEmptyHoldEndsAt(Date.now() + SILICON_WAIT_MORE_MS);
+    const now = Date.now();
+    setHoldNowMs(now);
+    setEmptyHoldEndsAt(now + SILICON_WAIT_MORE_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
       setEmptyHoldEndsAt(null);
@@ -1900,6 +1905,9 @@ export function Composer({
     );
   }
 
+  const emptyHoldRemainingSeconds =
+    emptyHoldEndsAt == null ? 0 : Math.max(0, Math.ceil((emptyHoldEndsAt - holdNowMs) / 1000));
+
   return (
     <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
@@ -2045,8 +2053,8 @@ export function Composer({
             // Final countdown — auto-send is imminent.
             <>
               <span className="min-w-0">
-                will send in {Math.max(0, Math.ceil((emptyHoldEndsAt - Date.now()) / 1000))} second
-                {Math.max(0, Math.ceil((emptyHoldEndsAt - Date.now()) / 1000)) === 1 ? "" : "s"}.
+                will send in {emptyHoldRemainingSeconds} second
+                {emptyHoldRemainingSeconds === 1 ? "" : "s"}.
               </span>
               <div className="flex shrink-0 items-center gap-4">
                 <button

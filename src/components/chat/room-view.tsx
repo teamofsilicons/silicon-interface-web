@@ -740,6 +740,57 @@ export function RoomView({
     prevReadyRef.current = socket.ready;
   }, [socket.ready, room.room_id, myUsername]);
 
+
+  const applyHeldSendFrame = (held: HeldSend) => {
+    if (held.room_id !== room.room_id) return;
+    const clientId = held.client_id;
+    if (!clientId) return;
+    if (held.state === "cancelled") {
+      clearPendingPreview(room.room_id, clientId);
+      setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
+      return;
+    }
+    if (held.state === "failed") {
+      failPendingPreview(room.room_id, clientId);
+      setEvents((prev) =>
+        prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
+      );
+      return;
+    }
+    if (held.state === "sent") {
+      clearPendingPreview(room.room_id, clientId);
+      return;
+    }
+    if (!myUsername) return;
+    const body = typeof held.content.body === "string" ? held.content.body : "";
+    setEvents((prev) => {
+      if (prev.some((e) => e._clientId === clientId || e.content.client_id === clientId)) return prev;
+      const pending: LocalEvent = {
+        event_id: `temp-${clientId}`,
+        room: 0,
+        sender_kind: "carbon",
+        sender_id: null,
+        sender_handle: myUsername,
+        type: "m.text",
+        content: { body, client_id: clientId },
+        reply_to_event_id: held.reply_to_event_id || "",
+        is_final: true,
+        created_at: held.created_at || new Date().toISOString(),
+        edited_at: null,
+        redacted_at: null,
+        redaction_reason: "",
+        _status: "pending",
+        _clientId: clientId,
+      };
+      return [...prev, pending];
+    });
+    setPendingPreview(room.room_id, {
+      clientId,
+      text: body || "Message pending",
+      status: "waiting",
+    });
+  };
+
   // §2.1 — the per-frame handler, kept current via a deps-less effect so the
   // single subscription always runs the latest closure. Processes EVERY frame,
   // so no delta / receipt / take-back is ever coalesced away.
@@ -1751,59 +1802,6 @@ export function RoomView({
   );
 
 
-  const applyHeldSendFrame = React.useCallback(
-    (held: HeldSend) => {
-      if (held.room_id !== room.room_id) return;
-      const clientId = held.client_id;
-      if (!clientId) return;
-      if (held.state === "cancelled") {
-        clearPendingPreview(room.room_id, clientId);
-        setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
-        return;
-      }
-      if (held.state === "failed") {
-        failPendingPreview(room.room_id, clientId);
-        setEvents((prev) =>
-          prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
-        );
-        return;
-      }
-      if (held.state === "sent") {
-        clearPendingPreview(room.room_id, clientId);
-        return;
-      }
-      if (!myUsername) return;
-      const body = typeof held.content.body === "string" ? held.content.body : "";
-      setEvents((prev) => {
-        if (prev.some((e) => e._clientId === clientId || e.content.client_id === clientId)) return prev;
-        const pending: LocalEvent = {
-          event_id: `temp-${clientId}`,
-          room: 0,
-          sender_kind: "carbon",
-          sender_id: null,
-          sender_handle: myUsername,
-          type: "m.text",
-          content: { body, client_id: clientId },
-          reply_to_event_id: held.reply_to_event_id || "",
-          is_final: true,
-          created_at: held.created_at || new Date().toISOString(),
-          edited_at: null,
-          redacted_at: null,
-          redaction_reason: "",
-          _status: "pending",
-          _clientId: clientId,
-        };
-        return [...prev, pending];
-      });
-      setPendingPreview(room.room_id, {
-        clientId,
-        text: body || "Message pending",
-        status: "waiting",
-      });
-    },
-    [myUsername, room.room_id],
-  );
-
   React.useEffect(() => {
     let cancelled = false;
     api
@@ -1816,7 +1814,10 @@ export function RoomView({
     return () => {
       cancelled = true;
     };
-  }, [applyHeldSendFrame, room.room_id]);
+  // applyHeldSendFrame is intentionally omitted; this effect should only refetch
+  // server holds when the room changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.room_id]);
 
   // Tap-to-retry on a failed bubble: re-POST the SAME payload with the SAME
   // client id (the server is idempotent per content.client_id, so a retry of

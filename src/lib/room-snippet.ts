@@ -49,11 +49,11 @@ function cacheableEvents<T extends Event>(events: T[]): Event[] {
     .filter((event) => event.type !== "m.progress")
     .slice(-ROOM_SNIPPET_LIMIT)
     .map((event) => {
-      // Real events don't need client-only state. Optimistic rows do: it lets
-      // RoomView reconcile the placeholder with the eventual server event.
+      // Real events keep their monotonic receipt status so reopening a room can
+      // paint ticks on its first cached frame. Only the client id is specific
+      // to optimistic reconciliation and can be dropped after acknowledgement.
       const { ...rest } = event as Event & Record<string, unknown>;
       if (!event.event_id.startsWith("temp-")) {
-        delete (rest as Record<string, unknown>)._status;
         delete (rest as Record<string, unknown>)._clientId;
       }
       return rest as Event;

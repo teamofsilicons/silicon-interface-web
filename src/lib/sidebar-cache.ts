@@ -1,6 +1,6 @@
 "use client";
 
-import type { Contact, Room, Team } from "./types";
+import type { Contact, Room, Team, TeamMembership } from "./types";
 import { normalizeRooms } from "./room-shape";
 import { normalizeTeams } from "./team-shape";
 
@@ -18,6 +18,8 @@ interface SidebarCache {
    *  chat land in the right team tab on first paint instead of flashing in
    *  "Others" while the team rosters refetch. */
   memberships: Record<string, string[]>;
+  /** Full team rosters keyed by slug, used to style mentions on first paint. */
+  teamRosters: Record<string, TeamMembership[]>;
   savedAt: number;
 }
 
@@ -33,6 +35,7 @@ function empty(ownerId: string): SidebarCache {
     contacts: [],
     teams: [],
     memberships: {},
+    teamRosters: {},
     savedAt: Date.now(),
   };
 }
@@ -66,6 +69,10 @@ function read(ownerId: string): SidebarCache | null {
         parsed.memberships && typeof parsed.memberships === "object"
           ? (parsed.memberships as Record<string, string[]>)
           : {},
+      teamRosters:
+        parsed.teamRosters && typeof parsed.teamRosters === "object"
+          ? (parsed.teamRosters as Record<string, TeamMembership[]>)
+          : {},
       savedAt: typeof parsed.savedAt === "number" ? parsed.savedAt : Date.now(),
     };
   } catch {
@@ -75,7 +82,9 @@ function read(ownerId: string): SidebarCache | null {
 
 function write(
   ownerId: string,
-  patch: Partial<Pick<SidebarCache, "rooms" | "contacts" | "teams" | "memberships">>,
+  patch: Partial<
+    Pick<SidebarCache, "rooms" | "contacts" | "teams" | "memberships" | "teamRosters">
+  >,
 ) {
   if (typeof window === "undefined" || !ownerId) return;
   const next: SidebarCache = {
@@ -151,4 +160,27 @@ export function saveCachedMemberships(
   const rec: Record<string, string[]> = {};
   for (const [k, set] of memberships) rec[k] = [...set];
   write(ownerId, { memberships: rec });
+}
+
+export function loadCachedTeamRoster(
+  ownerId: string | null,
+  teamSlug: string | null,
+): TeamMembership[] | null {
+  if (!ownerId || !teamSlug) return null;
+  const cached = read(ownerId);
+  if (!cached || !Object.prototype.hasOwnProperty.call(cached.teamRosters, teamSlug)) {
+    return null;
+  }
+  const rows = cached.teamRosters[teamSlug];
+  return Array.isArray(rows) ? rows : null;
+}
+
+export function saveCachedTeamRoster(
+  ownerId: string | null,
+  teamSlug: string | null,
+  rows: TeamMembership[],
+) {
+  if (!ownerId || !teamSlug) return;
+  const current = read(ownerId)?.teamRosters ?? {};
+  write(ownerId, { teamRosters: { ...current, [teamSlug]: rows } });
 }

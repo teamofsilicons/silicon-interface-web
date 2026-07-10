@@ -35,6 +35,7 @@ import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
 import { useDraftReply } from "@/lib/drafts";
 import { useVoiceRecordingSession } from "@/lib/voice-recording-session";
+import { loadCachedTeamRoster, saveCachedTeamRoster } from "@/lib/sidebar-cache";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -521,26 +522,33 @@ export function RoomView({
   // In a team chat, `@` should offer everyone on the team — not just whoever is
   // already a peer in this room. Load the team roster when the room belongs to a
   // team; direct/Others chats fall back to the room peers alone.
-  const [teamRoster, setTeamRoster] = React.useState<TeamMembership[]>([]);
+  const ownerId = carbon?.carbon_id ?? null;
+  const [teamRoster, setTeamRoster] = React.useState<TeamMembership[]>(
+    () => loadCachedTeamRoster(ownerId, room.team_slug ?? null) ?? [],
+  );
   React.useEffect(() => {
     const slug = room.team_slug;
     if (!slug) {
       setTeamRoster([]);
       return;
     }
+    const cached = loadCachedTeamRoster(ownerId, slug);
+    if (cached) setTeamRoster(cached);
     let alive = true;
     api
       .teamMembers(slug)
       .then((rows) => {
-        if (alive) setTeamRoster(rows);
+        if (!alive) return;
+        setTeamRoster(rows);
+        saveCachedTeamRoster(ownerId, slug, rows);
       })
       .catch(() => {
-        if (alive) setTeamRoster([]);
+        if (alive && !cached) setTeamRoster([]);
       });
     return () => {
       alive = false;
     };
-  }, [room.team_slug]);
+  }, [ownerId, room.team_slug]);
 
   // People offered by the composer's `@` autocomplete. Room peers first (they
   // carry richer name/photo data), then any remaining team members, deduped by
@@ -587,6 +595,29 @@ export function RoomView({
     }
     return [...seen.values()];
   }, [peers, allRooms, teamRoster, myUsername]);
+  // Rendering can resolve anyone the sidebar already knows immediately, even
+  // during a cold roster fetch. Keep this broader lookup out of the composer's
+  // autocomplete: a direct chat should still suggest only its actual peers.
+  const messageMentionTargets = React.useMemo<MentionCandidate[]>(() => {
+    const seen = new Map<string, MentionCandidate>();
+    const add = (candidate: MentionCandidate) => {
+      const key = `${candidate.kind}:${candidate.handle}`;
+      if (!seen.has(key)) seen.set(key, candidate);
+    };
+    for (const candidate of mentionCandidates) add(candidate);
+    for (const candidateRoom of allRooms) {
+      for (const p of Array.isArray(candidateRoom.peers) ? candidateRoom.peers : []) {
+        add({
+          kind: p.kind,
+          handle: p.id,
+          name: p.name,
+          photoUrl: p.profile_photo_url,
+          asciiUrl: p.profile_ascii_url,
+        });
+      }
+    }
+    return [...seen.values()];
+  }, [allRooms, mentionCandidates]);
   const contactForSender = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
@@ -654,7 +685,21 @@ export function RoomView({
     // Messages present when the chat opens are historical — force them final so
     // a missed finalize frame doesn't replay the "streaming…" state as if the
     // message just arrived. Live streaming still flows in via WS frames.
-    setEvents((cachedEvents ?? []).map((e) => ({ ...e, is_final: true })));
+    setEvents(
+      (cachedEvents ?? []).map((e) => {
+        const local = e as LocalEvent;
+        const cachedStatus = local._status;
+        const fallbackStatus =
+          !e.event_id.startsWith("temp-") && isMyEvent(e, myUsername)
+            ? ("delivered" as MessageStatus)
+            : undefined;
+        return {
+          ...e,
+          is_final: true,
+          _status: cachedStatus ?? fallbackStatus,
+        };
+      }),
+    );
     // Restore an in-flight silicon progress line captured at the page level
     // while this room was closed, so reopening a chat where work is still
     // running shows progress immediately instead of waiting for the next frame.
@@ -677,11 +722,11 @@ export function RoomView({
         const owner = authStore.getCarbon()?.carbon_id;
         if (owner) for (const e of evs) advanceEventCursor(owner, e.event_id);
         setEvents((prev) => {
-          const pending = prev.filter((e) => e.event_id.startsWith("temp-") || e._status === "pending");
           // Loaded history is complete — mark final so it doesn't replay
-          // "streaming…" on open (live deltas still arrive via WS).
+          // "streaming…" on open (live deltas still arrive via WS). Reconcile
+          // the full cached set so read/delivered ticks survive hydration.
           const finalized = evs.map((e) => ({ ...e, is_final: true }));
-          return mergeServerEvents(pending, finalized, myUsername);
+          return mergeServerEvents(prev, finalized, myUsername);
         });
         setHasMore(hasMore);
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
@@ -2545,7 +2590,7 @@ export function RoomView({
             isMine={isMyEvent(item.event, myUsername)}
             myHandle={myUsername}
             isDirect={room.kind === "direct"}
-            mentionTargets={mentionCandidates}
+            mentionTargets={messageMentionTargets}
             onMentionClick={openSenderProfile}
             roomId={room.room_id}
             onAttachAnnotations={readOnly ? undefined : onAttachAnnotations}
@@ -2640,7 +2685,7 @@ export function RoomView({
                           onSelfDelete(target, pinsByKey.get(e._clientId ?? e.event_id) ?? [])
                   }
                   pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
-                  mentionTargets={mentionCandidates}
+                  mentionTargets={messageMentionTargets}
                   onMentionClick={openSenderProfile}
                 />
               </div>
@@ -3500,9 +3545,10 @@ function mergeServerEvents(
     const existing = byPrev.get(ev.event_id) ?? (clientId ? byClient.get(clientId) : undefined);
     if (existing) {
       if (existing.event_id !== ev.event_id) consumedLocalIds.add(existing.event_id);
+      const mine = Boolean(ev.sender_handle && ev.sender_handle === myUsername);
       return {
         ...ev,
-        _status: existing._status,
+        _status: mine ? bestStatus(existing._status, "delivered") : existing._status,
         _clientId: existing._clientId ?? clientId ?? undefined,
       };
     }

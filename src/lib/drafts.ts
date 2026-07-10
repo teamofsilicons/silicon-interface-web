@@ -44,24 +44,51 @@ function emit() {
   for (const fn of listeners) fn();
 }
 
-function ownerId(): string {
+function ownerKey(): string | null {
   const carbon = authStore.getCarbon();
-  if (carbon?.carbon_id) return `carbon:${carbon.carbon_id}`;
-  const siliconKey = authStore.getSiliconKey();
-  if (siliconKey) return `silicon-key:${siliconKey.slice(0, 16)}`;
-  return "anonymous";
+  return carbon?.carbon_id ? `carbon:${carbon.carbon_id}` : null;
 }
 
-function storageKey(roomId: string): string {
-  return `${PREFIX}${ownerId()}:${roomId}`;
+function canPersist(): boolean {
+  return ownerKey() !== null;
 }
 
-function backupKey(roomId: string): string {
-  return `${BACKUP_PREFIX}${ownerId()}:${roomId}`;
+function storageKey(roomId: string): string | null {
+  const owner = ownerKey();
+  return owner ? `${PREFIX}${owner}:${roomId}` : null;
 }
 
-function migratedKey(): string {
-  return `${MIGRATED_PREFIX}${ownerId()}`;
+function backupKey(roomId: string): string | null {
+  const owner = ownerKey();
+  return owner ? `${BACKUP_PREFIX}${owner}:${roomId}` : null;
+}
+
+function migratedKey(): string | null {
+  const owner = ownerKey();
+  return owner ? `${MIGRATED_PREFIX}${owner}` : null;
+}
+
+
+function cleanupOwnerDraftStorage(owner: string | null) {
+  if (typeof window === "undefined" || !owner) return;
+  try {
+    const prefixes = [
+      `${PREFIX}${owner}:`,
+      `${BACKUP_PREFIX}${owner}:`,
+      `${MIGRATED_PREFIX}${owner}`,
+      LEGACY_TEXT_PREFIX,
+      LEGACY_ATT_PREFIX,
+    ];
+    for (let i = window.localStorage.length - 1; i >= 0; i -= 1) {
+      const key = window.localStorage.key(i);
+      if (!key) continue;
+      if (prefixes.some((prefix) => key === prefix || key.startsWith(prefix))) {
+        window.localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    /* best-effort logout cleanup */
+  }
 }
 
 function blank(roomId: string): LocalDraft {
@@ -111,9 +138,11 @@ function sanitizeAttachments(list: DraftAttachment[]): DraftAttachment[] {
 }
 
 function saveLocal(draft: LocalDraft) {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || !canPersist()) return;
+  const key = storageKey(draft.room_id);
+  if (!key) return;
   const hasData = Boolean(draft.text || draft.attachments.length || draft.reply_to_event_id);
-  safeLocalSet(storageKey(draft.room_id), hasData ? JSON.stringify(draft) : null);
+  safeLocalSet(key, hasData ? JSON.stringify(draft) : null);
 }
 
 function readLegacyAttachments(roomId: string): DraftAttachment[] {
@@ -131,7 +160,8 @@ function readLocal(roomId: string): LocalDraft {
   if (typeof window === "undefined") return blank(roomId);
   const cached = liveCache.get(roomId);
   if (cached) return cached;
-  const raw = safeLocalGet(storageKey(roomId));
+  const key = storageKey(roomId);
+  const raw = key ? safeLocalGet(key) : null;
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as Partial<LocalDraft>;
@@ -183,6 +213,7 @@ function schedulePublish(roomId: string, immediate = false) {
 }
 
 async function flushServer(roomId: string) {
+  if (!canPersist()) return;
   const draft = readLocal(roomId);
   if (!draft.dirty) return;
   try {
@@ -331,6 +362,7 @@ export function clearDraftAfterSend(roomId: string): void {
   draft.syncError = undefined;
   saveLocal(draft);
   schedulePublish(roomId, true);
+  if (!canPersist()) return;
   void api
     .deleteDraft(roomId, { base_version: baseVersion, origin_device: deviceId() })
     .then((remote) => applyServerDraft(remote, { ack: true }))
@@ -340,11 +372,11 @@ export function clearDraftAfterSend(roomId: string): void {
         const current = body?.current;
         if (!current) return;
         const latest = readLocal(roomId);
-        if (latest.lastLocalEditAt > Date.now() - 2000 && latest.text) return;
         latest.version = current.version;
-        void api.deleteDraft(roomId, { base_version: current.version, origin_device: deviceId() })
-          .then((remote) => applyServerDraft(remote, { ack: true }))
-          .catch(() => undefined);
+        latest.pendingRemote = current;
+        latest.syncError = "conflict";
+        saveLocal(latest);
+        emit();
       }
     });
 }
@@ -385,7 +417,7 @@ export function applyServerDraft(server: DraftState, opts: { ack?: boolean } = {
 }
 
 export async function loadServerDraft(roomId: string): Promise<void> {
-  if (!roomId) return;
+  if (!roomId || !canPersist()) return;
   try {
     const server = await api.draft(roomId);
     applyServerDraft(server);
@@ -395,6 +427,7 @@ export async function loadServerDraft(roomId: string): Promise<void> {
 }
 
 export async function loadAllServerDrafts(): Promise<void> {
+  if (!canPersist()) return;
   try {
     const res = await api.drafts();
     for (const draft of res.drafts ?? []) applyServerDraft(draft);
@@ -404,7 +437,9 @@ export async function loadAllServerDrafts(): Promise<void> {
 }
 
 export async function migrateLegacyDrafts(roomIds: string[]): Promise<void> {
-  if (typeof window === "undefined" || safeLocalGet(migratedKey())) return;
+  const marker = migratedKey();
+  if (typeof window === "undefined" || !marker || safeLocalGet(marker)) return;
+  let safeToMarkMigrated = true;
   for (const roomId of roomIds) {
     const legacyText = safeLocalGet(`${LEGACY_TEXT_PREFIX}${roomId}`) ?? "";
     const legacyAttachments = readLegacyAttachments(roomId);
@@ -419,14 +454,16 @@ export async function migrateLegacyDrafts(roomIds: string[]): Promise<void> {
         saveLocal(local);
         await flushServer(roomId);
       } else {
-        safeLocalSet(backupKey(roomId), JSON.stringify({ text: legacyText, attachments: legacyAttachments }));
+        const backup = backupKey(roomId);
+        if (backup) safeLocalSet(backup, JSON.stringify({ text: legacyText, attachments: legacyAttachments }));
         applyServerDraft(cloud);
       }
     } catch {
+      safeToMarkMigrated = false;
       // Keep legacy local-only until the backend contract exists or connectivity returns.
     }
   }
-  safeLocalSet(migratedKey(), "1");
+  if (safeToMarkMigrated) safeLocalSet(marker, "1");
 }
 
 function subscribe(cb: () => void): () => void {
@@ -442,6 +479,13 @@ function ensureStorageBound() {
   storageBound = true;
   window.addEventListener("storage", (e) => {
     if (e.key && !e.key.startsWith(PREFIX) && !e.key.startsWith(LEGACY_TEXT_PREFIX)) return;
+    liveCache.clear();
+    publishedCache.clear();
+    emit();
+  });
+  window.addEventListener("silicon-interface:auth-clear", (event) => {
+    const owner = (event as CustomEvent<{ ownerKey?: string | null }>).detail?.ownerKey ?? null;
+    cleanupOwnerDraftStorage(owner);
     liveCache.clear();
     publishedCache.clear();
     emit();

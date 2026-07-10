@@ -101,6 +101,14 @@ export const authStore = {
     emit();
   },
   clear() {
+    const current = authStore.getCarbon();
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("silicon-interface:auth-clear", {
+          detail: { ownerKey: current?.carbon_id ? `carbon:${current.carbon_id}` : null },
+        }),
+      );
+    }
     safeSet(ACCESS_KEY, null);
     safeSet(REFRESH_KEY, null);
     safeSet(CARBON_KEY, null);

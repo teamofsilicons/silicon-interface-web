@@ -114,6 +114,8 @@ interface Props {
   /** The parent stashes our `cancelQueued(clientId)` here so deleting a held
    *  message's bubble can drop it from the queue (never sends it). */
   cancelQueuedRef?: React.MutableRefObject<((clientId: string) => void) | null>;
+  /** Parent calls this when the server reports a held send terminal state. */
+  clearHeldClientRef?: React.MutableRefObject<((clientId: string) => void) | null>;
   /** People in this room offered by the `@` mention autocomplete. */
   mentionCandidates?: MentionCandidate[];
   /** Message currently being edited in the composer. */
@@ -656,6 +658,7 @@ export function Composer({
   delayTextForSilicon = false,
   onHoldStateChange,
   cancelQueuedRef,
+  clearHeldClientRef,
   mentionCandidates = [],
   editingEvent = null,
   onEditComplete,
@@ -1245,6 +1248,36 @@ export function Composer({
     };
   }, [cancelQueuedRef, cancelQueued]);
 
+  const clearHeldClient = React.useCallback(
+    (clientId: string) => {
+      heldSendIdsRef.current.delete(clientId);
+      cancelledHeldClientIdsRef.current.delete(clientId);
+      const current = delayedTextQueueRef.current;
+      if (!current.some((it) => it.clientId === clientId)) return;
+      const next = current
+        .filter((it) => it.clientId !== clientId)
+        .map((it, index) => ({ ...it, holdIndex: index }));
+      delayedTextQueueRef.current = next;
+      setQueuedTextCount(next.length);
+      if (next.length === 0) {
+        clearDelayedQueue();
+      } else {
+        for (const queued of next) {
+          onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, next.length));
+        }
+      }
+    },
+    [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate],
+  );
+
+  React.useEffect(() => {
+    if (!clearHeldClientRef) return;
+    clearHeldClientRef.current = clearHeldClient;
+    return () => {
+      clearHeldClientRef.current = null;
+    };
+  }, [clearHeldClientRef, clearHeldClient]);
+
   const flushDelayedTextQueue = React.useCallback(
     async (extra?: QueuedTextSend, optimistic = true) => {
       const items = [
@@ -1373,6 +1406,11 @@ export function Composer({
           heldSendIdsRef.current.set(clientId, held.held_send_id);
         })
         .catch(async (err) => {
+          if (cancelledHeldClientIdsRef.current.has(clientId)) {
+            // The user explicitly deleted this optimistic bubble while create was
+            // in flight. If create fails, do not fall back to immediate send.
+            return;
+          }
           // Honest old-client/API fallback: send immediately with the same
           // client_id, or leave the optimistic bubble failed. Never fake a
           // local-only server hold.

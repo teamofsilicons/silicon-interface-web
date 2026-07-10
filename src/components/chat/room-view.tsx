@@ -372,6 +372,7 @@ export function RoomView({
   // The composer publishes its cancelQueued(clientId) here so deleting a held
   // message's bubble drops it from the send queue.
   const cancelQueuedRef = React.useRef<((clientId: string) => void) | null>(null);
+  const clearHeldClientRef = React.useRef<((clientId: string) => void) | null>(null);
   // §1.1 — a monotonically-advancing tick used to detect a progress line that
   // has gone stale (silicon crashed / backend restarted with no `done` frame).
   const [progressNow, setProgressNow] = React.useState(() => Date.now());
@@ -746,11 +747,13 @@ export function RoomView({
     const clientId = held.client_id;
     if (!clientId) return;
     if (held.state === "cancelled") {
+      clearHeldClientRef.current?.(clientId);
       clearPendingPreview(room.room_id, clientId);
       setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
       return;
     }
     if (held.state === "failed") {
+      clearHeldClientRef.current?.(clientId);
       failPendingPreview(room.room_id, clientId);
       setEvents((prev) =>
         prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
@@ -758,6 +761,7 @@ export function RoomView({
       return;
     }
     if (held.state === "sent") {
+      clearHeldClientRef.current?.(clientId);
       clearPendingPreview(room.room_id, clientId);
       return;
     }
@@ -2774,6 +2778,7 @@ export function RoomView({
             delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
             onHoldStateChange={setHoldingMessage}
             cancelQueuedRef={cancelQueuedRef}
+            clearHeldClientRef={clearHeldClientRef}
             mentionCandidates={mentionCandidates}
             editingEvent={editingEvent}
             onEditComplete={() => setEditingEvent(null)}

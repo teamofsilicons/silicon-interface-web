@@ -17,6 +17,11 @@ export interface VoiceRecordingResult {
   durationMs: number;
 }
 
+export interface VoiceRecordingHandlers {
+  onSubmit: (result: VoiceRecordingResult) => void;
+  onCancel: () => void;
+}
+
 const IDLE_SNAPSHOT: VoiceRecordingSnapshot = {
   phase: "idle",
   roomId: null,
@@ -60,6 +65,7 @@ class VoiceRecordingSession {
   private stopPromise: Promise<VoiceRecordingResult | null> | null = null;
   private resolveStop: ((result: VoiceRecordingResult | null) => void) | null = null;
   private rejectStop: ((error: unknown) => void) | null = null;
+  private handlers: VoiceRecordingHandlers | null = null;
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -69,7 +75,7 @@ class VoiceRecordingSession {
   readonly getSnapshot = (): VoiceRecordingSnapshot => this.snapshot;
   readonly getServerSnapshot = (): VoiceRecordingSnapshot => IDLE_SNAPSHOT;
 
-  async start(roomId: string): Promise<void> {
+  async start(roomId: string, handlers: VoiceRecordingHandlers): Promise<void> {
     if (!roomId) throw new Error("A room is required to record a voice note");
     if (this.snapshot.phase !== "idle") {
       throw new Error("A voice note is already being recorded");
@@ -79,6 +85,7 @@ class VoiceRecordingSession {
     }
 
     const generation = ++this.generation;
+    this.handlers = handlers;
     this.setSnapshot({ phase: "requesting", roomId, startedAt: null });
 
     let stream: MediaStream;
@@ -133,32 +140,44 @@ class VoiceRecordingSession {
     }
   }
 
-  async finish(): Promise<VoiceRecordingResult> {
+  /** Finalize once and deliver to the callbacks captured by the origin room. */
+  async submit(): Promise<void> {
     if (this.snapshot.phase !== "recording") {
       throw new Error("Voice recording is not ready to send");
     }
-    const result = await this.stop("send");
-    if (!result || result.blob.size === 0) throw new Error("Voice recording was empty");
-    return result;
+    const handlers = this.handlers;
+    try {
+      const result = await this.stop("send");
+      if (!result || result.blob.size === 0) throw new Error("Voice recording was empty");
+      handlers?.onSubmit(result);
+    } catch (error) {
+      handlers?.onCancel();
+      throw error;
+    }
   }
 
   async cancel(): Promise<void> {
     if (this.snapshot.phase === "idle") return;
+    const onCancel = this.handlers?.onCancel;
 
     if (this.snapshot.phase === "requesting") {
       // Invalidate the pending getUserMedia request. If it resolves later,
       // start() stops every returned track before rejecting with AbortError.
       this.generation += 1;
       this.resetState();
+      onCancel?.();
       return;
     }
 
-    if (this.snapshot.phase === "stopping") {
-      await this.stopPromise;
-      return;
+    try {
+      if (this.snapshot.phase === "stopping") {
+        await this.stopPromise;
+        return;
+      }
+      await this.stop("cancel");
+    } finally {
+      onCancel?.();
     }
-
-    await this.stop("cancel");
   }
 
   /** Current normalized microphone amplitude for the mounted waveform UI. */
@@ -212,10 +231,13 @@ class VoiceRecordingSession {
   }
 
   private handleRecorderError(error: unknown): void {
+    const stoppedByUser = this.stopPromise !== null;
     const reject = this.rejectStop;
+    const onCancel = this.handlers?.onCancel;
     this.releaseMedia();
     this.resetState();
     reject?.(error);
+    if (!stoppedByUser) onCancel?.();
   }
 
   private startAnalyser(stream: MediaStream): void {
@@ -256,6 +278,7 @@ class VoiceRecordingSession {
     this.resolveStop = null;
     this.rejectStop = null;
     this.stopIntent = "cancel";
+    this.handlers = null;
     this.setSnapshot(IDLE_SNAPSHOT);
   }
 

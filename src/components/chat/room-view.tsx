@@ -48,6 +48,7 @@ import {
   type MentionCandidate,
   type OptimisticPayload,
 } from "@/components/chat/composer";
+import { VoiceRecorder } from "@/components/chat/voice-recorder";
 import { AnnotationStudio } from "@/components/chat/annotation-studio/annotation-studio";
 import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { RoomSendProvider } from "@/components/chat/room-send-context";
@@ -262,17 +263,18 @@ export function RoomView({
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
   const voiceSession = useVoiceRecordingSession();
+  const recordingRoomId = voiceSession.roomId;
   const recordingOrigin = React.useMemo(
-    () => allRooms.find((candidate) => candidate.room_id === voiceSession.roomId) ?? null,
-    [allRooms, voiceSession.roomId],
+    () => allRooms.find((candidate) => candidate.room_id === recordingRoomId) ?? null,
+    [allRooms, recordingRoomId],
   );
   const recordingOriginName = recordingOrigin
     ? roomDisplay(recordingOrigin).name
     : "the original chat";
   const showRecordingBanner =
     voiceSession.phase !== "idle" &&
-    voiceSession.roomId !== null &&
-    voiceSession.roomId !== room.room_id;
+    recordingRoomId !== null &&
+    recordingRoomId !== room.room_id;
   const peers = React.useMemo(() => (Array.isArray(room.peers) ? room.peers : []), [room.peers]);
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
   // header title (saved name vs @id), avatar, and the Save Contact button.
@@ -2401,6 +2403,20 @@ export function RoomView({
   ) : null;
 
   const searching = !!search?.trim();
+  const crossChatRecordingBanner = showRecordingBanner && recordingRoomId ? (
+    <button
+      type="button"
+      aria-live="polite"
+      onClick={() => router.push(`/chat?room=${encodeURIComponent(recordingRoomId)}`)}
+      className="flex w-full items-center justify-center gap-2 border-t border-input bg-card px-4 py-2 text-xs text-foreground transition-colors hover:bg-accent"
+    >
+      <Microphone className="h-3.5 w-3.5 animate-pulse" />
+      <span>
+        voice note is being recorded in <strong>{recordingOriginName}</strong>
+      </span>
+      <span className="text-muted-foreground">· return</span>
+    </button>
+  ) : null;
 
   return (
     <RoomSendProvider value={roomSendValue}>
@@ -2497,21 +2513,6 @@ export function RoomView({
           <SearchBar value={search} onChange={setSearch} onClose={() => setSearch(null)} />
         )}
       </header>
-
-      {showRecordingBanner && voiceSession.roomId && (
-        <button
-          type="button"
-          aria-live="polite"
-          onClick={() => router.push(`/chat?room=${encodeURIComponent(voiceSession.roomId!)}`)}
-          className="flex w-full items-center justify-center gap-2 border-b border-input bg-card px-4 py-2 text-xs text-foreground transition-colors hover:bg-accent"
-        >
-          <Microphone className="h-3.5 w-3.5 animate-pulse" />
-          <span>
-            voice note is being recorded in <strong>{recordingOriginName}</strong>
-          </span>
-          <span className="text-muted-foreground">· return</span>
-        </button>
-      )}
 
       {peer?.kind === "silicon" && (
         <CronDrawer
@@ -2649,7 +2650,7 @@ export function RoomView({
         </button>
       ) : null}
 
-      {selectMode ? (
+      {selectMode && voiceSession.phase === "idle" ? (
         // Dope #79 — selection action bar, shown in place of the composer while
         // multi-selecting. readOnly rooms never enter select-mode (no onSelect).
         <div className="flex items-center justify-between gap-2 border-t bg-background px-4 py-3">
@@ -2668,12 +2669,19 @@ export function RoomView({
             </Button>
           </div>
         </div>
-      ) : readOnly ? (
+      ) : readOnly && voiceSession.phase === "idle" ? (
         <div className="flex items-center justify-center gap-2 border-t bg-muted/40 px-6 py-4 text-xs text-muted-foreground">
           <Eye className="h-3.5 w-3.5" />
           You&rsquo;re observing this silicon-to-silicon conversation. It&rsquo;s
           read-only - you can&rsquo;t send messages here.
         </div>
+      ) : readOnly ? (
+        <>
+          {crossChatRecordingBanner}
+          <div className="border-t bg-background p-3">
+            <VoiceRecorder />
+          </div>
+        </>
       ) : (
         <>
           {siliconUnavailable && (
@@ -2685,6 +2693,7 @@ export function RoomView({
               </span>
             </div>
           )}
+          {crossChatRecordingBanner}
           <Composer
             roomId={room.room_id}
             onOptimisticAdd={onOptimisticAdd}

@@ -701,8 +701,7 @@ export function Composer({
   // MediaRecorder is browser-tab-wide rather than Composer-owned, so a keyed
   // RoomView remount cannot interrupt a voice note when the user changes chat.
   const voiceSession = useVoiceRecordingSession();
-  const recordingHere =
-    voiceSession.phase !== "idle" && voiceSession.roomId === roomId;
+  const recordingActive = voiceSession.phase !== "idle";
   const [busy, setBusy] = React.useState(false);
   const [editSaving, setEditSaving] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
@@ -1872,17 +1871,13 @@ export function Composer({
     })();
   };
 
-  // The controls remount only in the origin room; the global session keeps
-  // recording while other rooms show the banner in RoomView.
-  if (recordingHere) {
+  // The complete recorder follows the user into every writable chat. Its
+  // callbacks remain captured from the origin room in the global session, so
+  // send/discard can never target whichever room merely happens to be visible.
+  if (recordingActive) {
     return (
       <div className="border-t bg-background p-3">
-        <VoiceRecorder
-          onCancel={() => {
-            api.activity(roomId, "recording", false).catch(() => undefined);
-          }}
-          onSubmit={onVoiceSubmit}
-        />
+        <VoiceRecorder />
       </div>
     );
   }
@@ -2317,7 +2312,12 @@ export function Composer({
                 return;
               }
               api.activity(roomId, "recording", true).catch(() => undefined);
-              void voiceRecordingSession.start(roomId).catch((error) => {
+              void voiceRecordingSession.start(roomId, {
+                onSubmit: ({ blob, durationMs }) => onVoiceSubmit(blob, durationMs),
+                onCancel: () => {
+                  api.activity(roomId, "recording", false).catch(() => undefined);
+                },
+              }).catch((error) => {
                 api.activity(roomId, "recording", false).catch(() => undefined);
                 if (error instanceof DOMException && error.name === "AbortError") return;
                 toast.error(

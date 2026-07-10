@@ -10,13 +10,6 @@ import {
 } from "@/lib/voice-recording-session";
 import { Button } from "@/components/ui/button";
 
-interface Props {
-  /** Explicit discard — no Blob is emitted. */
-  onCancel: () => void;
-  /** Explicit send — the parent uploads the one finalized Blob. */
-  onSubmit: (blob: Blob, durationMs: number) => void;
-}
-
 /**
  * Controls for the browser-tab-wide voice recording session.
  *
@@ -24,7 +17,7 @@ interface Props {
  * keyed RoomView tree. This component can therefore unmount while another chat
  * is open and remount later without interrupting the recording.
  */
-export function VoiceRecorder({ onCancel, onSubmit }: Props) {
+export function VoiceRecorder() {
   const session = useVoiceRecordingSession();
   const [elapsed, setElapsed] = React.useState(0);
   const wavesContainerRef = React.useRef<HTMLDivElement>(null);
@@ -75,19 +68,14 @@ export function VoiceRecorder({ onCancel, onSubmit }: Props) {
 
   const handleSend = async () => {
     try {
-      const result = await voiceRecordingSession.finish();
-      onSubmit(result.blob, result.durationMs);
+      await voiceRecordingSession.submit();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "couldn't finish voice note");
     }
   };
 
   const handleCancel = async () => {
-    try {
-      await voiceRecordingSession.cancel();
-    } finally {
-      onCancel();
-    }
+    await voiceRecordingSession.cancel();
   };
 
   if (session.phase === "idle") return null;

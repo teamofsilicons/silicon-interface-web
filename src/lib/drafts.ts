@@ -34,6 +34,10 @@ type LocalDraft = {
 
 const liveCache = new Map<string, LocalDraft>();
 const publishedCache = new Map<string, string>();
+const publishedReplyCache = new Map<
+  string,
+  { signature: string; value: ReplyDraftTarget | null }
+>();
 const publishTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const serverTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const maxTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -338,15 +342,27 @@ export function setDraftAttachments(roomId: string, attachments: DraftAttachment
 export function getDraftReply(roomId: string): ReplyDraftTarget | null {
   if (typeof window === "undefined" || !roomId) return null;
   const draft = readLocal(roomId);
-  if (!draft.reply_to_event_id) return null;
   const snapshot = draft.reply_to_snapshot as ReplyDraftTarget;
-  return {
+  const signature = draft.reply_to_event_id
+    ? [
+        draft.reply_to_event_id,
+        snapshot.sender_handle ?? "",
+        snapshot.sender_kind ?? "",
+        snapshot.type ?? "",
+        snapshot.preview ?? "",
+      ].join("\u0000")
+    : "";
+  const cached = publishedReplyCache.get(roomId);
+  if (cached?.signature === signature) return cached.value;
+  const value: ReplyDraftTarget | null = draft.reply_to_event_id ? {
     event_id: draft.reply_to_event_id,
     sender_handle: snapshot.sender_handle,
     sender_kind: snapshot.sender_kind,
     type: snapshot.type,
     preview: snapshot.preview,
-  };
+  } : null;
+  publishedReplyCache.set(roomId, { signature, value });
+  return value;
 }
 
 export function setDraftReply(roomId: string, reply: ReplyDraftTarget | null): void {
@@ -503,6 +519,7 @@ function ensureStorageBound() {
     if (e.key && !e.key.startsWith(PREFIX) && !e.key.startsWith(LEGACY_TEXT_PREFIX)) return;
     liveCache.clear();
     publishedCache.clear();
+    publishedReplyCache.clear();
     emit();
   });
   window.addEventListener("silicon-interface:auth-clear", (event) => {
@@ -510,6 +527,7 @@ function ensureStorageBound() {
     cleanupOwnerDraftStorage(owner);
     liveCache.clear();
     publishedCache.clear();
+    publishedReplyCache.clear();
     emit();
   });
   authStore.subscribe(() => {
@@ -520,6 +538,7 @@ function ensureStorageBound() {
     lastSeenOwnerKey = nextOwner;
     liveCache.clear();
     publishedCache.clear();
+    publishedReplyCache.clear();
     emit();
   });
 }

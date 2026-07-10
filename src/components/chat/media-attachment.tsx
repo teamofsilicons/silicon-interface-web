@@ -356,7 +356,7 @@ export function MediaAttachment({
               onError={refreshUrl}
               className="sdr-media absolute inset-0 h-full w-full object-contain transition-opacity hover:opacity-90"
             />
-            <DownloadOverlay onClick={() => downloadAsset(url, filename)} />
+            <DownloadOverlay onClick={() => downloadAsset(url, filename, { mediaId })} />
           </div>
           {showCaption && caption && (
             <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>
@@ -399,7 +399,10 @@ export function MediaAttachment({
             <IconChip onClick={() => setPreviewOpen(true)} label="expand">
               <ArrowsOutSimple />
             </IconChip>
-            <IconChip onClick={() => downloadAsset(url, filename)} label="download">
+            <IconChip
+              onClick={() => downloadAsset(url, filename, { mediaId })}
+              label="download"
+            >
               <DownloadSimple />
             </IconChip>
           </div>
@@ -453,7 +456,7 @@ export function MediaAttachment({
         sizeLabel={sizeLabel}
         onClick={() => {
           if (canPreview) setPreviewOpen(true);
-          else if (url) downloadAsset(url, filename);
+          else if (url) downloadAsset(url, filename, { mediaId });
         }}
       />
       {canPreview && (

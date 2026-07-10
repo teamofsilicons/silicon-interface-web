@@ -474,7 +474,11 @@ export const api = {
       data,
     ),
   mediaDetail: (media_id: string) =>
-    call<{ media: MediaObject; download_url: string | null }>(
+    call<{
+      media: MediaObject;
+      download_url: string | null;
+      attachment_url?: string | null;
+    }>(
       "GET",
       `/api/v1/media/${media_id}`,
     ),

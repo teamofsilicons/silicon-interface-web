@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { toast } from "sonner";
 import {
   CircleNotch,
   Code,
@@ -10,6 +11,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr";
 
 import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -195,7 +197,7 @@ export function MediaPreviewer({
             <Button
               size="sm"
               variant="outline"
-              onClick={() => downloadAsset(url, filename)}
+              onClick={() => downloadAsset(url, filename, { mediaId: sourceMediaId })}
               aria-label="download"
             >
               <DownloadSimple /> download
@@ -389,34 +391,44 @@ function escapeHtmlAttr(value: string): string {
 
 /**
  * Force a true download by fetching the asset as a blob and triggering an
- * `<a download>` click on its blob URL. If the bucket isn't returning CORS
- * headers (so `fetch` rejects), silently fall back to opening the URL in a
- * new tab — the user can still right-click → save there.
+ * `<a download>` click on its blob URL. For persisted media, prefer Glass's
+ * attachment-specific presign so the browser downloads directly even when S3
+ * doesn't expose the object to cross-origin fetches.
  */
-export async function downloadAsset(url: string, filename?: string): Promise<void> {
+export async function downloadAsset(
+  url: string,
+  filename?: string,
+  options: { mediaId?: string; attachmentUrl?: string | null } = {},
+): Promise<void> {
+  let attachmentUrl = options.attachmentUrl ?? null;
+  if (!attachmentUrl && options.mediaId) {
+    try {
+      attachmentUrl = (await api.mediaDetail(options.mediaId)).attachment_url ?? null;
+    } catch {
+      // Fall through to the blob path, which still works when S3 allows CORS.
+    }
+  }
+  if (attachmentUrl) {
+    triggerDownload(attachmentUrl, filename || guessFilenameFromUrl(url));
+    return;
+  }
+
   try {
     const r = await fetch(url, { mode: "cors" });
     if (!r.ok) throw new Error(`status ${r.status}`);
     const blob = await r.blob();
     const tmp = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = tmp;
-    a.download = filename || guessFilenameFromUrl(url);
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    triggerDownload(tmp, filename || guessFilenameFromUrl(url));
     setTimeout(() => URL.revokeObjectURL(tmp), 1500);
-    return;
   } catch {
-    // CORS blocked / network failure — silent fall through; opening in a
-    // new tab still lets the user right-click → save, which is the worst
-    // case we want to land in.
+    toast.error("couldn't download attachment");
   }
+}
+
+function triggerDownload(url: string, filename: string): void {
   const a = document.createElement("a");
   a.href = url;
-  if (filename) a.download = filename;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();

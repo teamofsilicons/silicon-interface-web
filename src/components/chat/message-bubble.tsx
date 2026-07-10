@@ -86,7 +86,7 @@ function pinTilt(key: string): number {
  * A tilted card pin for an attachment that was sent alongside a text message.
  * Images/videos show a real thumbnail in the preview area; other files show a
  * large type icon. A footer row carries a small type-glyph + the filename.
- * Clicking opens the attachment in a new tab (image/video/pdf) or downloads it.
+ * Clicking previews supported attachments in place or downloads the rest.
  * The cards overlap and tilt over the top edge of the text bubble.
  */
 function AttachmentPin({
@@ -165,7 +165,7 @@ function AttachmentPin({
     }
     if (!href) return;
     if (canPreview) setPreviewOpen(true);
-    else downloadAsset(href, filename);
+    else downloadAsset(href, filename, { mediaId });
   };
 
   return (
@@ -716,7 +716,10 @@ function BubbleActions({
         String((event.content as { caption?: unknown }).caption || "") ||
         event.type.replace("m.", "") ||
         "download";
-      downloadAsset(r.download_url, name);
+      downloadAsset(r.download_url, name, {
+        mediaId,
+        attachmentUrl: r.attachment_url,
+      });
     } catch {
       toast.error("couldn't download");
     }

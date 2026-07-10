@@ -1817,6 +1817,22 @@ export function Composer({
 
   // ----- Voice recording -----
 
+  const waitForVoiceTranscription = async (mediaId: string): Promise<string> => {
+    await api.stt({ media_id: mediaId });
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const detail = await api.mediaDetail(mediaId);
+      if (detail.media.transcription_status === "ready") {
+        return detail.media.transcript;
+      }
+      if (detail.media.transcription_status === "failed") {
+        throw new Error("voice transcription failed - tap retry to try again");
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 750));
+    }
+    throw new Error("voice transcription is taking longer than usual - tap retry shortly");
+  };
+
   const uploadVoice = async (blob: Blob, durationMs: number) => {
     // Show the voice note instantly (with a pending clock) — don't make the
     // user stare at nothing while it uploads.
@@ -1875,6 +1891,7 @@ export function Composer({
         duration_ms: peaks?.duration_ms || durationMs,
         ...(peaks ? { peaks: peaks.peaks } : {}),
       });
+      const transcript = await waitForVoiceTranscription(mediaId);
       const real = await api.sendEvent(
         roomId,
         {
@@ -1883,6 +1900,7 @@ export function Composer({
             media_id: mediaId,
             mime,
             duration_ms: peaks?.duration_ms || durationMs,
+            transcript,
           },
           reply_to_event_id: replyTo?.event_id,
         },

@@ -411,6 +411,8 @@ export interface MediaObject {
   status: "pending" | "ready" | "infected" | "failed";
   kind: "file" | "image" | "voice" | "tts_output";
   transcript: string;
+  transcription_status: "not_started" | "pending" | "ready" | "failed";
+  transcription_provider: string;
   duration_ms: number | null;
   /** #6 — pre-computed audio waveform peaks (0..1, ~60 buckets). */
   peaks: number[] | null;

@@ -530,7 +530,11 @@ export const api = {
   tts: (data: { text: string; voice?: string; scene?: string; style?: string; room_id?: string }) =>
     call<{ job: string; media_id: string; status: string }>("POST", "/api/v1/tts", data),
   stt: (data: { media_id: string; language?: string }) =>
-    call<{ job: string; media_id: string }>("POST", "/api/v1/stt", data),
+    call<{
+      job: "queued" | "complete";
+      media_id: string;
+      transcription_status: "pending" | "ready";
+    }>("POST", "/api/v1/stt", data),
 
   // -------- contacts --------
   contacts: () => call<Contact[]>("GET", "/api/v1/contacts/"),

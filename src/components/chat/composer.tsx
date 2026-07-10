@@ -2204,7 +2204,16 @@ export function Composer({
           >
             {mentionInputPieces.map((piece, index) =>
               piece.kind === "mention" ? (
-                <span key={`${piece.value}-${index}`} className={mentionClassName(false)}>
+                <span
+                  key={`${piece.value}-${index}`}
+                  className={cn(
+                    mentionClassName(false),
+                    // The mirror sits over a transparent textarea. Padding or
+                    // a heavier font changes its advance width without moving
+                    // the real caret, so all text after a mention looks offset.
+                    "px-0 font-normal",
+                  )}
+                >
                   {piece.value}
                 </span>
               ) : (

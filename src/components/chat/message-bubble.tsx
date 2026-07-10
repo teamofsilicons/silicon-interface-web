@@ -25,7 +25,7 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
-import type { Event, EventType, ProgressState } from "@/lib/types";
+import type { AnnotationDraft, Event, EventType, ProgressState } from "@/lib/types";
 import { editableTextForEvent, eventShowsEdited } from "@/lib/event-edit";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { emojiOnly } from "@/lib/emoji";
@@ -33,7 +33,7 @@ import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import type { MentionTarget } from "@/lib/mentions";
 
-import { downloadAsset, MediaPreviewer } from "./media-previewer";
+import { downloadAsset, MediaPreviewer, type AnnotationOpenRequest } from "./media-previewer";
 
 import { Badge } from "@/components/ui/badge";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -89,7 +89,23 @@ function pinTilt(key: string): number {
  * Clicking opens the attachment in a new tab (image/video/pdf) or downloads it.
  * The cards overlap and tilt over the top edge of the text bubble.
  */
-function AttachmentPin({ content, tilt, sourceEventId }: { content: Record<string, unknown>; tilt: number; sourceEventId?: string }) {
+function AttachmentPin({
+  content,
+  tilt,
+  replyToEventId,
+  roomId,
+  annotationSourceEventId,
+  onAttachAnnotations,
+  onOpenAnnotation,
+}: {
+  content: Record<string, unknown>;
+  tilt: number;
+  replyToEventId?: string;
+  roomId?: string;
+  annotationSourceEventId?: string;
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
+}) {
   const mediaId = String(content.media_id ?? "");
   const mime = String(content.mime ?? "").toLowerCase();
   const filename = String(content.filename ?? content.caption ?? "file");
@@ -170,7 +186,12 @@ function AttachmentPin({ content, tilt, sourceEventId }: { content: Record<strin
           url={url}
           mime={mime}
           filename={filename}
-          replyToEventId={sourceEventId}
+          replyToEventId={replyToEventId}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={annotationSourceEventId}
+          onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       )}
     </>
@@ -248,6 +269,9 @@ interface Props {
   /** Real people that should be linked when mentioned as @handle/@name. */
   mentionTargets?: MentionTarget[];
   onMentionClick?: (target: MentionTarget) => void;
+  roomId?: string;
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }
 
 export function MessageBubble({
@@ -282,6 +306,9 @@ export function MessageBubble({
   pinnedAttachments,
   mentionTargets,
   onMentionClick,
+  roomId,
+  onAttachAnnotations,
+  onOpenAnnotation,
 }: Props) {
   // §4c — flash the bubble briefly when its text is copied. Declared before any
   // early return so the Hook order is stable across render branches.
@@ -473,7 +500,11 @@ export function MessageBubble({
                 key={att.event_id || idx}
                 content={att.content as Record<string, unknown>}
                 tilt={pinTilt(att.event_id || String(idx))}
-                sourceEventId={event.event_id}
+                replyToEventId={event.event_id}
+                roomId={roomId}
+                annotationSourceEventId={att.event_id}
+                onAttachAnnotations={onAttachAnnotations}
+                onOpenAnnotation={onOpenAnnotation}
               />
             ))}
           </div>
@@ -524,6 +555,9 @@ export function MessageBubble({
               soloEmoji={soloEmoji}
               mentionTargets={mentionTargets}
               onMentionClick={onMentionClick}
+              roomId={roomId}
+              onAttachAnnotations={onAttachAnnotations}
+              onOpenAnnotation={onOpenAnnotation}
             />
           )}
 
@@ -1090,12 +1124,18 @@ function Body({
   soloEmoji,
   mentionTargets,
   onMentionClick,
+  roomId,
+  onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   event: Event;
   isMine?: boolean;
   soloEmoji?: boolean;
   mentionTargets?: MentionTarget[];
   onMentionClick?: (target: MentionTarget) => void;
+  roomId?: string;
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   // #17 — forwarded chip rendered above the bubble body for *every* message
   // type (text, images, files, voice…), not just text. Telegram style:
@@ -1110,6 +1150,9 @@ function Body({
         soloEmoji={soloEmoji}
         mentionTargets={mentionTargets}
         onMentionClick={onMentionClick}
+        roomId={roomId}
+        onAttachAnnotations={onAttachAnnotations}
+        onOpenAnnotation={onOpenAnnotation}
       />
     );
   }
@@ -1122,6 +1165,9 @@ function Body({
         soloEmoji={soloEmoji}
         mentionTargets={mentionTargets}
         onMentionClick={onMentionClick}
+        roomId={roomId}
+        onAttachAnnotations={onAttachAnnotations}
+        onOpenAnnotation={onOpenAnnotation}
       />
     </div>
   );
@@ -1133,12 +1179,18 @@ function BodyContent({
   soloEmoji,
   mentionTargets,
   onMentionClick,
+  roomId,
+  onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   event: Event;
   isMine?: boolean;
   soloEmoji?: boolean;
   mentionTargets?: MentionTarget[];
   onMentionClick?: (target: MentionTarget) => void;
+  roomId?: string;
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   const c = event.content;
   const mentionOptions = {
@@ -1206,6 +1258,10 @@ function BodyContent({
             width={event.media_meta?.width ?? null}
             height={event.media_meta?.height ?? null}
             replyToEventId={event.event_id}
+            roomId={roomId}
+            eventId={event.event_id}
+            onAttachAnnotations={onAttachAnnotations}
+            onOpenAnnotation={onOpenAnnotation}
           />
           {/* The text rides with the image as a normal message line, not a
               tiny grey caption. */}
@@ -1230,6 +1286,10 @@ function BodyContent({
             width={event.media_meta?.width ?? null}
             height={event.media_meta?.height ?? null}
             replyToEventId={event.event_id}
+            roomId={roomId}
+            eventId={event.event_id}
+            onAttachAnnotations={onAttachAnnotations}
+            onOpenAnnotation={onOpenAnnotation}
           />
           {/* New-format messages carry the filename separately, so the caption
               is the user's typed text — render it as a normal message line.

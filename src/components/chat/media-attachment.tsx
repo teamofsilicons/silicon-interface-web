@@ -13,12 +13,12 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
-import type { MediaObject } from "@/lib/types";
+import type { AnnotationDraft, MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { AttachmentCard } from "./attachment-card";
 import { fileGlyph, isPreviewable } from "./file-icon";
-import { MediaPreviewer, downloadAsset } from "./media-previewer";
+import { MediaPreviewer, downloadAsset, type AnnotationOpenRequest } from "./media-previewer";
 import { SiliconAudio } from "./silicon-audio";
 
 /**
@@ -39,6 +39,10 @@ export function MediaAttachment({
   width,
   height,
   replyToEventId,
+  roomId,
+  eventId,
+  onAttachAnnotations,
+  onOpenAnnotation,
 }: {
   mediaId: string;
   mime?: string;
@@ -60,6 +64,11 @@ export function MediaAttachment({
   localDurationMs?: number | null;
   localPeaks?: number[] | null;
   replyToEventId?: string;
+  /** Room and source identifiers enable annotation for image/PDF previews. */
+  roomId?: string;
+  eventId?: string;
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   // Seed from the session cache so a re-mounted (scrolled-back-to) attachment
   // paints instantly with the right dimensions — no spinner, no aspect snap.
@@ -360,6 +369,11 @@ export function MediaAttachment({
           mime={m}
           filename={filename}
           replyToEventId={replyToEventId}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={eventId}
+          onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       </>
     );
@@ -397,6 +411,11 @@ export function MediaAttachment({
           mime={m}
           filename={filename}
           replyToEventId={replyToEventId}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={eventId}
+          onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       </>
     );
@@ -445,6 +464,11 @@ export function MediaAttachment({
           mime={m}
           filename={filename}
           replyToEventId={replyToEventId}
+          roomId={roomId}
+          sourceMediaId={mediaId}
+          sourceEventId={eventId}
+          onAttachAnnotations={onAttachAnnotations}
+          onOpenAnnotation={onOpenAnnotation}
         />
       )}
     </>

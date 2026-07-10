@@ -15,6 +15,38 @@ export type EventType =
   | "m.reaction"
   | "m.remote_browser";
 
+/** One annotation's serialized shape (kept in localStorage + used to label the
+ *  composer draft chip). */
+export interface AnnotationItem {
+  ref_code: string;
+  page: number;
+  kind: "pen" | "rect" | "pin";
+  geometry: Record<string, unknown>;
+  markups?: { geometry: Record<string, unknown>; color?: string }[];
+  comment: string;
+}
+
+/**
+ * The payload the annotation studio hands to the composer when "attach to chat"
+ * stages the generated annotated file as a reply-linked draft. The annotated
+ * file (PDF for a PDF source, PNG for an image) is already uploaded; on send it
+ * goes as a normal `m.file`/`m.image` reply to the source message.
+ */
+export interface AnnotationDraft {
+  sourceMediaId: string;
+  /** Original file event id when the source is already in chat. Staged outgoing
+   *  attachments do not have one yet, so those send without reply_to_event_id. */
+  sourceEventId?: string;
+  sourceFilename: string;
+  /** media_id of the generated annotated file (PDF or image). */
+  annotatedMediaId: string;
+  /** "application/pdf" or "image/png". */
+  annotatedMime: string;
+  annotatedName: string;
+  /** The annotations, for the chip label + reference (not sent as event data). */
+  annotations: AnnotationItem[];
+}
+
 export type ProgressState =
   | "reading_file"
   | "writing_file"

@@ -6,6 +6,7 @@ import {
   Code,
   DownloadSimple,
   Eye,
+  PencilSimple,
 } from "@phosphor-icons/react/dist/ssr";
 
 import { Button } from "@/components/ui/button";
@@ -21,10 +22,22 @@ import {
   languageForFile,
 } from "@/lib/programmatic-files";
 import { cn } from "@/lib/utils";
+import type { AnnotationDraft } from "@/lib/types";
 
+import { AnnotationStudio } from "./annotation-studio/annotation-studio";
 import { MarkdownView } from "./markdown-view";
 import { PreviewModalComposer } from "./preview-modal-composer";
 import { SourceCodeViewer } from "./source-code-viewer";
+
+export interface AnnotationOpenRequest {
+  url: string;
+  mime: string;
+  filename?: string;
+  roomId: string;
+  sourceMediaId: string;
+  sourceEventId?: string;
+  onAttach?: (draft: AnnotationDraft) => void;
+}
 
 interface Props {
   open: boolean;
@@ -33,6 +46,13 @@ interface Props {
   mime: string;
   filename?: string;
   replyToEventId?: string;
+  /** When both are set and the asset is an image/PDF, offer annotation. */
+  roomId?: string;
+  sourceMediaId?: string;
+  sourceEventId?: string;
+  onAttachAnnotations?: (draft: AnnotationDraft) => void;
+  /** Let a stable parent own the studio instead of nesting it in this dialog. */
+  onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }
 
 /**
@@ -43,14 +63,34 @@ interface Props {
  * The bare `<DialogContent>` doesn't ship with a visible title — we still
  * need one for screen readers, so we render a `sr-only` `DialogTitle`.
  */
-export function MediaPreviewer({ open, onOpenChange, url, mime, filename, replyToEventId }: Props) {
+export function MediaPreviewer({
+  open,
+  onOpenChange,
+  url,
+  mime,
+  filename,
+  replyToEventId,
+  roomId,
+  sourceMediaId,
+  sourceEventId,
+  onAttachAnnotations,
+  onOpenAnnotation,
+}: Props) {
   const m = (mime || "").toLowerCase();
+  const name = (filename || "").toLowerCase();
   const language = languageForFile(filename, mime);
   const isSvgDocument = language?.id === "svg";
   const isImage = m.startsWith("image/") && !isSvgDocument;
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/");
-  const isPdf = m.includes("pdf");
+  const isPdf = m.includes("pdf") || name.endsWith(".pdf");
+  const canAnnotate = Boolean(
+    roomId &&
+      sourceMediaId &&
+      (onAttachAnnotations || onOpenAnnotation) &&
+      (isImage || isPdf),
+  );
+  const [localStudioOpen, setLocalStudioOpen] = React.useState(false);
   const isMarkdown = language?.id === "markdown";
   const isHtmlDocument = language?.id === "html";
   const hasPreviewPane = hasRenderedSourcePreview(filename, mime);
@@ -101,6 +141,7 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename, replyT
   const renderedSourceOpen = isText && activeSourceMode === "preview";
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[95vh] w-[min(96vw,1100px)] max-w-none flex-col gap-0 overflow-hidden p-0">
         {/* Required for a11y — Radix throws a console error if there is no
@@ -124,6 +165,32 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename, replyT
           <div className="flex shrink-0 items-center gap-2">
             {showSourceToggle ? (
               <SourceModeToggle mode={sourceMode} onModeChange={setSourceMode} />
+            ) : null}
+            {canAnnotate ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  if (!roomId || !sourceMediaId) return;
+                  if (!onOpenAnnotation) {
+                    setLocalStudioOpen(true);
+                    return;
+                  }
+                  onOpenAnnotation({
+                    url,
+                    mime,
+                    filename,
+                    roomId,
+                    sourceMediaId,
+                    ...(sourceEventId ? { sourceEventId } : {}),
+                    onAttach: onAttachAnnotations,
+                  });
+                  onOpenChange(false);
+                }}
+                aria-label="annotate"
+              >
+                <PencilSimple /> annotate
+              </Button>
             ) : null}
             <Button
               size="sm"
@@ -199,6 +266,20 @@ export function MediaPreviewer({ open, onOpenChange, url, mime, filename, replyT
         <PreviewModalComposer replyToEventId={replyToEventId} onSent={() => onOpenChange(false)} />
       </DialogContent>
     </Dialog>
+    {!onOpenAnnotation && canAnnotate && roomId && sourceMediaId ? (
+      <AnnotationStudio
+        open={localStudioOpen}
+        onOpenChange={setLocalStudioOpen}
+        url={url}
+        mime={mime}
+        filename={filename}
+        roomId={roomId}
+        sourceMediaId={sourceMediaId}
+        sourceEventId={sourceEventId}
+        onAttach={onAttachAnnotations}
+      />
+    ) : null}
+    </>
   );
 }
 

@@ -144,8 +144,8 @@ const MAX_ROWS = 12;
 // Emoji quick-picker is a fixed grid so keyboard nav is true 2-D: ←/→ move one
 // cell, ↑/↓ move a whole row (EMOJI_COLS cells).
 const EMOJI_COLS = 8; // minimum / fallback column count; actual count tracks bar width
-const SILICON_TEXT_SEND_DELAY_MS = 5000;
-// Once a held silicon message is paused (you kept typing past the 5s mark),
+const SILICON_TEXT_SEND_DELAY_MS = 10_000;
+// Once a held silicon message is paused (you kept typing past the 10s mark),
 // emptying the input must NOT fire the send instantly — wait at least this long
 // after the box goes empty, so a quick clear/send of a follow-up doesn't
 // prematurely flush the held message.
@@ -1347,11 +1347,14 @@ export function Composer({
     }
     clearDelayTimer();
     setQueuePaused(false);
-    setEmptyHoldEndsAt(null);
     setWaitExtended(false);
     onHoldStateChange?.(false);
+    const now = Date.now();
+    setHoldNowMs(now);
+    setEmptyHoldEndsAt(now + SILICON_TEXT_SEND_DELAY_MS);
     delayTimerRef.current = setTimeout(() => {
       delayTimerRef.current = null;
+      setEmptyHoldEndsAt(null);
       if (hasContinuingDraft()) {
         setQueuePaused(true);
         onHoldStateChange?.(true);
@@ -1388,7 +1391,7 @@ export function Composer({
       for (const queued of queue) {
         onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, queue.length));
       }
-      clearDelayTimer();
+      restartDelayedFlushTimer();
       api
         .createHeldSend(roomId, {
           type: "m.text",
@@ -1433,7 +1436,6 @@ export function Composer({
     },
     [
       buildQueuedPayload,
-      clearDelayTimer,
       onAck,
       onClearReply,
       onFail,
@@ -1441,6 +1443,7 @@ export function Composer({
       onOptimisticAdd,
       onOptimisticUpdate,
       replyTo,
+      restartDelayedFlushTimer,
       roomId,
     ],
   );
@@ -1564,14 +1567,11 @@ export function Composer({
     return () => {
       cancelled = true;
     };
-  }, [
-    clearDelayTimer,
-    editingEvent,
-    editingHeld,
-    onClearReply,
-    onEditComplete,
-    onHoldStateChange,
-  ]);
+    // Deliberately hydrate only when entering a different edit. Parent renders
+    // (receipts, timers, presence, inline callbacks) must never overwrite what
+    // the user has already typed into this edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingEvent?.event_id]);
 
   React.useEffect(() => {
     if (!editingEvent) return;
@@ -1625,7 +1625,7 @@ export function Composer({
     }, SILICON_EMPTY_HOLD_MS);
   }, [editingHeld, flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
 
-  // Re-render once a second while the countdown is live so "will send in {N}s"
+  // Re-render while the countdown is live so "{N} seconds to send" visibly
   // ticks down.
   React.useEffect(() => {
     if (emptyHoldEndsAt == null) return;
@@ -2100,14 +2100,14 @@ export function Composer({
           </div>
         </div>
       )}
-      {queuePaused && queuedTextCount > 0 && (
+      {queuedTextCount > 0 && (queuePaused || emptyHoldEndsAt != null) && (
         <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
           {emptyHoldEndsAt != null ? (
             // Final countdown — auto-send is imminent.
             <>
               <span className="min-w-0">
-                will send in {emptyHoldRemainingSeconds} second
-                {emptyHoldRemainingSeconds === 1 ? "" : "s"}.
+                {emptyHoldRemainingSeconds} second
+                {emptyHoldRemainingSeconds === 1 ? "" : "s"} to send.
               </span>
               <div className="flex shrink-0 items-center gap-4">
                 <button

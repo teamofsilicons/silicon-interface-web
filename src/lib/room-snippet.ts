@@ -11,6 +11,9 @@ import type { Event } from "./types";
 // snippet and the first server fetch must cover the same recent messages so
 // the cache → server hydration is a near-identical list (no reflow / glitch).
 const ROOM_SNIPPET_LIMIT = 30;
+// Optimistic rows make an immediate room switch feel instant, but an abandoned
+// request must not leave a permanent "waiting" message after a later reopen.
+const OPTIMISTIC_SNIPPET_MAX_AGE_MS = 2 * 60_000;
 
 function roomSnippetKey(roomId: string): string {
   return `silicon-interface:room-snippet:${roomId}`;
@@ -21,24 +24,35 @@ export function readRoomEventSnippet(roomId: string): Event[] | null {
   try {
     const raw = window.localStorage.getItem(roomSnippetKey(roomId));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { events?: Event[] };
+    const parsed = JSON.parse(raw) as { savedAt?: number; events?: Event[] };
     if (!Array.isArray(parsed.events)) return null;
-    return parsed.events.filter((event) => event && typeof event.event_id === "string");
+    const optimisticExpired =
+      typeof parsed.savedAt !== "number" ||
+      Date.now() - parsed.savedAt > OPTIMISTIC_SNIPPET_MAX_AGE_MS;
+    return parsed.events.filter(
+      (event) =>
+        event &&
+        typeof event.event_id === "string" &&
+        (!optimisticExpired || !event.event_id.startsWith("temp-")),
+    );
   } catch {
     return null;
   }
 }
 
-/** Durable subset of events worth caching (no optimistic temps / progress). */
-function durableEvents<T extends Event>(events: T[]): Event[] {
+/** Recent timeline rows worth caching. Short-lived optimistic rows are kept. */
+function cacheableEvents<T extends Event>(events: T[]): Event[] {
   return events
-    .filter((event) => !event.event_id.startsWith("temp-") && event.type !== "m.progress")
+    .filter((event) => event.type !== "m.progress")
     .slice(-ROOM_SNIPPET_LIMIT)
     .map((event) => {
-      // Strip any client-only fields (_status / _clientId) before persisting.
+      // Real events don't need client-only state. Optimistic rows do: it lets
+      // RoomView reconcile the placeholder with the eventual server event.
       const { ...rest } = event as Event & Record<string, unknown>;
-      delete (rest as Record<string, unknown>)._status;
-      delete (rest as Record<string, unknown>)._clientId;
+      if (!event.event_id.startsWith("temp-")) {
+        delete (rest as Record<string, unknown>)._status;
+        delete (rest as Record<string, unknown>)._clientId;
+      }
       return rest as Event;
     });
 }
@@ -48,7 +62,7 @@ export function saveRoomEventSnippet<T extends Event>(roomId: string, events: T[
   try {
     window.localStorage.setItem(
       roomSnippetKey(roomId),
-      JSON.stringify({ savedAt: Date.now(), events: durableEvents(events) }),
+      JSON.stringify({ savedAt: Date.now(), events: cacheableEvents(events) }),
     );
   } catch {
     /* Keep chat usable when localStorage is unavailable or full. */
@@ -60,12 +74,24 @@ export function saveRoomEventSnippet<T extends Event>(roomId: string, events: T[
  * by event_id (a later copy wins, e.g. a finalized version of an optimistic
  * send). Used by the chat page for rooms that aren't currently open.
  */
+function eventClientId(event: Event): string | null {
+  const local = (event as Event & { _clientId?: unknown })._clientId;
+  if (typeof local === "string" && local) return local;
+  const content = event.content?.client_id;
+  return typeof content === "string" && content ? content : null;
+}
+
 export function appendRoomEventSnippet(roomId: string, event: Event): void {
   if (typeof window === "undefined") return;
   if (!event || typeof event.event_id !== "string") return;
-  if (event.event_id.startsWith("temp-") || event.type === "m.progress") return;
+  if (event.type === "m.progress") return;
   const existing = readRoomEventSnippet(roomId) ?? [];
-  const idx = existing.findIndex((e) => e.event_id === event.event_id);
+  const clientId = eventClientId(event);
+  const idx = existing.findIndex(
+    (e) =>
+      e.event_id === event.event_id ||
+      (clientId !== null && eventClientId(e) === clientId),
+  );
   if (idx >= 0) {
     const next = [...existing];
     next[idx] = event;

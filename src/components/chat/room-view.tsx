@@ -18,7 +18,11 @@ import {
 } from "@/lib/notifications";
 import type { AnnotationDraft, Event, EventType, HeldSend, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
-import { readRoomEventSnippet, saveRoomEventSnippet } from "@/lib/room-snippet";
+import {
+  appendRoomEventSnippet,
+  readRoomEventSnippet,
+  saveRoomEventSnippet,
+} from "@/lib/room-snippet";
 import {
   setPendingPreview,
   updatePendingPreview,
@@ -638,7 +642,7 @@ export function RoomView({
   // events and read_receipts in real time, and re-polling just duplicates work
   // and (worse) cascades into extra `api.read` calls via the auto-read effect
   // below. The 10s "ping" is just a re-render tick for `relativeTime`.
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     let mounted = true;
     const roomId = room.room_id;
     const cachedEvents = readRoomEventSnippet(roomId);
@@ -1682,6 +1686,9 @@ export function RoomView({
         _status: "pending",
         _clientId: clientId,
       };
+      // Persist before React commits so switching chats immediately after send
+      // still paints the outgoing message without waiting on the network.
+      appendRoomEventSnippet(room.room_id, placeholder);
       setEvents((prev) => {
         // §6b — first message ever in this room: a single mono system note.
         const hadReal = prev.some(
@@ -1730,6 +1737,11 @@ export function RoomView({
     requestBottomStick("smooth");
     // Sent — the sidebar's last_event will reflect it; drop the pending preview.
     clearPendingPreview(room.room_id, clientId);
+    appendRoomEventSnippet(room.room_id, {
+      ...real,
+      _clientId: clientId,
+      _status: "sent",
+    } as LocalEvent);
     playAckTick(); // §3b — the confirm half of "send → delivered"
     setEvents((prev) => {
       const optIdx = prev.findIndex((e) => e._clientId === clientId);
@@ -2731,7 +2743,7 @@ export function RoomView({
             )}
           </div>
         </ScrollArea>
-      ) : loading ? (
+      ) : loading && filteredEvents.length === 0 ? (
         <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">loading messages…</div>
       ) : filteredEvents.length === 0 ? (
         <div className="flex-1 px-6 py-4">
@@ -3359,15 +3371,29 @@ function mergeServerEvents(
 ): LocalEvent[] {
   const serverIds = new Set(server.map((e) => e.event_id));
   const byPrev = new Map(prev.map((e) => [e.event_id, e] as const));
+  const byClient = new Map<string, LocalEvent>();
+  for (const event of prev) {
+    const clientId = localClientId(event);
+    if (clientId) byClient.set(clientId, event);
+  }
+  const consumedLocalIds = new Set<string>();
   const merged: LocalEvent[] = server.map((ev) => {
-    const existing = byPrev.get(ev.event_id);
+    const clientId = localClientId(ev);
+    const existing = byPrev.get(ev.event_id) ?? (clientId ? byClient.get(clientId) : undefined);
     if (existing) {
-      return { ...ev, _status: existing._status, _clientId: existing._clientId };
+      if (existing.event_id !== ev.event_id) consumedLocalIds.add(existing.event_id);
+      return {
+        ...ev,
+        _status: existing._status,
+        _clientId: existing._clientId ?? clientId ?? undefined,
+      };
     }
     const mine = ev.sender_handle && ev.sender_handle === myUsername;
     return { ...ev, _status: mine ? ("delivered" as MessageStatus) : undefined };
   });
-  const localOnly = prev.filter((e) => !serverIds.has(e.event_id));
+  const localOnly = prev.filter(
+    (e) => !serverIds.has(e.event_id) && !consumedLocalIds.has(e.event_id),
+  );
   // Keep strict chronological order. Appending localOnly (e.g. older history
   // loaded via loadOlder, or optimistic temps) to the end scrambled the array,
   // which broke loadOlder's "oldest = events[0]" cursor and stalled pagination.
@@ -3375,4 +3401,11 @@ function mergeServerEvents(
   return [...merged, ...localOnly].sort((a, b) =>
     a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
   );
+}
+
+function localClientId(event: Event | LocalEvent): string | null {
+  const local = (event as LocalEvent)._clientId;
+  if (typeof local === "string" && local) return local;
+  const content = event.content?.client_id;
+  return typeof content === "string" && content ? content : null;
 }

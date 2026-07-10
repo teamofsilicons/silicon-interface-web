@@ -27,8 +27,10 @@ import { cn } from "@/lib/utils";
 import type { AnnotationDraft } from "@/lib/types";
 
 import { AnnotationStudio } from "./annotation-studio/annotation-studio";
+import { CustomVideoPlayer } from "./custom-video-player";
 import { MarkdownView } from "./markdown-view";
 import { PreviewModalComposer } from "./preview-modal-composer";
+import { SiliconAudio } from "./silicon-audio";
 import { SourceCodeViewer } from "./source-code-viewer";
 
 export interface AnnotationOpenRequest {
@@ -59,7 +61,7 @@ interface Props {
 
 /**
  * Fullscreen-ish previewer for assets that render in the browser:
- *   • images, videos, audio   — inline `<img>` / `<video controls>` / `<audio>`
+ *   • images, videos, audio   — inline image + Silicon custom media controls
  *   • PDFs                    — inline `<iframe>` (most desktop browsers)
  *
  * The bare `<DialogContent>` doesn't ship with a visible title — we still
@@ -224,10 +226,18 @@ export function MediaPreviewer({
             />
           )}
           {isVideo && (
-            <video src={url} controls autoPlay className="max-h-full max-w-full" />
+            <CustomVideoPlayer
+              url={url}
+              autoPlay
+              className="aspect-video max-h-full w-full max-w-full"
+            />
           )}
           {isAudio && (
-            <audio src={url} controls autoPlay className="w-[min(80vw,520px)] p-6" />
+            <SiliconAudio
+              url={url}
+              autoPlay
+              className="w-[min(90vw,680px)] border bg-background p-4 text-foreground"
+            />
           )}
           {isPdf && (
             <iframe

@@ -1,20 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { Pause, Play } from "@phosphor-icons/react/dist/ssr";
+import { Pause, Play, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react/dist/ssr";
 
 import { cn } from "@/lib/utils";
 
-// Single-active-player coordination. Only one voice note should play at a time
-// — starting a new one pauses whichever was playing. A tiny module-level
-// registry of "pause me" callbacks keyed by a per-instance symbol is enough;
-// no context/provider needed for what is effectively a global audio bus.
-const activePausers = new Set<() => void>();
-function pauseAllExcept(self: () => void) {
-  for (const p of activePausers) {
-    if (p !== self) p();
-  }
-}
+import { pauseOtherMedia, registerMediaPauser } from "./media-playback";
+
+const PLAYBACK_RATES = [1, 1.25, 1.5, 2] as const;
 
 interface Props {
   /** Presigned/permanent URL. May be null while still loading. */
@@ -25,6 +18,7 @@ interface Props {
   peaks?: number[] | null;
   /** Duration in ms — server-known, so the timer renders before audio loads. */
   durationMs?: number | null;
+  autoPlay?: boolean;
   className?: string;
 }
 
@@ -38,11 +32,14 @@ interface Props {
  * We render server-computed peaks immediately (so the bars exist before
  * audio decodes), then progress recolors them in step with playback.
  */
-export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
+export function SiliconAudio({ url, peaks, durationMs, autoPlay = false, className }: Props) {
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = React.useState(false);
   const [currentMs, setCurrentMs] = React.useState(0);
   const [internalDurMs, setInternalDurMs] = React.useState<number | null>(null);
+  const [volume, setVolume] = React.useState(1);
+  const [muted, setMuted] = React.useState(false);
+  const [rate, setRate] = React.useState<(typeof PLAYBACK_RATES)[number]>(1);
 
   // Register this instance's "pause me" callback in the global registry so a
   // sibling player can pause us when it starts. Cleaned up on unmount.
@@ -53,10 +50,7 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
       setPlaying(false);
     };
     pauseSelfRef.current = pause;
-    activePausers.add(pause);
-    return () => {
-      activePausers.delete(pause);
-    };
+    return registerMediaPauser(pause);
   }, []);
 
   const bars = React.useMemo(() => {
@@ -101,16 +95,36 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
         setInternalDurMs(Math.round(a.duration * 1000));
       }
     };
-    const onEnd = () => setPlaying(false);
+    const onPlay = () => {
+      pauseOtherMedia(pauseSelfRef.current);
+      setPlaying(true);
+    };
+    const onPause = () => setPlaying(false);
+    const onEnd = () => {
+      setPlaying(false);
+      setCurrentMs(0);
+    };
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("loadedmetadata", onMeta);
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
     a.addEventListener("ended", onEnd);
     return () => {
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("loadedmetadata", onMeta);
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
       a.removeEventListener("ended", onEnd);
     };
-  }, [durationMs]);
+  }, [durationMs, url]);
+
+  React.useEffect(() => {
+    if (!autoPlay || !url) return;
+    const audio = audioRef.current;
+    if (!audio) return;
+    pauseOtherMedia(pauseSelfRef.current);
+    void audio.play().catch(() => undefined);
+  }, [autoPlay, url]);
 
   // Smooth progress: while playing, drive currentMs from rAF so the waveform
   // fill glides continuously instead of stepping on each ~250ms 'timeupdate'.
@@ -134,7 +148,7 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
       setPlaying(false);
     } else {
       // Pause any other voice note before we start so two never overlap.
-      pauseAllExcept(pauseSelfRef.current);
+      pauseOtherMedia(pauseSelfRef.current);
       try {
         await a.play();
         setPlaying(true);
@@ -152,13 +166,39 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
     setCurrentMs(t);
   };
 
+  const toggleMute = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const next = !muted;
+    audio.muted = next;
+    setMuted(next);
+  };
+
+  const changeVolume = (next: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.volume = next;
+    audio.muted = next === 0;
+    setVolume(next);
+    setMuted(next === 0);
+  };
+
+  const cycleRate = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const index = PLAYBACK_RATES.indexOf(rate);
+    const next = PLAYBACK_RATES[(index + 1) % PLAYBACK_RATES.length];
+    audio.playbackRate = next;
+    setRate(next);
+  };
+
   return (
     <div
       className={cn(
         // Borderless + transparent: the player inherits the bubble's theme via
         // currentColor (cream controls on a sent ink bubble, ink on a received
         // cream bubble), so a voice note reads like a normal message.
-        "flex w-full items-center gap-3",
+        "flex w-full items-center gap-2",
         className,
       )}
     >
@@ -174,10 +214,35 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
       <span className="shrink-0 label-mono text-[10px] opacity-60">
         {formatTime(currentMs)}/{formatTime(dur)}
       </span>
+      <button
+        type="button"
+        onClick={toggleMute}
+        aria-label={muted ? "unmute audio" : "mute audio"}
+        className="grid size-7 shrink-0 place-items-center opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current [&_svg]:size-4"
+      >
+        {muted ? <SpeakerSlash /> : <SpeakerHigh />}
+      </button>
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step="0.05"
+        value={muted ? 0 : volume}
+        onChange={(event) => changeVolume(Number(event.target.value))}
+        aria-label="audio volume"
+        className="hidden h-7 w-10 shrink-0 accent-current sm:block"
+      />
+      <button
+        type="button"
+        onClick={cycleRate}
+        aria-label={`playback speed ${rate}x`}
+        className="h-7 min-w-8 shrink-0 px-1 font-mono text-[9px] opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current"
+      >
+        {rate}x
+      </button>
       {url && (
         // The actual playback element. preload=metadata so duration arrives
         // without paying the full bytes cost up front.
-        // eslint-disable-next-line jsx-a11y/media-has-caption -- voice notes don't have captions
         <audio ref={audioRef} src={url} preload="metadata" />
       )}
     </div>

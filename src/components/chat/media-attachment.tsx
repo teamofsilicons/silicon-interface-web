@@ -17,6 +17,7 @@ import type { AnnotationDraft, MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { AttachmentCard } from "./attachment-card";
+import { CustomVideoPlayer } from "./custom-video-player";
 import { fileGlyph, isPreviewable } from "./file-icon";
 import { MediaPreviewer, downloadAsset, type AnnotationOpenRequest } from "./media-previewer";
 import { SiliconAudio } from "./silicon-audio";
@@ -390,11 +391,7 @@ export function MediaAttachment({
           className="group relative w-72 max-w-full overflow-hidden bg-card"
           style={{ aspectRatio: vidAspect }}
         >
-          <video
-            src={url}
-            controls
-            className="absolute inset-0 h-full w-full bg-black object-contain"
-          />
+          <CustomVideoPlayer url={url} className="absolute inset-0 h-full w-full" />
           <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             <IconChip onClick={() => setPreviewOpen(true)} label="expand">
               <ArrowsOutSimple />

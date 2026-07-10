@@ -10,6 +10,7 @@ export interface GifResult {
 }
 
 const API_BASE = "https://api.giphy.com/v1/gifs";
+export const GIPHY_PAGE_SIZE = 24;
 
 type GiphyImage = { url?: string; width?: string; height?: string };
 type GiphyItem = {
@@ -23,14 +24,19 @@ export function giphyConfigured(): boolean {
   return Boolean(process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim());
 }
 
-export async function fetchGifs(query: string, signal?: AbortSignal): Promise<GifResult[]> {
+export async function fetchGifs(
+  query: string,
+  signal?: AbortSignal,
+  offset = 0,
+): Promise<GifResult[]> {
   const apiKey = process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim();
   if (!apiKey) throw new Error("GIPHY is not configured");
   const trimmed = query.trim().slice(0, 50);
   const endpoint = trimmed ? `${API_BASE}/search` : `${API_BASE}/trending`;
   const params = new URLSearchParams({
     api_key: apiKey,
-    limit: "24",
+    limit: String(GIPHY_PAGE_SIZE),
+    offset: String(Math.max(0, offset)),
     rating: "pg-13",
     bundle: "messaging_non_clips",
     remove_low_contrast: "true",

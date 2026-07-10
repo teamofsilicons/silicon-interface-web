@@ -737,7 +737,7 @@ export function Composer({
   const recordingActive = voiceSession.phase !== "idle";
   const [busy, setBusy] = React.useState(false);
   const [gifOpen, setGifOpen] = React.useState(false);
-  const [stagingGif, setStagingGif] = React.useState(false);
+  const gifUploadsInFlightRef = React.useRef(0);
   const [editSaving, setEditSaving] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
   // control during the upload, and retain the recorded blob if it fails so the
@@ -1779,7 +1779,7 @@ export function Composer({
   };
 
   const sendGif = async (gif: GifResult) => {
-    if (sendDisabled || busy || isEditing || stagingGif) return;
+    if (sendDisabled || busy || isEditing) return;
     const safeTitle = gif.title
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -1799,8 +1799,10 @@ export function Composer({
       ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
     });
     setGifOpen(false);
-    setStagingGif(true);
-    api.activity(roomId, "uploading", true).catch(() => undefined);
+    gifUploadsInFlightRef.current += 1;
+    if (gifUploadsInFlightRef.current === 1) {
+      api.activity(roomId, "uploading", true).catch(() => undefined);
+    }
     try {
       const response = await fetch(gif.downloadUrl, { mode: "cors" });
       if (!response.ok) throw new Error(`GIF download failed (${response.status})`);
@@ -1854,8 +1856,10 @@ export function Composer({
     } catch (error) {
       onFail(clientId, error);
     } finally {
-      api.activity(roomId, "uploading", false).catch(() => undefined);
-      setStagingGif(false);
+      gifUploadsInFlightRef.current = Math.max(0, gifUploadsInFlightRef.current - 1);
+      if (gifUploadsInFlightRef.current === 0) {
+        api.activity(roomId, "uploading", false).catch(() => undefined);
+      }
     }
   };
 
@@ -2690,10 +2694,10 @@ export function Composer({
               type="button"
               title="add GIF"
               aria-label="add GIF"
-              disabled={sendDisabled || busy || isEditing || stagingGif}
+              disabled={sendDisabled || busy || isEditing}
               className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-transparent text-foreground transition-opacity hover:opacity-70 disabled:opacity-50"
             >
-              {stagingGif ? <CircleNotch className="h-4 w-4 animate-spin" /> : <Gif className="h-5 w-5" />}
+              <Gif className="h-5 w-5" />
             </button>
           </PopoverTrigger>
           <PopoverContent side="top" align="end" sideOffset={8} className="w-auto">

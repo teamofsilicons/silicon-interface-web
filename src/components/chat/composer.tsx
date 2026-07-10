@@ -715,6 +715,8 @@ export function Composer({
   const taRef = React.useRef<HTMLTextAreaElement>(null);
   const textRef = React.useRef(text);
   const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
+  const heldSendIdsRef = React.useRef<Map<string, string>>(new Map());
+  const cancelledHeldClientIdsRef = React.useRef<Set<string>>(new Set());
   const delayTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftBeforeEditRef = React.useRef("");
   const editInactivityTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1209,6 +1211,14 @@ export function Composer({
   // Drop a held message from the queue when its bubble is deleted — never send.
   const cancelQueued = React.useCallback(
     (clientId: string) => {
+      const heldSendId = heldSendIdsRef.current.get(clientId);
+      if (heldSendId) {
+        heldSendIdsRef.current.delete(clientId);
+        cancelledHeldClientIdsRef.current.add(clientId);
+        api.cancelHeldSend(roomId, heldSendId).catch(() => undefined);
+      } else {
+        cancelledHeldClientIdsRef.current.add(clientId);
+      }
       const current = delayedTextQueueRef.current;
       if (!current.some((it) => it.clientId === clientId)) return;
       const next = current
@@ -1224,7 +1234,7 @@ export function Composer({
         }
       }
     },
-    [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate],
+    [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate, roomId],
   );
   React.useEffect(() => {
     if (!cancelQueuedRef) return;
@@ -1246,6 +1256,17 @@ export function Composer({
       const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
       const total = items.length;
       for (const item of items) {
+        const heldSendId = heldSendIdsRef.current.get(item.clientId);
+        if (heldSendId) {
+          api
+            .sendHeldNow(roomId, heldSendId)
+            .catch((err) => {
+              if (optimistic) onFail(item.clientId, err);
+              else toast.error(err instanceof ApiError ? err.message : String(err));
+            })
+            .finally(() => heldSendIdsRef.current.delete(item.clientId));
+          continue;
+        }
         const payload = buildQueuedPayload(item, total);
         const sendPayload = {
           type: payload.type,
@@ -1263,7 +1284,7 @@ export function Composer({
           });
         }
         try {
-          const real = await api.sendEvent(roomId, sendPayload, item.clientId); // §2.3
+          const real = await api.sendEvent(roomId, sendPayload, item.clientId);
           if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
           if (optimistic) onAck(item.clientId, real);
           track.messageSent({
@@ -1325,13 +1346,9 @@ export function Composer({
         holdGroupId,
         holdIndex: existingQueue.length,
       };
-      // Append to the held burst and restart the 5s window, but keep every
-      // user send as its own visible message bubble.
       delayedTextQueueRef.current = [...existingQueue, item];
       const queue = delayedTextQueueRef.current;
       setQueuedTextCount(queue.length);
-      // Back to the open hold window (not "holding…") — the restarted timer
-      // re-decides whether to hold once it elapses.
       setQueuePaused(false);
       onHoldStateChange?.(false);
       onOptimisticAdd(clientId, buildQueuedPayload(item, queue.length));
@@ -1339,30 +1356,54 @@ export function Composer({
         onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, queue.length));
       }
       clearDelayTimer();
-      delayTimerRef.current = setTimeout(() => {
-        delayTimerRef.current = null;
-        // Only once the 5s merge window ends and you're still typing do we flip
-        // to the "holding…" state. Before that, the normal silicon progress
-        // (the random copy) shows.
-        if (hasContinuingDraft()) {
-          setQueuePaused(true);
-          onHoldStateChange?.(true);
-        } else {
-          void flushDelayedTextQueue();
-        }
-      }, SILICON_TEXT_SEND_DELAY_MS);
+      api
+        .createHeldSend(roomId, {
+          type: "m.text",
+          content: { body, client_id: clientId },
+          client_id: clientId,
+          reply_to_event_id: replyTo?.event_id,
+          hold_seconds: SILICON_TEXT_SEND_DELAY_MS / 1000,
+        })
+        .then((held) => {
+          if (cancelledHeldClientIdsRef.current.has(clientId)) {
+            api.cancelHeldSend(roomId, held.held_send_id).catch(() => undefined);
+            return;
+          }
+          heldSendIdsRef.current.set(clientId, held.held_send_id);
+        })
+        .catch(async (err) => {
+          // Honest old-client/API fallback: send immediately with the same
+          // client_id, or leave the optimistic bubble failed. Never fake a
+          // local-only server hold.
+          try {
+            const payload = buildQueuedPayload(item, queue.length);
+            const real = await api.sendEvent(
+              roomId,
+              {
+                type: payload.type,
+                content: payload.content,
+                reply_to_event_id: payload.reply_to_event_id,
+              },
+              clientId,
+            );
+            onAck(clientId, real);
+          } catch {
+            onFail(clientId, err);
+          }
+        });
       onClearReply?.();
     },
     [
       buildQueuedPayload,
       clearDelayTimer,
-      flushDelayedTextQueue,
-      hasContinuingDraft,
+      onAck,
       onClearReply,
+      onFail,
       onHoldStateChange,
       onOptimisticAdd,
       onOptimisticUpdate,
       replyTo,
+      roomId,
     ],
   );
 
@@ -1566,44 +1607,16 @@ export function Composer({
 
   React.useEffect(
     () => () => {
-      const queued = delayedTextQueueRef.current;
-      if (!queued.length) return;
+      // Server-accepted holds survive room switches, unmounts, tab closes, and
+      // logout. Do not flush/cancel them from cleanup; Glass owns the timer.
       clearDelayTimer();
       delayedTextQueueRef.current = [];
-      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
-      const total = queued.length;
-      // Unmount flush is fire-and-forget — persist each text to the outbox so a
-      // failure (or the page dying mid-POST) still gets retried later.
-      void queued.reduce<Promise<void>>(
-        (chain, item) =>
-          chain.then(async () => {
-            const payload = buildQueuedPayload(item, total);
-            const sendPayload = {
-              type: payload.type,
-              content: payload.content,
-              reply_to_event_id: payload.reply_to_event_id,
-            };
-            if (outboxOwner) {
-              enqueueOutbox(outboxOwner, {
-                roomId,
-                clientId: item.clientId,
-                body: item.body,
-                content: payload.content,
-                replyTo: payload.reply_to_event_id,
-                at: Date.now(),
-              });
-            }
-            try {
-              await api.sendEvent(roomId, sendPayload, item.clientId);
-              if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
-            } catch (err) {
-              toast.error(err instanceof ApiError ? err.message : String(err));
-            }
-          }),
-        Promise.resolve(),
-      );
+      heldSendIdsRef.current.clear();
+      cancelledHeldClientIdsRef.current.clear();
+      setQueuedTextCount(0);
+      onHoldStateChange?.(false);
     },
-    [buildQueuedPayload, clearDelayTimer, roomId],
+    [clearDelayTimer, onHoldStateChange],
   );
 
   const sendTextOptimistic = (body: string, extraContent?: Record<string, unknown>) => {

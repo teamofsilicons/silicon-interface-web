@@ -522,6 +522,27 @@ export interface DraftWritePayload {
   origin_device?: string;
 }
 
+export interface HeldSend {
+  held_send_id: string;
+  room_id: string;
+  client_id: string;
+  type: EventType;
+  content: Record<string, unknown>;
+  reply_to_event_id: string;
+  state: "pending" | "releasing" | "sent" | "cancelled" | "failed";
+  release_at: string;
+  sent_event_id: string;
+  version: number;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  terminal_at: string;
+}
+
+export interface HeldSendsListResponse {
+  held_sends: HeldSend[];
+}
+
 // ---- WebSocket frames ----
 export interface Announcement {
   id: number;
@@ -542,6 +563,7 @@ export type WsFrame =
   | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
   | { type: "event.remote_browser_close"; room_id: string; event_id: string; expires_at: string }
   | { type: "draft"; draft: DraftState }
+  | { type: "held_send"; held_send: HeldSend }
   | {
       type: "read_receipt";
       room_id: string;

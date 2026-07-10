@@ -2326,22 +2326,6 @@ export function Composer({
         >
           <Paperclip />
         </button>
-        <Popover open={gifOpen} onOpenChange={setGifOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              title="add GIF"
-              aria-label="add GIF"
-              disabled={busy || isEditing || stagingGif}
-              className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
-            >
-              {stagingGif ? <CircleNotch className="h-4 w-4 animate-spin" /> : <Gif className="h-5 w-5" />}
-            </button>
-          </PopoverTrigger>
-          <PopoverContent side="top" align="start" sideOffset={8} className="w-auto">
-            <GifPicker onPick={(gif) => void stageGif(gif)} />
-          </PopoverContent>
-        </Popover>
         <div className="relative flex min-h-11 min-w-0 flex-1 items-center border border-input transition-colors focus-within:border-ring">
           <div
             ref={mentionMirrorRef}
@@ -2639,6 +2623,22 @@ export function Composer({
             )}
           </button>
         )}
+        <Popover open={gifOpen} onOpenChange={setGifOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              title="add GIF"
+              aria-label="add GIF"
+              disabled={busy || isEditing || stagingGif}
+              className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            >
+              {stagingGif ? <CircleNotch className="h-4 w-4 animate-spin" /> : <Gif className="h-5 w-5" />}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent side="top" align="end" sideOffset={8} className="w-auto">
+            <GifPicker onPick={(gif) => void stageGif(gif)} />
+          </PopoverContent>
+        </Popover>
         {emojiQuery !== null && (
           <EmojiQuickPicker
             query={emojiQuery}

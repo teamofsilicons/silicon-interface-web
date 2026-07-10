@@ -7,8 +7,10 @@ import { Button } from "@/components/ui/button";
 import { useRoomSend } from "@/components/chat/room-send-context";
 import { cn } from "@/lib/utils";
 
-const MIN_COMPOSER_HEIGHT = 116;
-const DEFAULT_COMPOSER_HEIGHT = 156;
+// Handle (16px) + one input row (44px) + status/padding. The writer opens as a
+// compact single line and only grows when the user drags the handle upward.
+const MIN_COMPOSER_HEIGHT = 92;
+const DEFAULT_COMPOSER_HEIGHT = MIN_COMPOSER_HEIGHT;
 
 function maxComposerHeight(): number {
   if (typeof window === "undefined") return 520;
@@ -103,7 +105,7 @@ export function PreviewModalComposer({ replyToEventId, onSent }: { replyToEventI
         <label htmlFor="preview-modal-message" className="sr-only">
           Message while viewing preview
         </label>
-        <div className="flex min-h-0 flex-1 flex-col gap-2 sm:flex-row sm:items-stretch">
+        <div className="flex min-h-0 flex-1 flex-row items-stretch gap-2">
           <textarea
             ref={textareaRef}
             id="preview-modal-message"
@@ -129,7 +131,7 @@ export function PreviewModalComposer({ replyToEventId, onSent }: { replyToEventI
             onClick={() => void submit()}
             disabled={!body || sending || roomSend.readOnly}
             aria-label="Send message"
-            className="min-h-11 shrink-0 sm:self-end"
+            className="min-h-11 shrink-0 self-end"
           >
             <PaperPlaneRight className="mr-1 h-4 w-4" />
             {sending ? "Sending..." : "Send message"}

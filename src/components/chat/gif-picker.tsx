@@ -77,7 +77,7 @@ export function GifPicker({ onPick }: { onPick: (gif: GifResult) => void }) {
               type="button"
               onClick={() => onPick(gif)}
               title={gif.title}
-              className="relative overflow-hidden bg-muted focus-visible:z-10"
+              className="relative overflow-hidden bg-transparent focus-visible:z-10"
             >
               {/* eslint-disable-next-line @next/next/no-img-element -- GIPHY CDN rendition */}
               <img

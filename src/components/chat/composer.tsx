@@ -919,26 +919,6 @@ export function Composer({
     [isEditing, uploadOne],
   );
 
-  const stageGif = React.useCallback(async (gif: GifResult) => {
-    setStagingGif(true);
-    try {
-      const response = await fetch(gif.downloadUrl, { mode: "cors" });
-      if (!response.ok) throw new Error(`GIF download failed (${response.status})`);
-      const blob = await response.blob();
-      const safeTitle = gif.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 48);
-      const file = new File([blob], `${safeTitle || gif.id}.gif`, { type: "image/gif" });
-      attachFiles([file]);
-      setGifOpen(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn’t add this GIF");
-    } finally {
-      setStagingGif(false);
-    }
-  }, [attachFiles]);
   // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
   // the active token (':grin', ':lol', …) and surface matches in a small
   // popover anchored to the textarea.
@@ -1798,6 +1778,74 @@ export function Composer({
     }
   };
 
+  const sendGif = async (gif: GifResult) => {
+    if (sendDisabled || busy || isEditing || stagingGif) return;
+    setGifOpen(false);
+    setStagingGif(true);
+    api.activity(roomId, "uploading", true).catch(() => undefined);
+    try {
+      const response = await fetch(gif.downloadUrl, { mode: "cors" });
+      if (!response.ok) throw new Error(`GIF download failed (${response.status})`);
+      const blob = await response.blob();
+      const safeTitle = gif.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 48);
+      const file = new File([blob], `${safeTitle || gif.id}.gif`, { type: "image/gif" });
+      const validationError = validateFile(file);
+      if (validationError) throw new Error(validationError);
+
+      const upload = await api.presignUpload({
+        mime: file.type,
+        size: file.size,
+        kind: "image",
+        filename: file.name,
+        room_id: roomId,
+      });
+      if (!upload.upload.dev_mode) {
+        const form = new FormData();
+        for (const [key, value] of Object.entries(upload.upload.fields)) form.append(key, value);
+        form.append("file", file);
+        const xhrRef: React.MutableRefObject<XMLHttpRequest | null> = { current: null };
+        await xhrUpload(
+          upload.upload.url,
+          form,
+          () => undefined,
+          xhrRef,
+          sendTimeoutMs(file.size),
+        );
+        const dimensions = await measureImage(file);
+        await api.mediaComplete(
+          upload.media.media_id,
+          dimensions ? { width: dimensions.width, height: dimensions.height } : {},
+        );
+      }
+
+      const sent = await sendOptimistic(
+        {
+          type: "m.image",
+          content: {
+            media_id: upload.media.media_id,
+            mime: file.type,
+            filename: file.name,
+          },
+          ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
+        },
+        { sizeBytes: file.size },
+      );
+      if (sent) {
+        track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
+        onClearReply?.();
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Couldn’t send this GIF");
+    } finally {
+      api.activity(roomId, "uploading", false).catch(() => undefined);
+      setStagingGif(false);
+    }
+  };
+
   const sendTextOptimistic = (body: string, extraContent?: Record<string, unknown>) => {
     const clientId = newClientId();
     const payload: OptimisticPayload = {
@@ -2629,14 +2677,14 @@ export function Composer({
               type="button"
               title="add GIF"
               aria-label="add GIF"
-              disabled={busy || isEditing || stagingGif}
-              className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+              disabled={sendDisabled || busy || isEditing || stagingGif}
+              className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-transparent text-foreground transition-opacity hover:opacity-70 disabled:opacity-50"
             >
               {stagingGif ? <CircleNotch className="h-4 w-4 animate-spin" /> : <Gif className="h-5 w-5" />}
             </button>
           </PopoverTrigger>
           <PopoverContent side="top" align="end" sideOffset={8} className="w-auto">
-            <GifPicker onPick={(gif) => void stageGif(gif)} />
+            <GifPicker onPick={(gif) => void sendGif(gif)} />
           </PopoverContent>
         </Popover>
         {emojiQuery !== null && (

@@ -412,6 +412,12 @@ export function MessageBubble({
     !(event.content as { forward_from?: unknown }).forward_from &&
     emojiMeta.ok &&
     emojiMeta.count === 1;
+  const holdReleaseAt =
+    typeof event.content.hold_release_at === "string"
+      ? event.content.hold_release_at
+      : null;
+  const showHeldCountdown =
+    isMine && status === "pending" && Boolean(holdReleaseAt);
 
   return (
     <div
@@ -614,16 +620,20 @@ export function MessageBubble({
             minute) run, so a quick back-to-back exchange shows one common
             timestamp instead of one per line. Streaming indicator escapes
             the gate because it's a live state, not historical metadata. */}
-        {(showTime || mightStream || eventShowsEdited(event)) && (
+        {(showTime || showHeldCountdown || mightStream || eventShowsEdited(event)) && (
           <div
             className={cn(
               "flex items-center gap-1.5 text-[10px] text-muted-foreground",
               isMine && "justify-end",
             )}
           >
-            {showTime && <HoverTime iso={event.created_at} />}
+            {showHeldCountdown && holdReleaseAt ? (
+              <HeldSendCountdown releaseAt={holdReleaseAt} />
+            ) : (
+              showTime && <HoverTime iso={event.created_at} />
+            )}
             {eventShowsEdited(event) && <span>edited</span>}
-            {showTime && isMine && status && (
+            {showTime && isMine && status && !showHeldCountdown && (
               status === "failed" && onRetry ? (
                 // Failed → the receipt becomes tap-to-retry (same clientId, so
                 // the server-side idempotency guarantees no duplicate).
@@ -955,6 +965,23 @@ function HoverTime({ iso }: { iso: string }) {
       onMouseLeave={() => setHover(false)}
     >
       {hover && absolute ? absolute : messageTime(iso)}
+    </span>
+  );
+}
+
+function HeldSendCountdown({ releaseAt }: { releaseAt: string }) {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [releaseAt]);
+  const deadline = Date.parse(releaseAt);
+  const seconds = Number.isFinite(deadline)
+    ? Math.max(0, Math.ceil((deadline - now) / 1000))
+    : 0;
+  return (
+    <span className="tabular-nums">
+      {seconds > 0 ? `sending in ${seconds}` : "sending…"}
     </span>
   );
 }

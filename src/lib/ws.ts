@@ -5,7 +5,7 @@ import * as React from "react";
 import { env } from "./env";
 import { api } from "./api";
 import { authStore } from "./auth";
-import type { WsFrame } from "./types";
+import type { HeldSend, WsFrame } from "./types";
 
 interface UseWsOptions {
   onFrame?: (f: WsFrame) => void;
@@ -35,6 +35,8 @@ const STALE_AFTER_MS = PING_INTERVAL_MS * 2.5;
 // attempt retries via the normal backoff (the JWT never goes in the URL,
 // where proxies and access logs could capture it).
 const TICKET_MINT_TIMEOUT_MS = 5_000;
+const HELD_SEND_SYNC_MS = 15_000;
+const HELD_SEND_RETRY_MS = 2_000;
 
 /** Resolve to a ticket string, or null when minting failed/timed out
  *  (network down, 5xx, endpoint not deployed yet). Never rejects. */
@@ -70,6 +72,10 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
   // happened) while we were waiting, the stale attempt must abort instead of
   // stacking a second socket.
   const connectSeqRef = React.useRef(0);
+  // Held-send recovery is deliberately socket/page scoped, not RoomView
+  // scoped. Switching chats remounts RoomView; this ref survives and keeps the
+  // original message's authoritative release timer alive.
+  const heldFrameRef = React.useRef<(held: HeldSend) => void>(() => {});
 
   const clearTimers = React.useCallback(() => {
     if (pingRef.current) {
@@ -152,6 +158,7 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
           lastActivityRef.current = Date.now();
           try {
             const f = JSON.parse(e.data) as WsFrame;
+            if (f.type === "held_send") heldFrameRef.current(f.held_send);
             setLastFrame(f);
             onFrameRef.current?.(f);
           } catch {
@@ -240,6 +247,88 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [connect, enabled]);
+
+  React.useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const timers = new Map<string, number>();
+    const releasing = new Set<string>();
+
+    const clearHeldTimer = (heldSendId: string) => {
+      const timer = timers.get(heldSendId);
+      if (timer !== undefined) window.clearTimeout(timer);
+      timers.delete(heldSendId);
+    };
+
+    async function requestRelease(held: HeldSend) {
+      if (cancelled || releasing.has(held.held_send_id)) return;
+      releasing.add(held.held_send_id);
+      try {
+        const next = await api.sendHeldNow(held.room_id, held.held_send_id);
+        releasing.delete(held.held_send_id);
+        if (!cancelled) schedule(next);
+      } catch {
+        releasing.delete(held.held_send_id);
+        if (cancelled) return;
+        const retry = window.setTimeout(() => schedule(held), HELD_SEND_RETRY_MS);
+        timers.set(held.held_send_id, retry);
+      }
+    }
+
+    function schedule(held: HeldSend) {
+      clearHeldTimer(held.held_send_id);
+      if (held.state === "sent" || held.state === "cancelled" || held.state === "failed") {
+        releasing.delete(held.held_send_id);
+        return;
+      }
+      // Pending rows fire at their deadline. Releasing rows get a short grace
+      // period for the active worker, then send-now asks Glass to reclaim a
+      // worker claim that died mid-release.
+      const targetAt =
+        held.state === "releasing"
+          ? Date.parse(held.updated_at) + 5_100
+          : Date.parse(held.release_at) + 100;
+      const delay = Number.isFinite(targetAt)
+        ? Math.max(0, targetAt - Date.now())
+        : HELD_SEND_RETRY_MS;
+      const timer = window.setTimeout(() => {
+        timers.delete(held.held_send_id);
+        void requestRelease(held);
+      }, delay);
+      timers.set(held.held_send_id, timer);
+    }
+
+    const sync = async () => {
+      try {
+        const result = await api.heldSendsAll();
+        if (cancelled) return;
+        const active = new Set(result.held_sends.map((held) => held.held_send_id));
+        for (const heldSendId of timers.keys()) {
+          if (!active.has(heldSendId)) clearHeldTimer(heldSendId);
+        }
+        for (const held of result.held_sends) schedule(held);
+      } catch {
+        // Offline/auth transitions retry on the interval and wake events below.
+      }
+    };
+
+    heldFrameRef.current = schedule;
+    void sync();
+    const interval = window.setInterval(() => void sync(), HELD_SEND_SYNC_MS);
+    const wake = () => void sync();
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+    return () => {
+      cancelled = true;
+      heldFrameRef.current = () => {};
+      window.clearInterval(interval);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("focus", wake);
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+      releasing.clear();
+    };
+  }, [enabled]);
 
   const send = React.useCallback((frame: object) => {
     const ws = wsRef.current;

@@ -155,8 +155,6 @@ const SILICON_TEXT_SEND_DELAY_MS = 10_000;
 // after the box goes empty, so a quick clear/send of a follow-up doesn't
 // prematurely flush the held message.
 const SILICON_EMPTY_HOLD_MS = 10_000;
-// "wait 1 more minute" extends the post-empty hold by this much.
-const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 const EDIT_INACTIVITY_MS = 60_000;
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
@@ -192,6 +190,7 @@ interface QueuedTextSend {
   replyToEventId?: string;
   holdGroupId: string;
   holdIndex: number;
+  releaseAt: string;
   editedAt?: string | null;
 }
 
@@ -735,16 +734,6 @@ export function Composer({
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
   const [queuedTextCount, setQueuedTextCount] = React.useState(0);
-  // When the held message has entered its final countdown, this is the wall
-  // time it will auto-send at (null otherwise). Drives the "will send in {N}s".
-  const [emptyHoldEndsAt, setEmptyHoldEndsAt] = React.useState<number | null>(null);
-  // Tracks whether "wait 1 more minute" has extended the hold. The value isn't
-  // read for the label (the flush button always reads "send now"), but the
-  // setter still resets the flag across hold cycles.
-  const [, setWaitExtended] = React.useState(false);
-  // Updated on an interval while the countdown runs so the banner re-renders
-  // without calling impure Date.now() during render.
-  const [holdNowMs, setHoldNowMs] = React.useState(0);
   const editingClientId =
     ((editingEvent as (Event & { _clientId?: string }) | null)?._clientId ?? null);
   const editingHeld = Boolean(editingEvent?.event_id.startsWith("temp-") && editingClientId);
@@ -1207,6 +1196,7 @@ export function Composer({
           hold_group_id: item.holdGroupId,
           hold_index: item.holdIndex,
           hold_count: total,
+          hold_release_at: item.releaseAt,
           ...(item.editedAt ? { edited_before_send: true } : {}),
         },
         reply_to_event_id: item.replyToEventId,
@@ -1220,8 +1210,6 @@ export function Composer({
     delayedTextQueueRef.current = [];
     setQueuedTextCount(0);
     setQueuePaused(false);
-    setEmptyHoldEndsAt(null);
-    setWaitExtended(false);
     clearDelayTimer();
     onHoldStateChange?.(false);
   }, [clearDelayTimer, onHoldStateChange]);
@@ -1362,14 +1350,9 @@ export function Composer({
     }
     clearDelayTimer();
     setQueuePaused(false);
-    setWaitExtended(false);
     onHoldStateChange?.(false);
-    const now = Date.now();
-    setHoldNowMs(now);
-    setEmptyHoldEndsAt(now + SILICON_TEXT_SEND_DELAY_MS);
     delayTimerRef.current = setTimeout(() => {
       delayTimerRef.current = null;
-      setEmptyHoldEndsAt(null);
       if (hasContinuingDraft()) {
         setQueuePaused(true);
         onHoldStateChange?.(true);
@@ -1396,6 +1379,7 @@ export function Composer({
         replyToEventId: replyTo?.event_id,
         holdGroupId,
         holdIndex: existingQueue.length,
+        releaseAt: new Date(Date.now() + SILICON_TEXT_SEND_DELAY_MS).toISOString(),
       };
       delayedTextQueueRef.current = [...existingQueue, item];
       const queue = delayedTextQueueRef.current;
@@ -1421,6 +1405,8 @@ export function Composer({
             return;
           }
           heldSendIdsRef.current.set(clientId, held.held_send_id);
+          item.releaseAt = held.release_at;
+          onOptimisticUpdate?.(clientId, buildQueuedPayload(item, queue.length));
         })
         .catch(async (err) => {
           if (cancelledHeldClientIdsRef.current.has(clientId)) {
@@ -1572,8 +1558,6 @@ export function Composer({
       if (editingHeld) {
         clearDelayTimer();
         setQueuePaused(true);
-        setEmptyHoldEndsAt(null);
-        setWaitExtended(false);
         setQueuedTextCount(delayedTextQueueRef.current.length);
         onHoldStateChange?.(true);
       }
@@ -1603,7 +1587,6 @@ export function Composer({
       if (emptyHoldTimerRef.current) {
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
-        setEmptyHoldEndsAt(null);
       }
       return;
     }
@@ -1611,7 +1594,6 @@ export function Composer({
       if (emptyHoldTimerRef.current) {
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
-        setEmptyHoldEndsAt(null);
       }
       return;
     }
@@ -1620,47 +1602,19 @@ export function Composer({
       if (emptyHoldTimerRef.current) {
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
-        setEmptyHoldEndsAt(null);
       }
       return;
     }
     // Input is empty while paused: wait at least SILICON_EMPTY_HOLD_MS before
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
-    setWaitExtended(false);
-    const now = Date.now();
-    setHoldNowMs(now);
-    setEmptyHoldEndsAt(now + SILICON_EMPTY_HOLD_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
-      setEmptyHoldEndsAt(null);
       // Re-check: if they resumed typing in the meantime, this effect will have
       // cancelled us; only send if the box is still empty.
       if (!hasContinuingDraft()) void flushDelayedTextQueue();
     }, SILICON_EMPTY_HOLD_MS);
   }, [editingHeld, flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
-
-  // Re-render while the countdown is live so "{N} seconds to send" visibly
-  // ticks down.
-  React.useEffect(() => {
-    if (emptyHoldEndsAt == null) return;
-    const id = window.setInterval(() => setHoldNowMs(Date.now()), 250);
-    return () => window.clearInterval(id);
-  }, [emptyHoldEndsAt]);
-
-  // "wait 1 more minute" — push the auto-send out by SILICON_WAIT_MORE_MS.
-  const waitOneMoreMinute = React.useCallback(() => {
-    if (emptyHoldTimerRef.current) clearTimeout(emptyHoldTimerRef.current);
-    setWaitExtended(true);
-    const now = Date.now();
-    setHoldNowMs(now);
-    setEmptyHoldEndsAt(now + SILICON_WAIT_MORE_MS);
-    emptyHoldTimerRef.current = setTimeout(() => {
-      emptyHoldTimerRef.current = null;
-      setEmptyHoldEndsAt(null);
-      if (!hasContinuingDraft()) void flushDelayedTextQueue();
-    }, SILICON_WAIT_MORE_MS);
-  }, [flushDelayedTextQueue, hasContinuingDraft]);
 
   React.useEffect(
     () => () => {
@@ -1818,7 +1772,7 @@ export function Composer({
     if (!body) return;
     if (delayTextForSilicon) {
       // Every send (first or follow-up) enters the hold: it merges into the
-      // held batch and restarts the 5s window. The batch goes out once the
+      // held batch and restarts the 10s window. The batch goes out once the
       // window elapses with no new send / typing, or via "send now".
       queueDelayedTextSend(body);
       setText("");
@@ -1973,9 +1927,6 @@ export function Composer({
     );
   }
 
-  const emptyHoldRemainingSeconds =
-    emptyHoldEndsAt == null ? 0 : Math.max(0, Math.ceil((emptyHoldEndsAt - holdNowMs) / 1000));
-
   return (
     <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
@@ -2113,53 +2064,6 @@ export function Composer({
               discard
             </button>
           </div>
-        </div>
-      )}
-      {queuedTextCount > 0 && (queuePaused || emptyHoldEndsAt != null) && (
-        <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
-          {emptyHoldEndsAt != null ? (
-            // Final countdown — auto-send is imminent.
-            <>
-              <span className="min-w-0">
-                {emptyHoldRemainingSeconds} second
-                {emptyHoldRemainingSeconds === 1 ? "" : "s"} to send.
-              </span>
-              <div className="flex shrink-0 items-center gap-4">
-                <button
-                  type="button"
-                  onClick={waitOneMoreMinute}
-                  className="text-xs font-medium text-foreground underline-offset-2 hover:underline"
-                >
-                  wait 1 more minute
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void flushDelayedTextQueue()}
-                  className="text-xs font-medium text-foreground underline-offset-2 hover:underline"
-                >
-                  send now
-                </button>
-              </div>
-            </>
-          ) : (
-            // Still typing — hold open-endedly until they finish.
-            <>
-              <span className="min-w-0">
-                {editingHeld
-                  ? "holding this message until you finish editing."
-                  : "holding the message until you finish typing."}
-              </span>
-              {!editingHeld && (
-                <button
-                  type="button"
-                  onClick={() => void flushDelayedTextQueue()}
-                  className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
-                >
-                  send now
-                </button>
-              )}
-            </>
-          )}
         </div>
       )}
       {/* Live markdown preview — appears once the draft contains markdown, so

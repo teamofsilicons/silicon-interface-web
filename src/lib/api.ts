@@ -380,6 +380,7 @@ export const api = {
 
   heldSends: (room_id: string) =>
     call<HeldSendsListResponse>("GET", `/api/v1/rooms/${room_id}/held-sends`),
+  heldSendsAll: () => call<HeldSendsListResponse>("GET", "/api/v1/held-sends"),
   createHeldSend: (
     room_id: string,
     payload: {

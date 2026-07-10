@@ -774,7 +774,19 @@ export function RoomView({
     if (!myUsername) return;
     const body = typeof held.content.body === "string" ? held.content.body : "";
     setEvents((prev) => {
-      if (prev.some((e) => e._clientId === clientId || e.content.client_id === clientId)) return prev;
+      const existingIndex = prev.findIndex(
+        (e) => e._clientId === clientId || e.content.client_id === clientId,
+      );
+      if (existingIndex >= 0) {
+        const existing = prev[existingIndex];
+        if (existing.content.hold_release_at === held.release_at) return prev;
+        const next = [...prev];
+        next[existingIndex] = {
+          ...existing,
+          content: { ...existing.content, hold_release_at: held.release_at },
+        };
+        return next;
+      }
       const pending: LocalEvent = {
         event_id: `temp-${clientId}`,
         room: 0,
@@ -782,7 +794,7 @@ export function RoomView({
         sender_id: null,
         sender_handle: myUsername,
         type: "m.text",
-        content: { body, client_id: clientId },
+        content: { body, client_id: clientId, hold_release_at: held.release_at },
         reply_to_event_id: held.reply_to_event_id || "",
         is_final: true,
         created_at: held.created_at || new Date().toISOString(),

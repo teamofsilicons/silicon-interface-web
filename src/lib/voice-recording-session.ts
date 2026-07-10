@@ -28,6 +28,11 @@ const IDLE_SNAPSHOT: VoiceRecordingSnapshot = {
   startedAt: null,
 };
 
+const EMPTY_WAVEFORM: readonly number[] = [];
+// 512 samples at 20 Hz covers a waveform wider than the largest supported
+// composer while keeping long recordings bounded in memory.
+const MAX_WAVEFORM_SAMPLES = 512;
+
 function pickMime(): string {
   if (typeof MediaRecorder === "undefined") return "";
   for (const mime of [
@@ -53,6 +58,9 @@ function abortError(): DOMException {
 class VoiceRecordingSession {
   private snapshot: VoiceRecordingSnapshot = IDLE_SNAPSHOT;
   private readonly listeners = new Set<() => void>();
+  private waveform: readonly number[] = EMPTY_WAVEFORM;
+  private readonly waveformListeners = new Set<() => void>();
+  private waveformTimer: ReturnType<typeof setInterval> | null = null;
   private generation = 0;
   private recorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
@@ -74,6 +82,12 @@ class VoiceRecordingSession {
 
   readonly getSnapshot = (): VoiceRecordingSnapshot => this.snapshot;
   readonly getServerSnapshot = (): VoiceRecordingSnapshot => IDLE_SNAPSHOT;
+  readonly subscribeWaveform = (listener: () => void): (() => void) => {
+    this.waveformListeners.add(listener);
+    return () => this.waveformListeners.delete(listener);
+  };
+  readonly getWaveformSnapshot = (): readonly number[] => this.waveform;
+  readonly getWaveformServerSnapshot = (): readonly number[] => EMPTY_WAVEFORM;
 
   async start(roomId: string, handlers: VoiceRecordingHandlers): Promise<void> {
     if (!roomId) throw new Error("A room is required to record a voice note");
@@ -86,6 +100,7 @@ class VoiceRecordingSession {
 
     const generation = ++this.generation;
     this.handlers = handlers;
+    this.setWaveform(EMPTY_WAVEFORM);
     this.setSnapshot({ phase: "requesting", roomId, startedAt: null });
 
     let stream: MediaStream;
@@ -131,6 +146,7 @@ class VoiceRecordingSession {
       this.startedAt = Date.now();
       recorder.start(200);
       this.startAnalyser(stream);
+      this.startWaveformSampling();
       this.setSnapshot({ phase: "recording", roomId, startedAt: this.startedAt });
       vibrate(8);
     } catch (error) {
@@ -180,8 +196,8 @@ class VoiceRecordingSession {
     }
   }
 
-  /** Current normalized microphone amplitude for the mounted waveform UI. */
-  getLevel(): number {
+  /** Current normalized microphone amplitude. */
+  private getLevel(): number {
     const analyser = this.analyser;
     if (!analyser) return 0;
     const samples = new Uint8Array(analyser.fftSize);
@@ -256,7 +272,21 @@ class VoiceRecordingSession {
     }
   }
 
+  private startWaveformSampling(): void {
+    if (this.waveformTimer) clearInterval(this.waveformTimer);
+    this.waveformTimer = setInterval(() => {
+      const now = Date.now();
+      const measured = this.getLevel();
+      const idleFloor = 0.06 + 0.04 * Math.abs(Math.sin(now / 350));
+      const amplitude = Math.max(idleFloor, measured);
+      const retained = this.waveform.slice(-(MAX_WAVEFORM_SAMPLES - 1));
+      this.setWaveform([...retained, amplitude]);
+    }, 50);
+  }
+
   private releaseMedia(): void {
+    if (this.waveformTimer) clearInterval(this.waveformTimer);
+    this.waveformTimer = null;
     this.stream?.getTracks().forEach((track) => track.stop());
     this.audioContext?.close().catch(() => undefined);
     if (this.recorder) {
@@ -286,6 +316,11 @@ class VoiceRecordingSession {
     this.snapshot = snapshot;
     for (const listener of this.listeners) listener();
   }
+
+  private setWaveform(waveform: readonly number[]): void {
+    this.waveform = waveform;
+    for (const listener of this.waveformListeners) listener();
+  }
 }
 
 type VoiceSessionGlobal = typeof globalThis & {
@@ -302,5 +337,13 @@ export function useVoiceRecordingSession(): VoiceRecordingSnapshot {
     voiceRecordingSession.subscribe,
     voiceRecordingSession.getSnapshot,
     voiceRecordingSession.getServerSnapshot,
+  );
+}
+
+export function useVoiceRecordingWaveform(): readonly number[] {
+  return React.useSyncExternalStore(
+    voiceRecordingSession.subscribeWaveform,
+    voiceRecordingSession.getWaveformSnapshot,
+    voiceRecordingSession.getWaveformServerSnapshot,
   );
 }

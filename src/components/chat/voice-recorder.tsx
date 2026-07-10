@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import {
   useVoiceRecordingSession,
+  useVoiceRecordingWaveform,
   voiceRecordingSession,
 } from "@/lib/voice-recording-session";
 import { Button } from "@/components/ui/button";
@@ -19,10 +20,13 @@ import { Button } from "@/components/ui/button";
  */
 export function VoiceRecorder() {
   const session = useVoiceRecordingSession();
-  const [elapsed, setElapsed] = React.useState(0);
+  const waveform = useVoiceRecordingWaveform();
+  const [elapsed, setElapsed] = React.useState(() =>
+    session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0,
+  );
   const wavesContainerRef = React.useRef<HTMLDivElement>(null);
   const [barCount, setBarCount] = React.useState(48);
-  const [waves, setWaves] = React.useState<number[]>(() => new Array(48).fill(0));
+  const waves = fitWaveform(waveform, barCount);
 
   React.useEffect(() => {
     const element = wavesContainerRef.current;
@@ -40,31 +44,15 @@ export function VoiceRecorder() {
   React.useEffect(() => {
     if (session.phase === "idle") return;
     let frame = 0;
-    let lastSampleAt = 0;
-    const sampleEveryMs = 50;
 
-    const tick = (now: number) => {
+    const tick = () => {
       setElapsed(session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0);
-      if (now - lastSampleAt >= sampleEveryMs) {
-        lastSampleAt = now;
-        const measured = voiceRecordingSession.getLevel();
-        const idleFloor = 0.06 + 0.04 * Math.abs(Math.sin(now / 350));
-        const amplitude = Math.max(idleFloor, measured);
-        setWaves((previous) => {
-          const fitted =
-            previous.length >= barCount
-              ? previous.slice(previous.length - barCount + 1)
-              : [...new Array(Math.max(0, barCount - previous.length - 1)).fill(0), ...previous];
-          fitted.push(amplitude);
-          return fitted.slice(-barCount);
-        });
-      }
       frame = requestAnimationFrame(tick);
     };
 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [barCount, session.phase, session.startedAt]);
+  }, [session.phase, session.startedAt]);
 
   const handleSend = async () => {
     try {
@@ -119,6 +107,12 @@ export function VoiceRecorder() {
       </Button>
     </div>
   );
+}
+
+function fitWaveform(waveform: readonly number[], barCount: number): number[] {
+  const visible = waveform.slice(-barCount);
+  if (visible.length >= barCount) return [...visible];
+  return [...new Array(barCount - visible.length).fill(0), ...visible];
 }
 
 function formatElapsed(ms: number): string {

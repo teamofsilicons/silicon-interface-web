@@ -12,11 +12,13 @@ import {
 } from "@/components/ui/dialog";
 import { api, ApiError } from "@/lib/api";
 import {
+  annotationLabel,
   clearAnnotationSession,
   loadAnnotationSession,
-  maxRefCodeNumber,
+  reindexAnnotations,
   saveAnnotationSession,
 } from "@/lib/annotation-session";
+import { moveAnnotation } from "@/lib/annotation-coords";
 import { generateAnnotatedImage } from "@/lib/annotation-image";
 import { generateAnnotatedPdf } from "@/lib/annotation-pdf";
 import {
@@ -27,7 +29,6 @@ import {
   type ToolKind,
 } from "@/lib/annotation-types";
 import { chooseMarkupColor } from "@/lib/annotation-color";
-import { generateAnnotationName } from "@/lib/annotation-name";
 import { uploadMediaBlob } from "@/lib/media-upload";
 import { getPdfPageCount, releasePdfDocument, renderPdfPage } from "@/lib/pdf-render";
 import type { AnnotationDraft, AnnotationItem } from "@/lib/types";
@@ -71,7 +72,7 @@ function stepZoom(value: number, direction: 1 | -1): number {
  *
  * Milestone 2: drawing a markup no longer commits it directly — it becomes a
  * PENDING markup that gates behind a required comment. On submit it commits with
- * a serialized reference code (A1, A2…) into the annotations list; the list
+ * a deterministic positional label into the annotations list; the list
  * supports select-to-highlight (jumping to the markup's page), edit-comment, and
  * delete. Autosave (M3) and attach-to-chat (M5) build on this session state.
  */
@@ -110,12 +111,9 @@ export function AnnotationStudio({
   // Shown when closing with unattached annotations (anti-loss guard).
   const [confirmClose, setConfirmClose] = React.useState(false);
   const [zoom, setZoom] = React.useState(1);
-  // Monotonic reference-code counter; never reuses a code so past references
-  // stay valid. Seeded once from the restored annotations.
-  const codeCounter = React.useRef<number | null>(null);
-  if (codeCounter.current === null) codeCounter.current = maxRefCodeNumber(annotations);
-  const namingSeqRef = React.useRef(new Map<string, number>());
-
+  // On-document comment bubbles: full cards by default, collapsible to chips
+  // when they get in the way of reading/drawing.
+  const [commentsCollapsed, setCommentsCollapsed] = React.useState(false);
   const hasPending = pending.length > 0;
   const promptOpen = (hasPending && !groupingMore) || editingId !== null;
 
@@ -203,6 +201,7 @@ export function AnnotationStudio({
       return;
     }
     setEditingId(null);
+    setSelectedId(null); // a fresh markup shifts focus off any prior selection
     setPendingPage(page);
     const color = await chooseMarkupColor({ imageSrc, geometry });
     setPending((prev) => [...prev, { geometry, color }]);
@@ -216,64 +215,33 @@ export function AnnotationStudio({
     [isPdf],
   );
 
-  const queueAnnotationName = React.useCallback((id: string, comment: string, fallback: string) => {
-    const seq = (namingSeqRef.current.get(id) || 0) + 1;
-    namingSeqRef.current.set(id, seq);
-    void generateAnnotationName({ comment, fallback }).then((name) => {
-      setAnnotations((prev) =>
-        prev.map((a) => {
-          if (a.id !== id || namingSeqRef.current.get(id) !== seq) return a;
-          const refCode = name || fallback;
-          return {
-            ...a,
-            refCode,
-            fallbackCode: fallback,
-            refStatus: refCode === fallback ? "fallback" : "named",
-          };
-        }),
-      );
-    });
-  }, []);
-
   const submitComment = React.useCallback(
     (comment: string) => {
       if (pending.length > 0) {
-        const next = (codeCounter.current ?? 0) + 1;
-        codeCounter.current = next;
-        const fallbackCode = `A${next}`;
         const first = pending[0];
+        const id = newAnnotationId();
         const a: Annotation = {
-          id: newAnnotationId(),
+          id,
           page: pendingPage,
           geometry: first.geometry,
           markups: pending,
           color: first.color,
-          refCode: fallbackCode,
-          fallbackCode,
-          refStatus: "pending",
+          refCode: "",
           comment,
         };
-        setAnnotations((prev) => [...prev, a]);
-        setSelectedId(a.id);
+        setAnnotations((prev) => [...prev, { ...a, refCode: annotationLabel(prev.length) }]);
+        setSelectedId(id);
         setPending([]);
         setGroupingMore(false);
         setPendingCommentDraft("");
-        queueAnnotationName(a.id, comment, fallbackCode);
       } else if (editingId) {
-        const existing = annotations.find((a) => a.id === editingId);
-        const fallbackCode = existing?.fallbackCode || existing?.refCode || "A1";
         setAnnotations((prev) =>
-          prev.map((a) =>
-            a.id === editingId
-              ? { ...a, comment, refCode: fallbackCode, fallbackCode, refStatus: "pending" }
-              : a,
-          ),
+          prev.map((a) => (a.id === editingId ? { ...a, comment } : a)),
         );
         setEditingId(null);
-        queueAnnotationName(editingId, comment, fallbackCode);
       }
     },
-    [pending, pendingPage, editingId, annotations, queueAnnotationName],
+    [pending, pendingPage, editingId],
   );
 
   const cancelComment = React.useCallback(() => {
@@ -304,9 +272,14 @@ export function AnnotationStudio({
   );
 
   const deleteAnnotation = React.useCallback((a: Annotation) => {
-    namingSeqRef.current.delete(a.id);
-    setAnnotations((prev) => prev.filter((x) => x.id !== a.id));
+    setAnnotations((prev) => reindexAnnotations(prev.filter((x) => x.id !== a.id)));
     setSelectedId((cur) => (cur === a.id ? null : cur));
+  }, []);
+
+  const moveExistingAnnotation = React.useCallback((id: string, dx: number, dy: number) => {
+    setAnnotations((prev) => prev.map((annotation) => (
+      annotation.id === id ? moveAnnotation(annotation, dx, dy) : annotation
+    )));
   }, []);
 
   const undoLast = React.useCallback(() => {
@@ -413,6 +386,30 @@ export function AnnotationStudio({
     clearRenderedMedia,
   ]);
 
+  // On-document comment bubbles, shared by both stages. Hidden for the
+  // annotation being edited (the comment prompt sits at its markup) and muted
+  // while any prompt is open.
+  const commentLayer = React.useMemo(
+    () => ({
+      selectedId,
+      collapsed: commentsCollapsed,
+      hideId: editingId,
+      muted: promptOpen,
+      onSelect: selectAnnotation,
+      onEdit: editAnnotation,
+      onDelete: deleteAnnotation,
+    }),
+    [
+      selectedId,
+      commentsCollapsed,
+      editingId,
+      promptOpen,
+      selectAnnotation,
+      editAnnotation,
+      deleteAnnotation,
+    ],
+  );
+
   const editingAnnotation = editingId ? annotations.find((a) => a.id === editingId) : undefined;
   // The markup the comment popover anchors to: the pending geometry (new) or the
   // annotation being edited.
@@ -421,6 +418,7 @@ export function AnnotationStudio({
   const commentState =
     promptOpen && commentAnchor
       ? {
+          promptKey: editingAnnotation ? `edit:${editingAnnotation.id}` : `new:${pendingPage}:${pending.length}`,
           initial: editingAnnotation ? editingAnnotation.comment : pendingCommentDraft,
           title: editingAnnotation ? editingAnnotation.refCode : "new markup",
           anchor: commentAnchor,
@@ -512,6 +510,16 @@ export function AnnotationStudio({
               setTool("pin");
               return;
             }
+            if (key === "m") {
+              e.preventDefault();
+              setTool("move");
+              return;
+            }
+            if (key === "c") {
+              e.preventDefault();
+              setCommentsCollapsed((v) => !v);
+              return;
+            }
           }
           if (key === "+" || key === "=") {
             e.preventDefault();
@@ -543,6 +551,8 @@ export function AnnotationStudio({
           onZoomIn={zoomIn}
           onZoomOut={zoomOut}
           onZoomReset={resetZoom}
+          commentsCollapsed={commentsCollapsed}
+          onToggleComments={() => setCommentsCollapsed((v) => !v)}
           onAttach={attach}
           canAttach={annotations.length > 0 && !promptOpen}
           attaching={attaching}
@@ -552,11 +562,11 @@ export function AnnotationStudio({
           {/* Stage area — the page + drawing overlay + comment gate. */}
           <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-card p-4">
             {error ? (
-              <p className="text-sm text-muted-foreground" role="status">
+              <p className="text-sm text-foreground" role="status">
                 couldn&rsquo;t load this attachment for annotation.
               </p>
             ) : !isImage && !isPdf ? (
-              <p className="text-sm text-muted-foreground" role="status">
+              <p className="text-sm text-foreground" role="status">
                 this type can&rsquo;t be annotated.
               </p>
             ) : isPdf ? (
@@ -568,11 +578,12 @@ export function AnnotationStudio({
                   annotations={annotations}
                   tool={tool}
                   onCommit={(page, geometry, imageSrc) => void onMarkup(geometry, page, imageSrc)}
+                  onMove={moveExistingAnnotation}
+                  onSelect={selectAnnotation}
                   pending={pending.length > 0 ? { page: pendingPage, markups: pending } : null}
                   highlightId={selectedId}
                   locked={promptOpen}
                   comment={
-                    // eslint-disable-next-line react-hooks/refs -- false positive: this is plain prompt state, not a React ref
                     commentState
                       ? {
                           ...commentState,
@@ -580,11 +591,12 @@ export function AnnotationStudio({
                         }
                       : null
                   }
+                  commentLayer={commentLayer}
                   scrollToPage={scrollTargetPage}
                   zoom={zoom}
                 />
               ) : (
-                <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+                <p className="flex items-center gap-2 text-sm text-foreground" role="status">
                   <CircleNotch className="h-4 w-4 animate-spin" /> preparing…
                 </p>
               )
@@ -597,14 +609,17 @@ export function AnnotationStudio({
                 annotations={imageAnnotations}
                 tool={tool}
                 onCommit={(geometry) => void onMarkup(geometry, 0, url)}
+                onMove={moveExistingAnnotation}
+                onSelect={selectAnnotation}
                 pending={pending}
                 highlightId={selectedId}
                 locked={promptOpen}
                 comment={commentState}
+                commentLayer={commentLayer}
                 zoom={zoom}
               />
             ) : (
-              <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+              <p className="flex items-center gap-2 text-sm text-foreground" role="status">
                 <CircleNotch className="h-4 w-4 animate-spin" /> preparing image…
               </p>
             )}
@@ -624,13 +639,18 @@ export function AnnotationStudio({
           <ConfirmCloseDialog
             count={annotations.length}
             onKeepEditing={() => setConfirmClose(false)}
-            onClose={() => {
-              // Draft stays autosaved — recoverable on reopen.
+            onDiscard={() => {
               setConfirmClose(false);
+              setAnnotations([]);
+              setPending([]);
+              setGroupingMore(false);
+              setPendingCommentDraft("");
+              setEditingId(null);
+              setSelectedId(null);
+              clearAnnotationSession(roomId, sourceMediaId);
               clearRenderedMedia();
               onOpenChange(false);
             }}
-            onAttach={attaching ? undefined : attach}
           />
         )}
       </DialogContent>

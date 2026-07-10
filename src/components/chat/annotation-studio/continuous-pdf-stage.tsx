@@ -7,6 +7,7 @@ import { clamp, geometryBBox } from "@/lib/annotation-coords";
 import type { Annotation, Geometry, MarkupDraft, ToolKind } from "@/lib/annotation-types";
 import { cn } from "@/lib/utils";
 
+import { CommentLayer, type CommentLayerState } from "./comment-layer";
 import { COMMENT_PROMPT_WIDTH, CommentPrompt } from "./comment-prompt";
 import type { CommentState } from "./studio-stage";
 import { OverlayCanvas } from "./overlay-canvas";
@@ -25,10 +26,14 @@ interface Props {
   annotations: Annotation[];
   tool: ToolKind;
   onCommit: (page: number, g: Geometry, imageSrc: string) => void;
+  onMove: (id: string, dx: number, dy: number) => void;
+  onSelect: (annotation: Annotation) => void;
   pending?: { page: number; markups: MarkupDraft[] } | null;
   highlightId?: string | null;
   locked?: boolean;
   comment?: (CommentState & { page: number }) | null;
+  /** On-document comment bubbles (chip + comment text over each page). */
+  commentLayer?: CommentLayerState | null;
   scrollToPage?: number | null;
   zoom?: number;
 }
@@ -51,10 +56,13 @@ export function ContinuousPdfStage({
   annotations,
   tool,
   onCommit,
+  onMove,
+  onSelect,
   pending,
   highlightId,
   locked,
   comment,
+  commentLayer,
   scrollToPage,
   zoom = 1,
 }: Props) {
@@ -117,10 +125,13 @@ export function ContinuousPdfStage({
               annotations={pageAnnotations}
               tool={tool}
               onCommit={page ? (g) => onCommit(page0, g, page.dataUrl) : () => undefined}
+              onMove={onMove}
+              onSelect={onSelect}
               pending={pagePending}
               highlightId={highlightId}
               locked={locked || !page}
               comment={pageComment}
+              commentLayer={commentLayer}
             />
           );
         })}
@@ -137,10 +148,13 @@ interface PdfPageProps {
   annotations: Annotation[];
   tool: ToolKind;
   onCommit: (g: Geometry) => void;
+  onMove: (id: string, dx: number, dy: number) => void;
+  onSelect: (annotation: Annotation) => void;
   pending?: MarkupDraft[];
   highlightId?: string | null;
   locked?: boolean;
   comment?: CommentState | null;
+  commentLayer?: CommentLayerState | null;
 }
 
 const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(function PdfPage(
@@ -152,10 +166,13 @@ const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(function PdfPage(
     annotations,
     tool,
     onCommit,
+    onMove,
+    onSelect,
     pending,
     highlightId,
     locked,
     comment,
+    commentLayer,
   },
   ref,
 ) {
@@ -180,7 +197,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(function PdfPage(
   return (
     <section ref={ref} className="w-full" aria-label={`page ${pageIndex + 1}`}>
       <div className="mb-1 flex items-center justify-between" style={{ width: boxW }}>
-        <span className="label-mono text-[10px] uppercase text-muted-foreground">
+        <span className="label-mono text-[10px] uppercase text-foreground">
           page {pageIndex + 1}
         </span>
       </div>
@@ -203,13 +220,23 @@ const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(function PdfPage(
               annotations={annotations}
               tool={tool}
               onCommit={onCommit}
+              onMove={onMove}
+              onSelect={onSelect}
               pending={pending}
               highlightId={highlightId}
               locked={locked}
             />
+            {commentLayer && (
+              <CommentLayer
+                annotations={annotations}
+                boxW={boxW}
+                boxH={boxH}
+                {...commentLayer}
+              />
+            )}
           </>
         ) : (
-          <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground" role="status">
+          <div className="flex h-full w-full items-center justify-center text-xs text-foreground" role="status">
             <CircleNotch className="mr-2 h-4 w-4 animate-spin" /> rendering page {pageIndex + 1}
           </div>
         )}
@@ -217,6 +244,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(function PdfPage(
         {comment && popPos && (
           <div className="absolute z-10" style={{ left: popPos.left, top: popPos.top }}>
             <CommentPrompt
+              key={comment.promptKey}
               initial={comment.initial}
               title={comment.title}
               onSubmit={comment.onSubmit}

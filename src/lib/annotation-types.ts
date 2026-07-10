@@ -7,7 +7,7 @@
  * resolution for the flattened export (Milestone 5).
  */
 
-export type ToolKind = "pen" | "rect" | "pin";
+export type ToolKind = "move" | "pen" | "rect" | "pin";
 
 /** A normalized point — x/y in [0,1] relative to the page box. */
 export interface NPoint {
@@ -27,7 +27,8 @@ export interface MarkupDraft {
 
 /**
  * One annotation. Milestone 1 only fills `id`, `page`, and `geometry` as the
- * user draws; the required comment and the `refCode` (A1, A2…) are attached when
+ * user draws; the required comment and the positional `refCode` (`a…z`, then
+ * `a1…z1`, etc.) are attached when
  * the comment gate commits it in Milestone 2.
  */
 export interface Annotation {
@@ -43,12 +44,8 @@ export interface Annotation {
   /** Markup/badge color chosen for contrast against the marked region. Older
    *  autosaved annotations may omit it and fall back to MARKUP_COLOR. */
   color?: string;
-  /** Serialized reference code, e.g. "A1". Empty until committed (M2). */
+  /** Positional label, e.g. "a" or "b1". Empty until committed. */
   refCode: string;
-  /** Durable fallback code for naming failures / stale saved sessions. */
-  fallbackCode?: string;
-  /** AI naming status for the local studio UI. */
-  refStatus?: "pending" | "named" | "fallback";
   /** Required comment. Empty until committed (M2). */
   comment: string;
 }

@@ -28,13 +28,27 @@ function pinRadius(W: number, H: number, emphasized: boolean): number {
   return emphasized ? r * 1.25 : r;
 }
 
-function readableTextColor(fill: string): string {
+export function readableTextColor(fill: string): string {
   const h = fill.replace("#", "");
   const r = parseInt(h.slice(0, 2), 16) || 0;
   const g = parseInt(h.slice(2, 4), 16) || 0;
   const b = parseInt(h.slice(4, 6), 16) || 0;
   const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
   return luma > 0.58 ? "#111111" : "#ffffff";
+}
+
+function drawPath(ctx: CanvasRenderingContext2D, g: Geometry, W: number, H: number) {
+  ctx.beginPath();
+  if (g.kind === "pen") {
+    g.path.forEach((p, i) => {
+      const x = p.x * W;
+      const y = p.y * H;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+  } else if (g.kind === "rect") {
+    ctx.rect(g.x * W, g.y * H, g.w * W, g.h * H);
+  }
 }
 
 /** Top-left-ish anchor for a code label, in normalized coords. */
@@ -52,32 +66,45 @@ export function drawShape(
   emphasized = false,
   color = MARKUP_COLOR,
 ) {
-  ctx.lineWidth = strokeWidth(W, H, emphasized);
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
+  const line = strokeWidth(W, H, emphasized);
+  const immediateHalo = readableTextColor(color);
+  const outerHalo = immediateHalo === "#ffffff" ? "#111111" : "#ffffff";
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  if (g.kind === "pen") {
-    ctx.beginPath();
-    g.path.forEach((p, i) => {
-      const x = p.x * W;
-      const y = p.y * H;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-  } else if (g.kind === "rect") {
+  if (g.kind === "pen" || g.kind === "rect") {
     if (emphasized) {
       ctx.save();
       ctx.globalAlpha = 0.14;
-      ctx.fillRect(g.x * W, g.y * H, g.w * W, g.h * H);
+      ctx.fillStyle = color;
+      if (g.kind === "rect") {
+        ctx.fillRect(g.x * W, g.y * H, g.w * W, g.h * H);
+      }
       ctx.restore();
     }
-    ctx.strokeRect(g.x * W, g.y * H, g.w * W, g.h * H);
+    // A two-tone halo keeps the mark visible on both light and dark or mixed
+    // imagery; the chosen mark color then sits on a maximum-contrast edge.
+    for (const [strokeStyle, lineWidth] of [
+      [outerHalo, line + 6],
+      [immediateHalo, line + 3],
+      [color, line],
+    ] as const) {
+      drawPath(ctx, g, W, H);
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+    }
   } else {
-    ctx.beginPath();
-    ctx.arc(g.x * W, g.y * H, pinRadius(W, H, emphasized), 0, Math.PI * 2);
-    ctx.fill();
+    const radius = pinRadius(W, H, emphasized);
+    for (const [fillStyle, extra] of [
+      [outerHalo, 5],
+      [immediateHalo, 2.5],
+      [color, 0],
+    ] as const) {
+      ctx.beginPath();
+      ctx.arc(g.x * W, g.y * H, radius + extra, 0, Math.PI * 2);
+      ctx.fillStyle = fillStyle;
+      ctx.fill();
+    }
   }
 }
 
@@ -102,9 +129,12 @@ export function drawLabel(
   let by = a.y * H - bh - 2;
   if (by < 0) by = a.y * H + 2;
   bx = Math.max(0, Math.min(bx, W - bw));
-  ctx.fillStyle = color;
+  ctx.fillStyle = "#111827";
   ctx.fillRect(bx, by, bw, bh);
-  ctx.fillStyle = readableTextColor(color);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(1.5, fontH * 0.12);
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.fillStyle = "#ffffff";
   ctx.fillText(code, bx + padX, by + bh / 2 + 0.5);
 }
 

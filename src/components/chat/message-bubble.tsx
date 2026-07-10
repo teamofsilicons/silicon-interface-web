@@ -71,7 +71,7 @@ const SELECTABLE_FORWARD_TYPES = new Set<EventType>([
   "m.voice",
   "m.tts",
 ]);
-const VISIBLE_SILICON_HOLD_SECONDS = 10;
+const VISIBLE_SILICON_HOLD_SECONDS = 300;
 
 /** Deterministic tilt in [-3, 3] degrees, hashed from a stable key so each
  *  pin keeps its angle across re-renders (a fresh Math.random would jitter on
@@ -646,7 +646,7 @@ export function MessageBubble({
               {showHeldCountdown && holdReleaseAt ? (
                 <HeldSendCountdown releaseAt={holdReleaseAt} />
               ) : (
-                showTime && <HoverTime iso={event.created_at} />
+                showTime && !showPausedHoldClock && <HoverTime iso={event.created_at} />
               )}
               {eventShowsEdited(event) && <span>edited</span>}
               {(showTime || showPausedHoldClock || status === "failed") &&

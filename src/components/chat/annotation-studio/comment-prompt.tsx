@@ -55,10 +55,10 @@ export function CommentPrompt({
       style={{ width: COMMENT_PROMPT_WIDTH }}
     >
       <div className="mb-1.5 flex items-center justify-between">
-        <span className="label-mono text-[11px] uppercase tracking-wide text-muted-foreground">
+        <span className="label-mono text-[11px] uppercase tracking-wide text-foreground">
           comment · {title}
         </span>
-        <span className="text-[11px] text-muted-foreground">required</span>
+        <span className="text-[11px] text-foreground">required</span>
       </div>
       <textarea
         ref={ref}

@@ -10,10 +10,8 @@ interface Props {
   count: number;
   /** Dismiss the confirm and return to editing. */
   onKeepEditing: () => void;
-  /** Close the studio; the draft stays autosaved and restores on reopen. */
-  onClose: () => void;
-  /** Attach to chat (Milestone 5). When omitted, the button is hidden. */
-  onAttach?: () => void;
+  /** Permanently discard this unfinished annotation draft. */
+  onDiscard: () => void;
 }
 
 /**
@@ -21,10 +19,9 @@ interface Props {
  * Rendered as an in-studio overlay (scrim + centered card) rather than a nested
  * Radix dialog, so it never fights the studio modal's focus trap.
  *
- * "Close" leaves the autosave intact — the work is recoverable on reopen — so
- * there's no way to silently lose annotations.
+ * Closing is an explicit two-way decision: discard or keep editing.
  */
-export function ConfirmCloseDialog({ count, onKeepEditing, onClose, onAttach }: Props) {
+export function ConfirmCloseDialog({ count, onKeepEditing, onDiscard }: Props) {
   return (
     <div
       className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 p-4"
@@ -39,24 +36,19 @@ export function ConfirmCloseDialog({ count, onKeepEditing, onClose, onAttach }: 
             <p className="text-sm font-medium">
               {count} annotation{count === 1 ? "" : "s"} not attached yet
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              they&rsquo;re saved as a draft and will be here when you reopen this
-              attachment. attach them to the chat to send them to the silicon.
+            <p className="mt-1 text-xs text-foreground">
+              discarding removes this unfinished draft. keep editing to return
+              to the document.
             </p>
           </div>
         </div>
         <div className="mt-4 flex items-center justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={onClose} aria-label="close annotation studio">
-            close
+          <Button size="sm" variant="outline" onClick={onDiscard} aria-label="discard annotations">
+            discard
           </Button>
-          <Button size="sm" variant="outline" onClick={onKeepEditing} aria-label="keep editing annotations">
+          <Button size="sm" onClick={onKeepEditing} aria-label="keep editing annotations">
             keep editing
           </Button>
-          {onAttach && (
-            <Button size="sm" onClick={onAttach} aria-label="attach annotations to chat">
-              attach to chat
-            </Button>
-          )}
         </div>
       </div>
     </div>

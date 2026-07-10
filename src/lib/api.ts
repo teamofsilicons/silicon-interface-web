@@ -393,6 +393,11 @@ export const api = {
   ) => call<HeldSend>("POST", `/api/v1/rooms/${room_id}/held-sends`, payload),
   cancelHeldSend: (room_id: string, held_send_id: string) =>
     call<HeldSend>("DELETE", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}`),
+  updateHeldSend: (
+    room_id: string,
+    held_send_id: string,
+    payload: { base_version: number; hold_seconds: number },
+  ) => call<HeldSend>("PATCH", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}`, payload),
   sendHeldNow: (room_id: string, held_send_id: string) =>
     call<HeldSend>("POST", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}/send-now`, {}),
 

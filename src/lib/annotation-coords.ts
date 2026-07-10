@@ -1,4 +1,4 @@
-import type { Geometry, NPoint } from "./annotation-types";
+import { annotationMarkups, type Annotation, type Geometry, type NPoint } from "./annotation-types";
 
 export function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -23,6 +23,39 @@ export function geometryBBox(g: Geometry): { x0: number; y0: number; x1: number;
     y1 = Math.max(y1, p.y);
   }
   return g.path.length ? { x0, y0, x1, y1 } : { x0: 0, y0: 0, x1: 0, y1: 0 };
+}
+
+function translateGeometry(g: Geometry, dx: number, dy: number): Geometry {
+  if (g.kind === "rect") return { ...g, x: g.x + dx, y: g.y + dy };
+  if (g.kind === "pin") return { ...g, x: g.x + dx, y: g.y + dy };
+  return { kind: "pen", path: g.path.map((point) => ({ x: point.x + dx, y: point.y + dy })) };
+}
+
+/** Translate every markup in an annotation while keeping the complete group
+ * inside the page. The returned dx/dy may be smaller than requested at edges. */
+export function moveAnnotation(annotation: Annotation, requestedDx: number, requestedDy: number): Annotation {
+  const marks = annotationMarkups(annotation);
+  let x0 = 1;
+  let y0 = 1;
+  let x1 = 0;
+  let y1 = 0;
+  for (const mark of marks) {
+    const bb = geometryBBox(mark.geometry);
+    x0 = Math.min(x0, bb.x0);
+    y0 = Math.min(y0, bb.y0);
+    x1 = Math.max(x1, bb.x1);
+    y1 = Math.max(y1, bb.y1);
+  }
+  const dx = clamp(requestedDx, -x0, 1 - x1);
+  const dy = clamp(requestedDy, -y0, 1 - y1);
+  if (dx === 0 && dy === 0) return annotation;
+  const moved = marks.map((mark) => ({ ...mark, geometry: translateGeometry(mark.geometry, dx, dy) }));
+  return {
+    ...annotation,
+    geometry: moved[0].geometry,
+    color: moved[0].color,
+    markups: moved,
+  };
 }
 
 /**

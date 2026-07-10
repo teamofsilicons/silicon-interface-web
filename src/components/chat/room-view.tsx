@@ -93,13 +93,14 @@ type LocalEvent = Event & {
 };
 
 const VISIBLE_HELD_SEND_MS = 10_000;
-const HELD_SEND_RECOVERY_MAX_DELAY_MS = VISIBLE_HELD_SEND_MS + 100;
+const MAX_EXTENDED_HELD_SEND_MS = 300_000;
+const HELD_SEND_RECOVERY_MAX_DELAY_MS = MAX_EXTENDED_HELD_SEND_MS + 100;
 
 function localHeldReleaseAt(held: HeldSend): string {
   const now = Date.now();
-  const serverHoldMs = Date.parse(held.release_at) - Date.parse(held.created_at);
+  const serverHoldMs = Date.parse(held.release_at) - Date.parse(held.updated_at || held.created_at);
   const localDelay = Number.isFinite(serverHoldMs)
-    ? Math.min(VISIBLE_HELD_SEND_MS, Math.max(0, serverHoldMs))
+    ? Math.min(MAX_EXTENDED_HELD_SEND_MS, Math.max(0, serverHoldMs))
     : VISIBLE_HELD_SEND_MS;
   return new Date(now + localDelay).toISOString();
 }
@@ -845,10 +846,10 @@ export function RoomView({
             : null;
         const currentDeadline = currentReleaseAt ? Date.parse(currentReleaseAt) : Number.NaN;
         // Preserve a valid locally-anchored countdown. Only replace an absent
-        // or visibly skewed (>10s) deadline with a capped local projection.
+        // or visibly skewed deadline with a duration-based local projection.
         if (
           Number.isFinite(currentDeadline) &&
-          currentDeadline <= Date.now() + VISIBLE_HELD_SEND_MS
+          currentDeadline <= Date.now() + MAX_EXTENDED_HELD_SEND_MS
         ) {
           return prev;
         }
@@ -2036,7 +2037,7 @@ export function RoomView({
         clientIds.set(held.held_send_id, held.client_id);
         applyHeldSendFrame(held);
         const serverHoldMs =
-          Date.parse(held.release_at) - Date.parse(held.created_at) + 100;
+          Date.parse(held.release_at) - Date.parse(held.updated_at || held.created_at) + 100;
         const delay = Number.isFinite(serverHoldMs)
           ? Math.min(
               HELD_SEND_RECOVERY_MAX_DELAY_MS,
@@ -3088,6 +3089,7 @@ export function RoomView({
 
       {annotationSource && (
         <AnnotationStudio
+          key={`${annotationSource.roomId}:${annotationSource.sourceMediaId}`}
           open
           onOpenChange={(open) => {
             if (!open) setAnnotationSource(null);

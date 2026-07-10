@@ -280,6 +280,7 @@ export function MediaPreviewer({
     </Dialog>
     {!onOpenAnnotation && canAnnotate && roomId && sourceMediaId ? (
       <AnnotationStudio
+        key={`${roomId}:${sourceMediaId}`}
         open={localStudioOpen}
         onOpenChange={setLocalStudioOpen}
         url={url}

@@ -49,7 +49,7 @@ import {
   mentionClassName,
   splitMentionText,
 } from "@/lib/mentions";
-import type { AnnotationDraft, Event, EventType } from "@/lib/types";
+import type { AnnotationDraft, Event, EventType, HeldSend } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -160,6 +160,7 @@ const SILICON_TEXT_SEND_DELAY_MS = 10_000;
 // after the box goes empty, so a quick clear/send of a follow-up doesn't
 // prematurely flush the held message.
 const SILICON_EMPTY_HOLD_MS = 10_000;
+const SILICON_WAIT_MORE_MS = 60_000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 const EDIT_INACTIVITY_MS = 60_000;
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
@@ -743,6 +744,7 @@ export function Composer({
   const textRef = React.useRef(text);
   const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
   const heldSendIdsRef = React.useRef<Map<string, string>>(new Map());
+  const heldSendsRef = React.useRef<Map<string, HeldSend>>(new Map());
   const cancelledHeldClientIdsRef = React.useRef<Set<string>>(new Set());
   const delayTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftBeforeEditRef = React.useRef("");
@@ -755,6 +757,8 @@ export function Composer({
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
   const [queuedTextCount, setQueuedTextCount] = React.useState(0);
+  const [holdEndsAt, setHoldEndsAt] = React.useState<number | null>(null);
+  const [holdNowMs, setHoldNowMs] = React.useState(() => Date.now());
   const editingClientId =
     ((editingEvent as (Event & { _clientId?: string }) | null)?._clientId ?? null);
   const editingHeld = Boolean(editingEvent?.event_id.startsWith("temp-") && editingClientId);
@@ -1166,6 +1170,7 @@ export function Composer({
         emptyHoldTimerRef.current = null;
       }
       setQueuePaused(true);
+      setHoldEndsAt(null);
       onHoldStateChange?.(true);
     }
     if (!isTypingRef.current) {
@@ -1258,6 +1263,7 @@ export function Composer({
     delayedTextQueueRef.current = [];
     setQueuedTextCount(0);
     setQueuePaused(false);
+    setHoldEndsAt(null);
     clearDelayTimer();
     onHoldStateChange?.(false);
   }, [clearDelayTimer, onHoldStateChange]);
@@ -1268,6 +1274,7 @@ export function Composer({
       const heldSendId = heldSendIdsRef.current.get(clientId);
       if (heldSendId) {
         heldSendIdsRef.current.delete(clientId);
+        heldSendsRef.current.delete(clientId);
         cancelledHeldClientIdsRef.current.add(clientId);
         api.cancelHeldSend(roomId, heldSendId).catch(() => undefined);
       } else {
@@ -1301,6 +1308,7 @@ export function Composer({
   const clearHeldClient = React.useCallback(
     (clientId: string) => {
       heldSendIdsRef.current.delete(clientId);
+      heldSendsRef.current.delete(clientId);
       cancelledHeldClientIdsRef.current.delete(clientId);
       const current = delayedTextQueueRef.current;
       if (!current.some((it) => it.clientId === clientId)) return;
@@ -1349,6 +1357,7 @@ export function Composer({
               else toast.error(err instanceof ApiError ? err.message : String(err));
             })
             .finally(() => heldSendIdsRef.current.delete(item.clientId));
+          heldSendsRef.current.delete(item.clientId);
           continue;
         }
         const payload = buildQueuedPayload(item, total);
@@ -1399,8 +1408,12 @@ export function Composer({
     clearDelayTimer();
     setQueuePaused(false);
     onHoldStateChange?.(false);
+    const deadline = Date.now() + SILICON_TEXT_SEND_DELAY_MS;
+    setHoldNowMs(Date.now());
+    setHoldEndsAt(deadline);
     delayTimerRef.current = setTimeout(() => {
       delayTimerRef.current = null;
+      setHoldEndsAt(null);
       if (hasContinuingDraft()) {
         setQueuePaused(true);
         onHoldStateChange?.(true);
@@ -1453,6 +1466,7 @@ export function Composer({
             return;
           }
           heldSendIdsRef.current.set(clientId, held.held_send_id);
+          heldSendsRef.current.set(clientId, held);
           // Keep the locally-anchored 10s display deadline. `held.release_at`
           // is an absolute server timestamp; replacing the local deadline with
           // it makes clock skew look like a 60s+ hold even though Glass stored
@@ -1608,6 +1622,7 @@ export function Composer({
       if (editingHeld) {
         clearDelayTimer();
         setQueuePaused(true);
+        setHoldEndsAt(null);
         setQueuedTextCount(delayedTextQueueRef.current.length);
         onHoldStateChange?.(true);
       }
@@ -1632,6 +1647,7 @@ export function Composer({
   }, [clearEditInactivityTimer, confirmEdit, editingEvent, text]);
 
   React.useEffect(() => {
+    const hideCountdown = () => queueMicrotask(() => setHoldEndsAt(null));
     // Not paused → no post-empty countdown should be pending.
     if (!queuePaused || queuedTextCount === 0) {
       if (emptyHoldTimerRef.current) {
@@ -1645,6 +1661,7 @@ export function Composer({
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
       }
+      hideCountdown();
       return;
     }
     // Still typing a follow-up → keep holding; cancel any empty-hold countdown.
@@ -1653,18 +1670,71 @@ export function Composer({
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
       }
+      hideCountdown();
       return;
     }
     // Input is empty while paused: wait at least SILICON_EMPTY_HOLD_MS before
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
+    const deadline = Date.now() + SILICON_EMPTY_HOLD_MS;
+    setHoldNowMs(Date.now());
+    setHoldEndsAt(deadline);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
+      setHoldEndsAt(null);
       // Re-check: if they resumed typing in the meantime, this effect will have
       // cancelled us; only send if the box is still empty.
       if (!hasContinuingDraft()) void flushDelayedTextQueue();
     }, SILICON_EMPTY_HOLD_MS);
   }, [editingHeld, flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
+
+  React.useEffect(() => {
+    if (holdEndsAt == null) return;
+    const timer = window.setInterval(() => setHoldNowMs(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [holdEndsAt]);
+
+  const waitOneMoreMinute = React.useCallback(async () => {
+    const queued = delayedTextQueueRef.current;
+    if (!queued.length) return;
+    try {
+      const serverList = await api.heldSends(roomId);
+      const byClient = new Map(serverList.held_sends.map((held) => [held.client_id, held] as const));
+      const now = Date.now();
+      const extended = await Promise.all(
+        queued.map(async (item) => {
+          const held = heldSendsRef.current.get(item.clientId) ?? byClient.get(item.clientId);
+          if (!held || held.state !== "pending") return null;
+          // Browser-anchored: server absolute timestamps can be clock-skewed.
+          const remainingSeconds = Math.max(0, Math.ceil((Date.parse(item.releaseAt) - now) / 1000));
+          const updated = await api.updateHeldSend(roomId, held.held_send_id, {
+            base_version: held.version,
+            hold_seconds: remainingSeconds + SILICON_WAIT_MORE_MS / 1000,
+          });
+          heldSendsRef.current.set(item.clientId, updated);
+          item.releaseAt = new Date(now + (remainingSeconds * 1000) + SILICON_WAIT_MORE_MS).toISOString();
+          return item;
+        }),
+      );
+      if (!extended.some(Boolean)) throw new Error("held message is no longer waiting");
+      const deadline = Math.max(...queued.map((item) => Date.parse(item.releaseAt)));
+      clearDelayTimer();
+      setQueuePaused(false);
+      setHoldNowMs(now);
+      setHoldEndsAt(deadline);
+      onHoldStateChange?.(false);
+      for (const item of queued) {
+        onOptimisticUpdate?.(item.clientId, buildQueuedPayload(item, queued.length));
+      }
+      delayTimerRef.current = setTimeout(() => {
+        delayTimerRef.current = null;
+        setHoldEndsAt(null);
+        if (!hasContinuingDraft()) void flushDelayedTextQueue();
+      }, Math.max(0, deadline - now));
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : "couldn't extend the hold");
+    }
+  }, [buildQueuedPayload, clearDelayTimer, flushDelayedTextQueue, hasContinuingDraft, onHoldStateChange, onOptimisticUpdate, roomId]);
 
   React.useEffect(
     () => () => {
@@ -1673,6 +1743,7 @@ export function Composer({
       clearDelayTimer();
       delayedTextQueueRef.current = [];
       heldSendIdsRef.current.clear();
+      heldSendsRef.current.clear();
       // Do NOT clear explicit-cancel tombstones here. A held-create request may
       // still resolve after unmount; its then() must see the tombstone and issue
       // cancelHeldSend so a user-deleted optimistic message cannot later release.
@@ -2012,6 +2083,10 @@ export function Composer({
     );
   }
 
+  const holdRemainingSeconds = holdEndsAt == null
+    ? 0
+    : Math.max(0, Math.ceil((holdEndsAt - holdNowMs) / 1000));
+
   return (
     <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
@@ -2150,6 +2225,37 @@ export function Composer({
             >
               discard
             </button>
+          </div>
+        </div>
+      )}
+      {queuedTextCount > 0 && (queuePaused || holdEndsAt != null) && (
+        <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-3 py-2 text-xs text-muted-foreground" role="status">
+          <span className="min-w-0">
+            {holdEndsAt != null
+              ? `sending in ${holdRemainingSeconds} second${holdRemainingSeconds === 1 ? "" : "s"}.`
+              : editingHeld
+                ? "holding this message until you finish editing."
+                : "holding the message until you finish typing."}
+          </span>
+          <div className="flex shrink-0 items-center gap-4">
+            {holdEndsAt != null && (
+              <button
+                type="button"
+                onClick={() => void waitOneMoreMinute()}
+                className="font-medium text-foreground underline-offset-2 hover:underline"
+              >
+                add 60 more seconds
+              </button>
+            )}
+            {!editingHeld && (
+              <button
+                type="button"
+                onClick={() => void flushDelayedTextQueue()}
+                className="font-medium text-foreground underline-offset-2 hover:underline"
+              >
+                send now
+              </button>
+            )}
           </div>
         </div>
       )}

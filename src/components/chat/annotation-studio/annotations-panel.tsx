@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CircleNotch, PencilSimple, Trash } from "@phosphor-icons/react/dist/ssr";
+import { PencilSimple, Trash } from "@phosphor-icons/react/dist/ssr";
 
 import { annotationMarkups, type Annotation } from "@/lib/annotation-types";
 import { cn } from "@/lib/utils";
@@ -16,29 +16,39 @@ interface Props {
 }
 
 /**
- * The running list of committed annotations. Each row shows its reference code,
+ * The running list of committed annotations. Each row shows its positional label,
  * comment, and (for PDFs) page. Clicking a row highlights its markup on the
  * stage (jumping to that page if needed — handled upstream); the row also
  * exposes edit-comment and delete.
  */
 export function AnnotationsPanel({ annotations, isPdf, selectedId, onSelect, onEdit, onDelete }: Props) {
+  const rowRefs = React.useRef(new Map<string, HTMLLIElement>());
+
+  // Selecting a bubble on the document brings its row into view here too.
+  React.useEffect(() => {
+    if (selectedId) rowRefs.current.get(selectedId)?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
+
   return (
     <aside className="flex w-72 shrink-0 flex-col border-l bg-background" aria-label="annotations list">
       <div className="shrink-0 border-b px-3 py-2">
-        <span className="label-mono text-[11px] uppercase tracking-wide text-muted-foreground">
+        <span className="label-mono text-[11px] uppercase tracking-wide text-foreground">
           annotations · {annotations.length}
         </span>
       </div>
       {annotations.length === 0 ? (
-        <p className="p-4 text-xs text-muted-foreground">
-          draw on the document, then add a comment. each one lands here with a
-          reference code.
+        <p className="p-4 text-xs text-foreground">
+          draw on the document, then add a comment. each one is labeled in order.
         </p>
       ) : (
         <ul className="min-h-0 flex-1 overflow-auto">
           {annotations.map((a) => (
             <li
               key={a.id}
+              ref={(el) => {
+                if (el) rowRefs.current.set(a.id, el);
+                else rowRefs.current.delete(a.id);
+              }}
               tabIndex={0}
               className={cn(
                 "group cursor-pointer border-b px-3 py-2 transition-colors focus-visible:bg-muted",
@@ -57,14 +67,8 @@ export function AnnotationsPanel({ annotations, isPdf, selectedId, onSelect, onE
                   <span className="label-mono shrink-0 bg-foreground px-1.5 py-0.5 text-[11px] font-semibold text-background">
                     {a.refCode}
                   </span>
-                  {a.refStatus === "pending" && (
-                    <CircleNotch
-                      className="h-3 w-3 shrink-0 animate-spin text-muted-foreground"
-                      aria-label="naming annotation"
-                    />
-                  )}
                   {isPdf && (
-                    <span className="label-mono shrink-0 text-[10px] text-muted-foreground">
+                    <span className="label-mono shrink-0 text-[10px] text-foreground">
                       p{a.page + 1}
                     </span>
                   )}
@@ -77,7 +81,7 @@ export function AnnotationsPanel({ annotations, isPdf, selectedId, onSelect, onE
                       onEdit(a);
                     }}
                     aria-label={`edit ${a.refCode}`}
-                    className="p-1 text-muted-foreground hover:text-foreground"
+                    className="p-1 text-foreground"
                   >
                     <PencilSimple className="h-3.5 w-3.5" />
                   </button>
@@ -88,7 +92,7 @@ export function AnnotationsPanel({ annotations, isPdf, selectedId, onSelect, onE
                       onDelete(a);
                     }}
                     aria-label={`delete ${a.refCode}`}
-                    className="p-1 text-muted-foreground hover:text-destructive"
+                    className="p-1 text-foreground hover:text-[#7f1d1d]"
                   >
                     <Trash className="h-3.5 w-3.5" />
                   </button>
@@ -98,7 +102,7 @@ export function AnnotationsPanel({ annotations, isPdf, selectedId, onSelect, onE
                 {a.comment}
               </p>
               {annotationMarkups(a).length > 1 && (
-                <p className="label-mono mt-1 text-[10px] text-muted-foreground">
+                <p className="label-mono mt-1 text-[10px] text-foreground">
                   {annotationMarkups(a).length} marks
                 </p>
               )}

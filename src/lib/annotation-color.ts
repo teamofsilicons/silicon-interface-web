@@ -104,7 +104,7 @@ function chooseByContrast(samples: Rgb[]): string {
     for (const sample of samples) {
       const ratio = contrast(c, sample);
       total += ratio;
-      if (ratio >= 3) count += 1;
+      if (ratio >= 7) count += 1;
     }
     const average = total / samples.length;
     if (count > bestCount || (count === bestCount && average > bestAverage)) {
@@ -119,7 +119,7 @@ function chooseByContrast(samples: Rgb[]): string {
 /**
  * Pick a markup color that contrasts with the actual pixels under the markup.
  * Mixed backgrounds are handled by majority: the winning candidate is the one
- * that clears the contrast threshold for the most sampled pixels, with average
+ * that clears the WCAG AAA contrast threshold for the most sampled pixels, with average
  * contrast as the tiebreaker.
  */
 export async function chooseMarkupColor(opts: {

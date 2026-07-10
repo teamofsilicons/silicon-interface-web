@@ -6,11 +6,13 @@ import { clamp, fitContain, geometryBBox } from "@/lib/annotation-coords";
 import type { Annotation, Geometry, MarkupDraft, ToolKind } from "@/lib/annotation-types";
 import { cn } from "@/lib/utils";
 
+import { CommentLayer, type CommentLayerState } from "./comment-layer";
 import { COMMENT_PROMPT_WIDTH, CommentPrompt } from "./comment-prompt";
 import { OverlayCanvas } from "./overlay-canvas";
 
 /** Props for the contextual comment popover, anchored to a markup's geometry. */
 export interface CommentState {
+  promptKey: string;
   initial: string;
   title: string;
   anchor: Geometry;
@@ -31,6 +33,8 @@ interface Props {
   annotations: Annotation[];
   tool: ToolKind;
   onCommit: (g: Geometry) => void;
+  onMove: (id: string, dx: number, dy: number) => void;
+  onSelect: (annotation: Annotation) => void;
   /** Dim the render layer while a PDF page re-renders. */
   dimmed?: boolean;
   /** A finished-but-uncommitted markup, drawn emphasized while commenting. */
@@ -41,6 +45,8 @@ interface Props {
   locked?: boolean;
   /** When set, render the comment popover anchored next to `anchor`. */
   comment?: CommentState | null;
+  /** On-document comment bubbles (chip + comment text over the page). */
+  commentLayer?: CommentLayerState | null;
   zoom?: number;
 }
 
@@ -68,11 +74,14 @@ export function StudioStage({
   annotations,
   tool,
   onCommit,
+  onMove,
+  onSelect,
   dimmed,
   pending,
   highlightId,
   locked,
   comment,
+  commentLayer,
   zoom = 1,
 }: Props) {
   const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -134,15 +143,26 @@ export function StudioStage({
               annotations={annotations}
               tool={tool}
               onCommit={onCommit}
+              onMove={onMove}
+              onSelect={onSelect}
               pending={pending}
               highlightId={highlightId}
               locked={locked}
             />
+            {commentLayer && (
+              <CommentLayer
+                annotations={annotations}
+                boxW={box.w}
+                boxH={box.h}
+                {...commentLayer}
+              />
+            )}
           </div>
 
           {comment && popPos && (
             <div className="absolute z-10" style={{ left: popPos.left, top: popPos.top }}>
               <CommentPrompt
+                key={comment.promptKey}
                 initial={comment.initial}
                 title={comment.title}
                 onSubmit={comment.onSubmit}

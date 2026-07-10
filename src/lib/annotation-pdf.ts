@@ -30,11 +30,6 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
   };
 }
 
-function darkTextOn(fill: { r: number; g: number; b: number }): boolean {
-  const luma = 0.2126 * fill.r + 0.7152 * fill.g + 0.0722 * fill.b;
-  return luma > 0.58;
-}
-
 async function fetchBytes(url: string): Promise<ArrayBuffer> {
   const r = await fetch(url, { mode: "cors" });
   if (!r.ok) throw new Error(`fetch failed (${r.status})`);
@@ -186,13 +181,21 @@ async function vectorOverlay(
       const bx = Math.min(Math.max(0, anc.x * W), W - bw);
       let by = Math.min((1 - anc.y) * H + 2, H - bh);
       if (by < 0) by = 0;
-      page.drawRectangle({ x: bx, y: by, width: bw, height: bh, color: markupColor });
+      page.drawRectangle({
+        x: bx,
+        y: by,
+        width: bw,
+        height: bh,
+        color: rgb(0.067, 0.094, 0.153),
+        borderColor: markupColor,
+        borderWidth: 1,
+      });
       page.drawText(a.refCode, {
         x: bx + padX,
         y: by + bh * 0.28,
         size: badgeSize,
         font: bold,
-        color: darkTextOn(markup) ? rgb(0.07, 0.07, 0.07) : rgb(1, 1, 1),
+        color: rgb(1, 1, 1),
       });
       for (const m of markups.slice(1)) {
         const c = hexToRgb(m.color || MARKUP_COLOR);
@@ -203,13 +206,21 @@ async function vectorOverlay(
         const extraBx = Math.min(Math.max(0, extraAnchor.x * W), W - extraBw);
         let extraBy = Math.min((1 - extraAnchor.y) * H + 2, H - extraBh);
         if (extraBy < 0) extraBy = 0;
-        page.drawRectangle({ x: extraBx, y: extraBy, width: extraBw, height: extraBh, color });
+        page.drawRectangle({
+          x: extraBx,
+          y: extraBy,
+          width: extraBw,
+          height: extraBh,
+          color: rgb(0.067, 0.094, 0.153),
+          borderColor: color,
+          borderWidth: 1,
+        });
         page.drawText(a.refCode, {
           x: extraBx + padX,
           y: extraBy + extraBh * 0.28,
           size: badgeSize,
           font: bold,
-          color: darkTextOn(c) ? rgb(0.07, 0.07, 0.07) : rgb(1, 1, 1),
+          color: rgb(1, 1, 1),
         });
       }
 

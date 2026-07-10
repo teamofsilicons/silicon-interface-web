@@ -2,6 +2,28 @@
 
 import type { Annotation } from "./annotation-types";
 
+/** Position 0…25 is a…z. Further blocks append 1, 2, etc. */
+export function annotationLabel(index: number): string {
+  const safe = Math.max(0, Math.floor(index));
+  const letter = String.fromCharCode(97 + (safe % 26));
+  const cycle = Math.floor(safe / 26);
+  return cycle === 0 ? letter : `${letter}${cycle}`;
+}
+
+/** Labels deliberately track list order, so deletes and legacy restores stay
+ * deterministic. Legacy AI/A1 fields are omitted from the normalized object. */
+export function reindexAnnotations(annotations: Annotation[]): Annotation[] {
+  return annotations.map((annotation, index) => {
+    const rest = { ...annotation } as Annotation & {
+      fallbackCode?: string;
+      refStatus?: string;
+    };
+    delete rest.fallbackCode;
+    delete rest.refStatus;
+    return { ...rest, refCode: annotationLabel(index) };
+  });
+}
+
 /**
  * Autosave for an in-progress annotation session, so work is never lost across a
  * refresh, tab close, or crash. Scoped per (room, source media) — the same
@@ -31,7 +53,7 @@ export function loadAnnotationSession(roomId: string, mediaId: string): Annotati
     const raw = window.localStorage.getItem(storageKey(roomId, mediaId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as StoredSession;
-    return Array.isArray(parsed?.annotations) ? parsed.annotations : [];
+    return Array.isArray(parsed?.annotations) ? reindexAnnotations(parsed.annotations) : [];
   } catch {
     return [];
   }
@@ -60,16 +82,4 @@ export function clearAnnotationSession(roomId: string, mediaId: string): void {
   } catch {
     /* ignore */
   }
-}
-
-/** Highest reference-code number among annotations (0 if none) — seeds the
- *  monotonic code counter after a restore so codes never collide. */
-export function maxRefCodeNumber(annotations: Annotation[]): number {
-  let max = 0;
-  for (const a of annotations) {
-    const code = a.fallbackCode || a.refCode;
-    const n = parseInt(code.replace(/^A/, ""), 10);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max;
 }

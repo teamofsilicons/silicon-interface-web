@@ -330,6 +330,21 @@ export function setDraftAttachments(roomId: string, attachments: DraftAttachment
   markDirty(roomId);
 }
 
+
+export function getDraftReply(roomId: string): ReplyDraftTarget | null {
+  if (typeof window === "undefined" || !roomId) return null;
+  const draft = readLocal(roomId);
+  if (!draft.reply_to_event_id) return null;
+  const snapshot = draft.reply_to_snapshot as ReplyDraftTarget;
+  return {
+    event_id: draft.reply_to_event_id,
+    sender_handle: snapshot.sender_handle,
+    sender_kind: snapshot.sender_kind,
+    type: snapshot.type,
+    preview: snapshot.preview,
+  };
+}
+
 export function setDraftReply(roomId: string, reply: ReplyDraftTarget | null): void {
   if (typeof window === "undefined" || !roomId) return;
   const draft = readLocal(roomId);
@@ -502,5 +517,13 @@ export function useDraft(roomId: string): string {
     subscribe,
     () => publishedDraft(roomId),
     () => "",
+  );
+}
+
+export function useDraftReply(roomId: string): ReplyDraftTarget | null {
+  return React.useSyncExternalStore(
+    subscribe,
+    () => getDraftReply(roomId),
+    () => null,
   );
 }

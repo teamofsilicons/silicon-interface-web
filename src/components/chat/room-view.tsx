@@ -15,7 +15,7 @@ import {
   requestBrowserNotifications,
   usePresence,
 } from "@/lib/notifications";
-import type { AnnotationDraft, Event, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
+import type { AnnotationDraft, Event, EventType, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
 import { readRoomEventSnippet, saveRoomEventSnippet } from "@/lib/room-snippet";
 import {
@@ -28,6 +28,7 @@ import { advanceEventCursor } from "@/lib/event-cursor";
 import { track } from "@/lib/analytics";
 import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
+import { useDraftReply } from "@/lib/drafts";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -380,6 +381,7 @@ export function RoomView({
     handle: string;
   } | null>(null);
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
+  const draftReply = useDraftReply(room.room_id);
   const [editingEvent, setEditingEvent] = React.useState<Event | null>(null);
   const [restoreDraft, setRestoreDraft] = React.useState<ComposerRestoreDraft | null>(null);
   // A flattened annotation set handed off from the studio, staged into the
@@ -1345,6 +1347,34 @@ export function RoomView({
     for (const e of events) m.set(e.event_id, e);
     return m;
   }, [events]);
+
+  React.useEffect(() => {
+    if (!draftReply?.event_id) return;
+    if (replyTo?.event_id === draftReply.event_id) return;
+    const loaded = eventById.get(draftReply.event_id);
+    if (loaded && !loaded.redacted_at) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring persisted draft reply into RoomView state.
+      setReplyTo(loaded);
+      return;
+    }
+    const preview = draftReply.preview || "original message unavailable";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring persisted draft reply into RoomView state.
+    setReplyTo({
+      event_id: draftReply.event_id,
+      room: 0,
+      sender_kind: draftReply.sender_kind ?? "system",
+      sender_id: null,
+      sender_handle: draftReply.sender_handle ?? null,
+      type: (draftReply.type as EventType | undefined) ?? "m.text",
+      content: { body: preview },
+      reply_to_event_id: "",
+      is_final: true,
+      created_at: "",
+      edited_at: null,
+      redacted_at: null,
+      redaction_reason: "",
+    });
+  }, [draftReply, eventById, replyTo]);
 
   const renderedEventIdFor = React.useCallback(
     (eventId: string): string => {

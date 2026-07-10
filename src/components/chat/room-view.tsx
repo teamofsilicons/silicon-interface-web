@@ -16,7 +16,7 @@ import {
   requestBrowserNotifications,
   usePresence,
 } from "@/lib/notifications";
-import type { AnnotationDraft, Event, EventType, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
+import type { AnnotationDraft, Event, EventType, HeldSend, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
 import { readRoomEventSnippet, saveRoomEventSnippet } from "@/lib/room-snippet";
 import {
@@ -374,6 +374,7 @@ export function RoomView({
   // The composer publishes its cancelQueued(clientId) here so deleting a held
   // message's bubble drops it from the send queue.
   const cancelQueuedRef = React.useRef<((clientId: string) => void) | null>(null);
+  const clearHeldClientRef = React.useRef<((clientId: string) => void) | null>(null);
   // §1.1 — a monotonically-advancing tick used to detect a progress line that
   // has gone stale (silicon crashed / backend restarted with no `done` frame).
   const [progressNow, setProgressNow] = React.useState(() => Date.now());
@@ -742,6 +743,60 @@ export function RoomView({
     prevReadyRef.current = socket.ready;
   }, [socket.ready, room.room_id, myUsername]);
 
+
+  const applyHeldSendFrame = (held: HeldSend) => {
+    if (held.room_id !== room.room_id) return;
+    const clientId = held.client_id;
+    if (!clientId) return;
+    if (held.state === "cancelled") {
+      clearHeldClientRef.current?.(clientId);
+      clearPendingPreview(room.room_id, clientId);
+      setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
+      return;
+    }
+    if (held.state === "failed") {
+      clearHeldClientRef.current?.(clientId);
+      failPendingPreview(room.room_id, clientId);
+      setEvents((prev) =>
+        prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
+      );
+      return;
+    }
+    if (held.state === "sent") {
+      clearHeldClientRef.current?.(clientId);
+      clearPendingPreview(room.room_id, clientId);
+      return;
+    }
+    if (!myUsername) return;
+    const body = typeof held.content.body === "string" ? held.content.body : "";
+    setEvents((prev) => {
+      if (prev.some((e) => e._clientId === clientId || e.content.client_id === clientId)) return prev;
+      const pending: LocalEvent = {
+        event_id: `temp-${clientId}`,
+        room: 0,
+        sender_kind: "carbon",
+        sender_id: null,
+        sender_handle: myUsername,
+        type: "m.text",
+        content: { body, client_id: clientId },
+        reply_to_event_id: held.reply_to_event_id || "",
+        is_final: true,
+        created_at: held.created_at || new Date().toISOString(),
+        edited_at: null,
+        redacted_at: null,
+        redaction_reason: "",
+        _status: "pending",
+        _clientId: clientId,
+      };
+      return [...prev, pending];
+    });
+    setPendingPreview(room.room_id, {
+      clientId,
+      text: body || "Message pending",
+      status: "waiting",
+    });
+  };
+
   // §2.1 — the per-frame handler, kept current via a deps-less effect so the
   // single subscription always runs the latest closure. Processes EVERY frame,
   // so no delta / receipt / take-back is ever coalesced away.
@@ -896,6 +951,8 @@ export function RoomView({
             : e,
         ),
       );
+    } else if (f.type === "held_send") {
+      applyHeldSendFrame(f.held_send);
     } else if (f.type === "read_receipt") {
       // Receipts are broadcast for EVERY mark-read — including my own reads on
       // other devices. Only a PEER's receipt can flip my messages to "read";
@@ -1749,6 +1806,24 @@ export function RoomView({
     },
     [room.room_id],
   );
+
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api
+      .heldSends(room.room_id)
+      .then((res) => {
+        if (cancelled) return;
+        for (const held of res.held_sends) applyHeldSendFrame(held);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  // applyHeldSendFrame is intentionally omitted; this effect should only refetch
+  // server holds when the room changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.room_id]);
 
   // Tap-to-retry on a failed bubble: re-POST the SAME payload with the SAME
   // client id (the server is idempotent per content.client_id, so a retry of
@@ -2712,6 +2787,7 @@ export function RoomView({
             delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
             onHoldStateChange={setHoldingMessage}
             cancelQueuedRef={cancelQueuedRef}
+            clearHeldClientRef={clearHeldClientRef}
             mentionCandidates={mentionCandidates}
             editingEvent={editingEvent}
             onEditComplete={() => setEditingEvent(null)}

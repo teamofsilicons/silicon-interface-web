@@ -114,6 +114,8 @@ interface Props {
   /** The parent stashes our `cancelQueued(clientId)` here so deleting a held
    *  message's bubble can drop it from the queue (never sends it). */
   cancelQueuedRef?: React.MutableRefObject<((clientId: string) => void) | null>;
+  /** Parent calls this when the server reports a held send terminal state. */
+  clearHeldClientRef?: React.MutableRefObject<((clientId: string) => void) | null>;
   /** People in this room offered by the `@` mention autocomplete. */
   mentionCandidates?: MentionCandidate[];
   /** Message currently being edited in the composer. */
@@ -656,6 +658,7 @@ export function Composer({
   delayTextForSilicon = false,
   onHoldStateChange,
   cancelQueuedRef,
+  clearHeldClientRef,
   mentionCandidates = [],
   editingEvent = null,
   onEditComplete,
@@ -714,6 +717,8 @@ export function Composer({
   const taRef = React.useRef<HTMLTextAreaElement>(null);
   const textRef = React.useRef(text);
   const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
+  const heldSendIdsRef = React.useRef<Map<string, string>>(new Map());
+  const cancelledHeldClientIdsRef = React.useRef<Set<string>>(new Set());
   const delayTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftBeforeEditRef = React.useRef("");
   const editInactivityTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -732,8 +737,9 @@ export function Composer({
   // read for the label (the flush button always reads "send now"), but the
   // setter still resets the flag across hold cycles.
   const [, setWaitExtended] = React.useState(false);
-  // Bumped on an interval while the countdown runs so the banner re-renders.
-  const [, setHoldTick] = React.useState(0);
+  // Updated on an interval while the countdown runs so the banner re-renders
+  // without calling impure Date.now() during render.
+  const [holdNowMs, setHoldNowMs] = React.useState(0);
   const editingClientId =
     ((editingEvent as (Event & { _clientId?: string }) | null)?._clientId ?? null);
   const editingHeld = Boolean(editingEvent?.event_id.startsWith("temp-") && editingClientId);
@@ -1208,6 +1214,43 @@ export function Composer({
   // Drop a held message from the queue when its bubble is deleted — never send.
   const cancelQueued = React.useCallback(
     (clientId: string) => {
+      const heldSendId = heldSendIdsRef.current.get(clientId);
+      if (heldSendId) {
+        heldSendIdsRef.current.delete(clientId);
+        cancelledHeldClientIdsRef.current.add(clientId);
+        api.cancelHeldSend(roomId, heldSendId).catch(() => undefined);
+      } else {
+        cancelledHeldClientIdsRef.current.add(clientId);
+      }
+      const current = delayedTextQueueRef.current;
+      if (!current.some((it) => it.clientId === clientId)) return;
+      const next = current
+        .filter((it) => it.clientId !== clientId)
+        .map((it, index) => ({ ...it, holdIndex: index }));
+      delayedTextQueueRef.current = next;
+      setQueuedTextCount(next.length);
+      if (next.length === 0) {
+        clearDelayedQueue();
+      } else {
+        for (const queued of next) {
+          onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, next.length));
+        }
+      }
+    },
+    [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate, roomId],
+  );
+  React.useEffect(() => {
+    if (!cancelQueuedRef) return;
+    cancelQueuedRef.current = cancelQueued;
+    return () => {
+      cancelQueuedRef.current = null;
+    };
+  }, [cancelQueuedRef, cancelQueued]);
+
+  const clearHeldClient = React.useCallback(
+    (clientId: string) => {
+      heldSendIdsRef.current.delete(clientId);
+      cancelledHeldClientIdsRef.current.delete(clientId);
       const current = delayedTextQueueRef.current;
       if (!current.some((it) => it.clientId === clientId)) return;
       const next = current
@@ -1225,13 +1268,14 @@ export function Composer({
     },
     [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate],
   );
+
   React.useEffect(() => {
-    if (!cancelQueuedRef) return;
-    cancelQueuedRef.current = cancelQueued;
+    if (!clearHeldClientRef) return;
+    clearHeldClientRef.current = clearHeldClient;
     return () => {
-      cancelQueuedRef.current = null;
+      clearHeldClientRef.current = null;
     };
-  }, [cancelQueuedRef, cancelQueued]);
+  }, [clearHeldClientRef, clearHeldClient]);
 
   const flushDelayedTextQueue = React.useCallback(
     async (extra?: QueuedTextSend, optimistic = true) => {
@@ -1245,6 +1289,17 @@ export function Composer({
       const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
       const total = items.length;
       for (const item of items) {
+        const heldSendId = heldSendIdsRef.current.get(item.clientId);
+        if (heldSendId) {
+          api
+            .sendHeldNow(roomId, heldSendId)
+            .catch((err) => {
+              if (optimistic) onFail(item.clientId, err);
+              else toast.error(err instanceof ApiError ? err.message : String(err));
+            })
+            .finally(() => heldSendIdsRef.current.delete(item.clientId));
+          continue;
+        }
         const payload = buildQueuedPayload(item, total);
         const sendPayload = {
           type: payload.type,
@@ -1262,7 +1317,7 @@ export function Composer({
           });
         }
         try {
-          const real = await api.sendEvent(roomId, sendPayload, item.clientId); // §2.3
+          const real = await api.sendEvent(roomId, sendPayload, item.clientId);
           if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
           if (optimistic) onAck(item.clientId, real);
           track.messageSent({
@@ -1324,13 +1379,9 @@ export function Composer({
         holdGroupId,
         holdIndex: existingQueue.length,
       };
-      // Append to the held burst and restart the 5s window, but keep every
-      // user send as its own visible message bubble.
       delayedTextQueueRef.current = [...existingQueue, item];
       const queue = delayedTextQueueRef.current;
       setQueuedTextCount(queue.length);
-      // Back to the open hold window (not "holding…") — the restarted timer
-      // re-decides whether to hold once it elapses.
       setQueuePaused(false);
       onHoldStateChange?.(false);
       onOptimisticAdd(clientId, buildQueuedPayload(item, queue.length));
@@ -1338,30 +1389,59 @@ export function Composer({
         onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, queue.length));
       }
       clearDelayTimer();
-      delayTimerRef.current = setTimeout(() => {
-        delayTimerRef.current = null;
-        // Only once the 5s merge window ends and you're still typing do we flip
-        // to the "holding…" state. Before that, the normal silicon progress
-        // (the random copy) shows.
-        if (hasContinuingDraft()) {
-          setQueuePaused(true);
-          onHoldStateChange?.(true);
-        } else {
-          void flushDelayedTextQueue();
-        }
-      }, SILICON_TEXT_SEND_DELAY_MS);
+      api
+        .createHeldSend(roomId, {
+          type: "m.text",
+          content: { body, client_id: clientId },
+          client_id: clientId,
+          reply_to_event_id: replyTo?.event_id,
+          hold_seconds: SILICON_TEXT_SEND_DELAY_MS / 1000,
+        })
+        .then((held) => {
+          if (cancelledHeldClientIdsRef.current.has(clientId)) {
+            api.cancelHeldSend(roomId, held.held_send_id).catch(() => undefined);
+            return;
+          }
+          heldSendIdsRef.current.set(clientId, held.held_send_id);
+        })
+        .catch(async (err) => {
+          if (cancelledHeldClientIdsRef.current.has(clientId)) {
+            // The user explicitly deleted this optimistic bubble while create was
+            // in flight. If create fails, do not fall back to immediate send.
+            return;
+          }
+          // Honest old-client/API fallback: send immediately with the same
+          // client_id, or leave the optimistic bubble failed. Never fake a
+          // local-only server hold.
+          try {
+            const payload = buildQueuedPayload(item, queue.length);
+            const real = await api.sendEvent(
+              roomId,
+              {
+                type: payload.type,
+                content: payload.content,
+                reply_to_event_id: payload.reply_to_event_id,
+              },
+              clientId,
+            );
+            onAck(clientId, real);
+          } catch {
+            onFail(clientId, err);
+          }
+        });
       onClearReply?.();
     },
     [
       buildQueuedPayload,
       clearDelayTimer,
-      flushDelayedTextQueue,
-      hasContinuingDraft,
+      onAck,
       onClearReply,
+      onFail,
       onHoldStateChange,
       onOptimisticAdd,
       onOptimisticUpdate,
       replyTo,
+      roomId,
     ],
   );
 
@@ -1533,7 +1613,9 @@ export function Composer({
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
     setWaitExtended(false);
-    setEmptyHoldEndsAt(Date.now() + SILICON_EMPTY_HOLD_MS);
+    const now = Date.now();
+    setHoldNowMs(now);
+    setEmptyHoldEndsAt(now + SILICON_EMPTY_HOLD_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
       setEmptyHoldEndsAt(null);
@@ -1547,7 +1629,7 @@ export function Composer({
   // ticks down.
   React.useEffect(() => {
     if (emptyHoldEndsAt == null) return;
-    const id = window.setInterval(() => setHoldTick((t) => t + 1), 250);
+    const id = window.setInterval(() => setHoldNowMs(Date.now()), 250);
     return () => window.clearInterval(id);
   }, [emptyHoldEndsAt]);
 
@@ -1555,7 +1637,9 @@ export function Composer({
   const waitOneMoreMinute = React.useCallback(() => {
     if (emptyHoldTimerRef.current) clearTimeout(emptyHoldTimerRef.current);
     setWaitExtended(true);
-    setEmptyHoldEndsAt(Date.now() + SILICON_WAIT_MORE_MS);
+    const now = Date.now();
+    setHoldNowMs(now);
+    setEmptyHoldEndsAt(now + SILICON_WAIT_MORE_MS);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
       setEmptyHoldEndsAt(null);
@@ -1565,44 +1649,18 @@ export function Composer({
 
   React.useEffect(
     () => () => {
-      const queued = delayedTextQueueRef.current;
-      if (!queued.length) return;
+      // Server-accepted holds survive room switches, unmounts, tab closes, and
+      // logout. Do not flush/cancel them from cleanup; Glass owns the timer.
       clearDelayTimer();
       delayedTextQueueRef.current = [];
-      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
-      const total = queued.length;
-      // Unmount flush is fire-and-forget — persist each text to the outbox so a
-      // failure (or the page dying mid-POST) still gets retried later.
-      void queued.reduce<Promise<void>>(
-        (chain, item) =>
-          chain.then(async () => {
-            const payload = buildQueuedPayload(item, total);
-            const sendPayload = {
-              type: payload.type,
-              content: payload.content,
-              reply_to_event_id: payload.reply_to_event_id,
-            };
-            if (outboxOwner) {
-              enqueueOutbox(outboxOwner, {
-                roomId,
-                clientId: item.clientId,
-                body: item.body,
-                content: payload.content,
-                replyTo: payload.reply_to_event_id,
-                at: Date.now(),
-              });
-            }
-            try {
-              await api.sendEvent(roomId, sendPayload, item.clientId);
-              if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
-            } catch (err) {
-              toast.error(err instanceof ApiError ? err.message : String(err));
-            }
-          }),
-        Promise.resolve(),
-      );
+      heldSendIdsRef.current.clear();
+      // Do NOT clear explicit-cancel tombstones here. A held-create request may
+      // still resolve after unmount; its then() must see the tombstone and issue
+      // cancelHeldSend so a user-deleted optimistic message cannot later release.
+      setQueuedTextCount(0);
+      onHoldStateChange?.(false);
     },
-    [buildQueuedPayload, clearDelayTimer, roomId],
+    [clearDelayTimer, onHoldStateChange],
   );
 
   const sendTextOptimistic = (body: string, extraContent?: Record<string, unknown>) => {
@@ -1882,6 +1940,9 @@ export function Composer({
     );
   }
 
+  const emptyHoldRemainingSeconds =
+    emptyHoldEndsAt == null ? 0 : Math.max(0, Math.ceil((emptyHoldEndsAt - holdNowMs) / 1000));
+
   return (
     <div className="space-y-2 border-t bg-background p-2">
       {replyTo && (
@@ -2027,8 +2088,8 @@ export function Composer({
             // Final countdown — auto-send is imminent.
             <>
               <span className="min-w-0">
-                will send in {Math.max(0, Math.ceil((emptyHoldEndsAt - Date.now()) / 1000))} second
-                {Math.max(0, Math.ceil((emptyHoldEndsAt - Date.now()) / 1000)) === 1 ? "" : "s"}.
+                will send in {emptyHoldRemainingSeconds} second
+                {emptyHoldRemainingSeconds === 1 ? "" : "s"}.
               </span>
               <div className="flex shrink-0 items-center gap-4">
                 <button

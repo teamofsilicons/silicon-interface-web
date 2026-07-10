@@ -18,6 +18,8 @@ import type {
   DraftsListResponse,
   DraftWritePayload,
   Event,
+  HeldSend,
+  HeldSendsListResponse,
   Invite,
   InviteInfo,
   Invitee,
@@ -375,6 +377,23 @@ export const api = {
     call<DraftState>("PUT", `/api/v1/rooms/${room_id}/draft`, payload),
   deleteDraft: (room_id: string, payload: { base_version?: number; origin_device?: string }) =>
     call<DraftState>("DELETE", `/api/v1/rooms/${room_id}/draft`, payload),
+
+  heldSends: (room_id: string) =>
+    call<HeldSendsListResponse>("GET", `/api/v1/rooms/${room_id}/held-sends`),
+  createHeldSend: (
+    room_id: string,
+    payload: {
+      type: "m.text";
+      content: Record<string, unknown>;
+      reply_to_event_id?: string;
+      hold_seconds?: number;
+      client_id?: string;
+    },
+  ) => call<HeldSend>("POST", `/api/v1/rooms/${room_id}/held-sends`, payload),
+  cancelHeldSend: (room_id: string, held_send_id: string) =>
+    call<HeldSend>("DELETE", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}`),
+  sendHeldNow: (room_id: string, held_send_id: string) =>
+    call<HeldSend>("POST", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}/send-now`, {}),
 
   appendDelta: (event_id: string, delta: string, seq = 0) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),

@@ -479,6 +479,49 @@ export interface TakeBackRequest {
   events: Array<Pick<Event, "event_id" | "type" | "content" | "created_at">>;
 }
 
+
+export interface DraftAttachment {
+  id?: string;
+  mediaId: string;
+  media_id?: string;
+  mime: string;
+  name: string;
+  size?: number;
+  kind?: string;
+}
+
+export interface ReplyDraftTarget {
+  event_id: string;
+  sender_handle?: string;
+  sender_kind?: Kind;
+  type?: string;
+  preview?: string;
+}
+
+export interface DraftState {
+  room_id: string;
+  text: string;
+  attachments: DraftAttachment[];
+  reply_to_event_id: string;
+  reply_to_snapshot: ReplyDraftTarget | Record<string, never>;
+  version: number;
+  updated_at: string;
+  cleared_at?: string;
+  origin_device?: string;
+}
+
+export interface DraftsListResponse {
+  drafts: DraftState[];
+}
+
+export interface DraftWritePayload {
+  text: string;
+  attachments?: DraftAttachment[];
+  reply_to_event_id?: string;
+  base_version?: number;
+  origin_device?: string;
+}
+
 // ---- WebSocket frames ----
 export interface Announcement {
   id: number;
@@ -498,6 +541,7 @@ export type WsFrame =
   | { type: "event.final"; room_id: string; event_id: string }
   | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
   | { type: "event.remote_browser_close"; room_id: string; event_id: string; expires_at: string }
+  | { type: "draft"; draft: DraftState }
   | {
       type: "read_receipt";
       room_id: string;

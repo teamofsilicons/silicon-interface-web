@@ -22,7 +22,15 @@ import { track } from "@/lib/analytics";
 import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
 import { xhrUpload } from "@/lib/media-upload";
-import { flushDraft, getDraft, setDraft } from "@/lib/drafts";
+import {
+  clearDraftAfterSend,
+  flushDraft,
+  getDraft,
+  loadServerDraft,
+  setDraft,
+  setDraftFocused,
+  setDraftReply,
+} from "@/lib/drafts";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
 import { editableTextForEvent } from "@/lib/event-edit";
 import { clearAnnotationSession } from "@/lib/annotation-session";
@@ -997,14 +1005,38 @@ export function Composer({
   // room, flush its draft to the sidebar immediately (don't wait for the typing
   // pause) so switching chats surfaces the draft right away.
   React.useEffect(() => {
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- room restore must hydrate composer before user types.
     setText(getDraft(roomId));
     setEmojiQuery(null);
     // Restore any uploaded attachments staged in this room's draft.
     setAttachments(restoreStagedAttachments(roomId));
+    void loadServerDraft(roomId).then(() => {
+      if (cancelled) return;
+      setText(getDraft(roomId));
+      setAttachments(restoreStagedAttachments(roomId));
+    });
     return () => {
+      cancelled = true;
+      setDraftFocused(roomId, false);
       flushDraft(roomId);
     };
   }, [roomId]);
+
+  React.useEffect(() => {
+    setDraftReply(
+      roomId,
+      replyTo
+        ? {
+            event_id: replyTo.event_id,
+            sender_handle: replyTo.sender_handle || undefined,
+            sender_kind: replyTo.sender_kind,
+            type: replyTo.type,
+            preview: previewOf(replyTo),
+          }
+        : null,
+    );
+  }, [replyTo, roomId]);
 
   React.useEffect(() => {
     if (!restoreDraft) return;
@@ -1113,7 +1145,7 @@ export function Composer({
 
   const reset = () => {
     setText("");
-    persistDraft("");
+    clearDraftAfterSend(roomId);
     for (const ref of xhrRefs.current.values()) ref.current?.abort();
     xhrRefs.current.clear();
     setAttachments([]);
@@ -1619,7 +1651,7 @@ export function Composer({
       const result = runSlashCommand(body);
       if (result.handled) {
         setText("");
-        persistDraft("");
+        clearDraftAfterSend(roomId);
         if (result.clearReply) onClearReply?.();
         return;
       }
@@ -1707,12 +1739,12 @@ export function Composer({
       // window elapses with no new send / typing, or via "send now".
       queueDelayedTextSend(body);
       setText("");
-      persistDraft("");
+      clearDraftAfterSend(roomId);
       return;
     }
     sendTextOptimistic(body);
     setText("");
-    persistDraft("");
+    clearDraftAfterSend(roomId);
   };
 
   // ----- Voice recording -----
@@ -2065,6 +2097,11 @@ export function Composer({
             ref={taRef}
             autoFocus
             value={text}
+            onFocus={() => setDraftFocused(roomId, true)}
+            onBlur={() => {
+              setDraftFocused(roomId, false);
+              flushDraft(roomId);
+            }}
             onChange={(e) => {
               const v = e.target.value;
               setText(v);

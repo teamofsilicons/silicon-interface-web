@@ -31,6 +31,7 @@ import {
   saveCachedMemberships,
 } from "@/lib/sidebar-cache";
 import { dropPendingPreview } from "@/lib/pending-preview";
+import { applyServerDraft, loadAllServerDrafts, migrateLegacyDrafts } from "@/lib/drafts";
 import { advanceEventCursor, getEventCursor } from "@/lib/event-cursor";
 import { ackOutbox, listOutbox } from "@/lib/outbox";
 import {
@@ -635,6 +636,7 @@ function ChatPageInner() {
           console.warn("rooms response normalized to zero rows", rawRooms);
         }
         setRooms(next);
+        void migrateLegacyDrafts(next.map((r) => r.room_id));
         if (ownerId) {
           saveCachedRooms(ownerId, next);
           // Seed/advance the global event cursor from the freshest projection
@@ -815,6 +817,7 @@ function ChatPageInner() {
     if (socket.ready && !prevReadyRef.current) {
       void (async () => {
         await syncMissedEvents();
+        void loadAllServerDrafts();
         void refresh();
         void flushOutbox();
       })();
@@ -929,6 +932,8 @@ function ChatPageInner() {
       // A real event landed for this room — clear any "waiting" sidebar
       // preview so it doesn't linger beside the now-current last message.
       if (preview !== null && !updatesExistingEvent) dropPendingPreview(rid);
+    } else if (f.type === "draft") {
+      applyServerDraft(f.draft);
     } else if (f.type === "read_receipt") {
       // Receipts are broadcast on EVERY mark-read — including my own, from any
       // device. A self-receipt (member_handle is mine) means I read this room

@@ -14,6 +14,9 @@ import type {
   Cron,
   CronWriteResult,
   DevOtpResponse,
+  DraftState,
+  DraftsListResponse,
+  DraftWritePayload,
   Event,
   Invite,
   InviteInfo,
@@ -365,6 +368,13 @@ export const api = {
   },
   forwardEvent: (target_room_id: string, source_room_id: string, source_event_id: string) =>
     api.forwardEvents(target_room_id, source_room_id, [source_event_id]),
+
+  draft: (room_id: string) => call<DraftState>("GET", `/api/v1/rooms/${room_id}/draft`),
+  drafts: () => call<DraftsListResponse>("GET", "/api/v1/drafts"),
+  putDraft: (room_id: string, payload: DraftWritePayload) =>
+    call<DraftState>("PUT", `/api/v1/rooms/${room_id}/draft`, payload),
+  deleteDraft: (room_id: string, payload: { base_version?: number; origin_device?: string }) =>
+    call<DraftState>("DELETE", `/api/v1/rooms/${room_id}/draft`, payload),
 
   appendDelta: (event_id: string, delta: string, seq = 0) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),

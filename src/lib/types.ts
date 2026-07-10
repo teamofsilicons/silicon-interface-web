@@ -259,6 +259,7 @@ export interface Invite {
   token: string;
   scope: "team" | "silicon";
   silicon_id: string | null;
+  silicon_name: string | null;
   channel: "link" | "email";
   code: string;
   email_target: string;

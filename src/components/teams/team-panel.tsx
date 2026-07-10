@@ -26,6 +26,7 @@ import type {
   Invite,
   Invitee,
   Room,
+  Silicon,
   Team,
   TeamMembership,
 } from "@/lib/types";
@@ -1054,6 +1055,9 @@ function InviteesSection({ slug }: { slug: string }) {
 function InviteSection({ slug }: { slug: string }) {
   const [invites, setInvites] = React.useState<Invite[]>([]);
   const [emailInvites, setEmailInvites] = React.useState<Invite[]>([]);
+  const [silicons, setSilicons] = React.useState<Silicon[]>([]);
+  const [scope, setScope] = React.useState<"team" | "silicon">("team");
+  const [siliconId, setSiliconId] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(5);
   const [busy, setBusy] = React.useState(false);
@@ -1068,12 +1072,31 @@ function InviteSection({ slug }: { slug: string }) {
     setEmailInvites(rows.filter((i) => i.channel === "email"));
   }, [slug]);
 
+  const loadSilicons = React.useCallback(async () => {
+    setSilicons((await api.teamSilicons(slug)).filter((silicon) => silicon.is_active));
+  }, [slug]);
+
   React.useEffect(() => {
     const id = window.setTimeout(() => {
-      void loadInvites().catch((e) => toast.error(e instanceof ApiError ? e.message : String(e)));
+      void Promise.all([loadInvites(), loadSilicons()]).catch((e) =>
+        toast.error(e instanceof ApiError ? e.message : String(e)),
+      );
     }, 0);
     return () => window.clearTimeout(id);
-  }, [loadInvites]);
+  }, [loadInvites, loadSilicons]);
+
+  const selectedSilicon =
+    silicons.find((silicon) => silicon.silicon_id === siliconId) ?? silicons[0] ?? null;
+  const selectedSiliconId = selectedSilicon?.silicon_id ?? "";
+  const scopeReady = scope === "team" || selectedSilicon !== null;
+
+  const invitePayload = () => {
+    if (scope === "silicon") {
+      if (!selectedSiliconId) throw new Error("Choose an active Silicon first.");
+      return { scope, silicon_id: selectedSiliconId } as const;
+    }
+    return { scope } as const;
+  };
 
   const make = <Args extends unknown[]>(fn: (...args: Args) => Promise<void>) => async (...args: Args) => {
     setBusy(true);
@@ -1087,7 +1110,11 @@ function InviteSection({ slug }: { slug: string }) {
   };
 
   const createLink = make(async () => {
-    const invite = await api.createInvite(slug, { channel: "link", max_uses: maxUses });
+    const invite = await api.createInvite(slug, {
+      ...invitePayload(),
+      channel: "link",
+      max_uses: maxUses,
+    });
     setNewInvite(invite);
     setNewInviteOpen(true);
     await loadInvites();
@@ -1098,7 +1125,11 @@ function InviteSection({ slug }: { slug: string }) {
       toast.error("Enter a valid email.");
       return;
     }
-    await api.createInvite(slug, { channel: "email", email_target: email });
+    await api.createInvite(slug, {
+      ...invitePayload(),
+      channel: "email",
+      email_target: email,
+    });
     toast.success(`invite sent to ${email}`);
     setEmail("");
     await loadInvites();
@@ -1115,6 +1146,12 @@ function InviteSection({ slug }: { slug: string }) {
   const inviteLink = (invite: Invite) =>
     `${typeof window === "undefined" ? "" : window.location.origin}/join/${invite.token}?code=${invite.code}`;
 
+  const inviteScopeLabel = (invite: Invite) => {
+    if (invite.scope === "team") return "entire team";
+    const current = silicons.find((silicon) => silicon.silicon_id === invite.silicon_id);
+    return invite.silicon_name || current?.name || invite.silicon_id || "specific Silicon";
+  };
+
   const renderInviteCard = (invite: Invite, compact = false) => {
     const link = inviteLink(invite);
     return (
@@ -1124,6 +1161,9 @@ function InviteSection({ slug }: { slug: string }) {
       >
         <div className="flex min-w-0 items-center gap-2 border-b px-3 py-2">
           <span className="min-w-0 flex-1 truncate font-mono text-xs">{link}</span>
+          <Badge variant="outline" className="max-w-40 shrink-0 truncate font-mono text-[10px]">
+            {inviteScopeLabel(invite)}
+          </Badge>
           <Button
             size="icon"
             variant="ghost"
@@ -1148,7 +1188,13 @@ function InviteSection({ slug }: { slug: string }) {
             </Button>
           ) : null}
         </div>
-        <div className="grid grid-cols-1 divide-y text-sm sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+        <div className="grid grid-cols-1 divide-y text-sm sm:grid-cols-4 sm:divide-x sm:divide-y-0">
+          <div className="min-w-0 p-3">
+            <div className="label-mono">access</div>
+            <div className="mt-1 truncate font-mono text-sm font-semibold">
+              {inviteScopeLabel(invite)}
+            </div>
+          </div>
           <div className="min-w-0 p-3">
             <div className="label-mono">code</div>
             <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
@@ -1179,6 +1225,55 @@ function InviteSection({ slug }: { slug: string }) {
 
   return (
     <Section title="invites">
+      <div className="mb-4 border bg-card p-4">
+        <div className="label-mono">invite access</div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Choose whether the next link or email invite joins the whole team or only one Silicon.
+        </p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <Button
+            type="button"
+            variant={scope === "team" ? "default" : "outline"}
+            aria-pressed={scope === "team"}
+            onClick={() => setScope("team")}
+          >
+            entire team
+          </Button>
+          <Button
+            type="button"
+            variant={scope === "silicon" ? "default" : "outline"}
+            aria-pressed={scope === "silicon"}
+            disabled={silicons.length === 0}
+            onClick={() => setScope("silicon")}
+          >
+            specific Silicon
+          </Button>
+        </div>
+        {scope === "silicon" ? (
+          <div className="mt-3 space-y-1">
+            <Label htmlFor="invite-silicon">Silicon</Label>
+            {silicons.length > 0 ? (
+              <select
+                id="invite-silicon"
+                value={selectedSiliconId}
+                onChange={(event) => setSiliconId(event.target.value)}
+                className="h-11 w-full border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {silicons.map((silicon) => (
+                  <option key={silicon.silicon_id} value={silicon.silicon_id}>
+                    {silicon.name || silicon.silicon_id}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="border bg-background p-3 text-sm text-muted-foreground">
+                No active Silicons are available for scoped invites.
+              </p>
+            )}
+          </div>
+        ) : null}
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="border bg-card">
           <div className="flex items-center gap-3 border-b p-4">
@@ -1203,7 +1298,7 @@ function InviteSection({ slug }: { slug: string }) {
                   className="h-11 w-24 text-center font-mono"
                 />
               </div>
-              <Button onClick={createLink} disabled={busy} className="h-11 flex-1">
+              <Button onClick={createLink} disabled={busy || !scopeReady} className="h-11 flex-1">
                 {busy ? <CircleNotch className="animate-spin" /> : <LinkSimple />} create link
               </Button>
             </div>
@@ -1279,7 +1374,12 @@ function InviteSection({ slug }: { slug: string }) {
                 className="h-11"
               />
             </div>
-            <Button variant="outline" onClick={inviteByEmail} disabled={busy} className="h-11 w-full">
+            <Button
+              variant="outline"
+              onClick={inviteByEmail}
+              disabled={busy || !scopeReady}
+              className="h-11 w-full"
+            >
               {busy ? <CircleNotch className="animate-spin" /> : <Envelope />} send invite
             </Button>
 
@@ -1312,8 +1412,13 @@ function InviteSection({ slug }: { slug: string }) {
                               key={inv.id}
                               className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
                             >
-                              <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                                {inv.email_target || "—"}
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate font-mono text-xs">
+                                  {inv.email_target || "—"}
+                                </span>
+                                <span className="block truncate text-[11px] text-muted-foreground">
+                                  {inviteScopeLabel(inv)}
+                                </span>
                               </span>
                               {accepted ? (
                                 <span className="shrink-0 text-xs font-medium text-foreground">

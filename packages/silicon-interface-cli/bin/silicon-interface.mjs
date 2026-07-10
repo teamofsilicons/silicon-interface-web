@@ -13,7 +13,7 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "0.1.3";
+const VERSION = "0.1.4";
 const PING_INTERVAL_MS = 25_000;
 const MAX_RECONNECT_MS = 15_000;
 
@@ -720,6 +720,8 @@ Activity and event controls:
   take-back complete <request_id> <replacement text...>
   delete <event_id>
   search <query...> [--room room_id] [--interval 20]
+  gif search <query...> [--limit 12]
+  gif send <room> <gif_id> [caption...]
 
 Media and jobs:
   send-file <room> <path> [caption...]
@@ -1525,6 +1527,120 @@ async function cmdSearch(ctx, args) {
   });
 }
 
+function giphyKey(options = {}) {
+  const key = String(
+    options.apiKey || process.env.GIPHY_API_KEY || process.env.SILICON_INTERFACE_GIPHY_API_KEY || "",
+  ).trim();
+  if (!key) {
+    throw new UsageError("GIF search needs GIPHY_API_KEY (or --api-key).");
+  }
+  return key;
+}
+
+async function giphyRequest(pathname, params, apiKey) {
+  const query = new URLSearchParams({ api_key: apiKey, rating: "pg-13", ...params });
+  const response = await fetch(`https://api.giphy.com/v1/gifs/${pathname}?${query}`);
+  if (!response.ok) throw new Error(`GIPHY request failed (${response.status}).`);
+  return response.json();
+}
+
+function normalizeGif(item) {
+  const images = item?.images || {};
+  const download = images.downsized_medium || images.downsized || images.original || images.fixed_width;
+  if (!item?.id || !download?.url) return null;
+  return {
+    id: item.id,
+    title: String(item.title || "GIF").trim() || "GIF",
+    pageUrl: item.url || `https://giphy.com/gifs/${item.id}`,
+    downloadUrl: download.url,
+    width: Number(download.width || 0),
+    height: Number(download.height || 0),
+  };
+}
+
+async function uploadBlobPresigned(upload, blob, filename) {
+  if (upload.dev_mode) return;
+  const FormDataCtor = globalThis.FormData;
+  if (typeof FormDataCtor !== "function") {
+    throw new UsageError("This Node runtime cannot upload GIFs. Use Node 22+.");
+  }
+  const form = new FormDataCtor();
+  for (const [key, value] of Object.entries(upload.fields || {})) form.append(key, value);
+  form.append("file", blob, filename);
+  const response = await fetch(upload.url, { method: upload.method || "POST", body: form });
+  if (!response.ok) throw new Error(`Upload failed (${response.status}).`);
+}
+
+async function cmdGif(ctx, args) {
+  requireAuth(ctx);
+  const [sub, ...rest] = args;
+  if (sub === "search") {
+    const { options, positionals } = parseOptions(rest);
+    const query = positionals.join(" ").trim();
+    if (!query) throw new UsageError("Usage: gif search <query...> [--limit 12]");
+    const limit = Math.max(1, Math.min(25, Number(options.limit || 12)));
+    const payload = await giphyRequest("search", {
+      q: query.slice(0, 50),
+      limit: String(limit),
+      bundle: "messaging_non_clips",
+      remove_low_contrast: "true",
+    }, giphyKey(options));
+    const gifs = (payload.data || []).map(normalizeGif).filter(Boolean);
+    printResult(ctx, { gifs }, (data) => printRows(data.gifs, [
+      { label: "ID", value: (gif) => gif.id },
+      { label: "TITLE", value: (gif) => gif.title },
+      { label: "URL", value: (gif) => gif.pageUrl },
+    ]));
+    return;
+  }
+  if (sub === "send") {
+    const { options, positionals } = parseOptions(rest);
+    const [roomToken, gifId, ...captionParts] = positionals;
+    if (!roomToken || !gifId) throw new UsageError("Usage: gif send <room> <gif_id> [caption...]");
+    const payload = await giphyRequest(encodeURIComponent(gifId), {}, giphyKey(options));
+    const gif = normalizeGif(payload.data);
+    if (!gif) throw new Error("GIPHY returned no usable GIF rendition.");
+    const download = await fetch(gif.downloadUrl);
+    if (!download.ok) throw new Error(`GIF download failed (${download.status}).`);
+    const blob = await download.blob();
+    const filename = `giphy-${gif.id}.gif`;
+    const roomId = roomArg(ctx, roomToken);
+    const presigned = await api.presignUpload(ctx, {
+      mime: "image/gif",
+      size: blob.size,
+      kind: "image",
+      filename,
+      room_id: roomId,
+    });
+    await uploadBlobPresigned(presigned.upload, blob, filename);
+    if (!presigned.upload.dev_mode) {
+      await api.mediaComplete(ctx, presigned.media.media_id, {
+        width: gif.width || undefined,
+        height: gif.height || undefined,
+      });
+    }
+    const caption = captionParts.join(" ").trim();
+    const event = await api.sendEvent(ctx, roomId, {
+      type: "m.image",
+      content: {
+        media_id: presigned.media.media_id,
+        mime: "image/gif",
+        filename,
+        ...(caption ? { caption } : {}),
+        giphy_id: gif.id,
+        giphy_url: gif.pageUrl,
+      },
+    });
+    printResult(ctx, { gif, media: presigned.media, event }, (value) => {
+      console.log(`gif: ${value.gif.id} ${value.gif.title}`);
+      console.log(`media: ${value.media.media_id}`);
+      console.log(eventLine(value.event));
+    });
+    return;
+  }
+  throw new UsageError("Usage: gif search <query...> | gif send <room> <gif_id> [caption...]");
+}
+
 function mimeFromPath(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const map = {
@@ -1548,17 +1664,12 @@ function mimeFromPath(filePath) {
 
 async function uploadPresigned(upload, filePath, mime) {
   if (upload.dev_mode) return;
-  const FormDataCtor = globalThis.FormData;
   const BlobCtor = globalThis.Blob;
-  if (typeof FormDataCtor !== "function" || typeof BlobCtor !== "function") {
+  if (typeof BlobCtor !== "function") {
     throw new UsageError("This Node runtime cannot upload files. Use Node 22+ for FormData/Blob.");
   }
-  const form = new FormDataCtor();
-  for (const [key, value] of Object.entries(upload.fields || {})) form.append(key, value);
   const bytes = fs.readFileSync(filePath);
-  form.append("file", new BlobCtor([bytes], { type: mime }), path.basename(filePath));
-  const response = await fetch(upload.url, { method: upload.method || "POST", body: form });
-  if (!response.ok) throw new Error(`Upload failed (${response.status}).`);
+  await uploadBlobPresigned(upload, new BlobCtor([bytes], { type: mime }), path.basename(filePath));
 }
 
 async function cmdSendFile(ctx, args) {
@@ -1864,6 +1975,10 @@ async function dispatch(ctx, cmd, args) {
       return;
     case "search":
       await cmdSearch(ctx, args);
+      return;
+    case "gif":
+    case "gifs":
+      await cmdGif(ctx, args);
       return;
     case "send-file":
       await cmdSendFile(ctx, args);

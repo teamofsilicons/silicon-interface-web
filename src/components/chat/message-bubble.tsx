@@ -25,6 +25,7 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
+import { languageForFile } from "@/lib/programmatic-files";
 import type { AnnotationDraft, Event, EventType, ProgressState } from "@/lib/types";
 import { editableTextForEvent, eventShowsEdited } from "@/lib/event-edit";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
@@ -177,6 +178,7 @@ function AttachmentPin({
         thumbnailUrl={thumbnailUrl}
         isVideo={isVideo}
         textPreview={textPeek}
+        textPreviewFormat={languageForFile(filename, mime)?.id === "markdown" ? "markdown" : "plain"}
         tilt={tilt}
         onClick={open}
       />
@@ -529,6 +531,7 @@ export function MessageBubble({
             // message column wrapper so hovering anywhere on the block (bubble,
             // padding, label, time) reveals the actions — not just the text.
             "relative min-w-0 max-w-full",
+            !inSelect && "select-text",
             // §125 — a lone emoji renders bare: no bubble background, shadow, or
             // padded box, just the big glyph. Everything else keeps the bubble.
             soloEmoji ? "py-0.5" : "p-3 text-sm shadow-sm",

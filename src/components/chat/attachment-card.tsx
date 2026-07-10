@@ -21,6 +21,7 @@ export function AttachmentCard({
   thumbnailUrl,
   isVideo,
   textPreview,
+  textPreviewFormat = "plain",
   sizeLabel,
   tilt,
   onClick,
@@ -34,6 +35,7 @@ export function AttachmentCard({
   /** A head of the file's text content — shown as a document-style peek when
    *  there's no image/video thumbnail (markdown / text / code files). */
   textPreview?: string | null;
+  textPreviewFormat?: "plain" | "markdown";
   sizeLabel?: string | null;
   /** Degrees of rotation (pins only). Omit for a flat standalone card. */
   tilt?: number;
@@ -41,14 +43,25 @@ export function AttachmentCard({
   className?: string;
 }) {
   const tilted = typeof tilt === "number";
+  const activate = (event: React.MouseEvent) => {
+    if (event.detail > 0 && window.getSelection()?.toString()) return;
+    onClick?.(event);
+  };
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={activate}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.currentTarget.click();
+      }}
       title={filename}
+      data-selectable-text="true"
       style={tilted ? { transform: `rotate(${tilt}deg)` } : undefined}
       className={cn(
-        "group pointer-events-auto flex w-36 max-w-full flex-col overflow-hidden border bg-card text-left text-foreground shadow-md transition-transform hover:-translate-y-0.5 hover:shadow-lg",
+        "group pointer-events-auto flex w-36 max-w-full cursor-pointer flex-col overflow-hidden border bg-card text-left text-foreground shadow-md transition-transform hover:-translate-y-0.5 hover:shadow-lg",
         tilted && "hover:rotate-0",
         className,
       )}
@@ -58,17 +71,17 @@ export function AttachmentCard({
       <div className="relative flex h-24 w-full items-center justify-center overflow-hidden bg-muted text-muted-foreground">
         {thumbnailUrl ? (
           isVideo ? (
-            <video src={thumbnailUrl} muted className="h-full w-full object-cover" />
+            <video src={thumbnailUrl} muted draggable={false} className="h-full w-full select-none object-cover" />
           ) : (
             // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL
-            <img src={thumbnailUrl} alt="" className="sdr-media h-full w-full object-cover" />
+            <img src={thumbnailUrl} alt="" draggable={false} className="sdr-media h-full w-full select-none object-cover" />
           )
         ) : textPreview ? (
           <>
             {/* tiny document-style peek of the file's text, fading out at the
                 bottom so a clipped last line doesn't look broken. */}
-            <pre className="absolute inset-0 overflow-hidden whitespace-pre-wrap break-words bg-card p-2 text-left font-mono text-[5px] leading-[1.5] text-foreground/80">
-              {textPreview}
+            <pre className="absolute inset-0 overflow-hidden whitespace-pre-wrap break-words bg-card p-2 text-left font-mono text-[7px] leading-[1.45] text-foreground/80 [overflow-wrap:anywhere]">
+              {textPreviewFormat === "markdown" ? markdownExcerpt(textPreview) : textPreview}
             </pre>
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-b from-transparent to-card" />
           </>
@@ -86,6 +99,17 @@ export function AttachmentCard({
           </span>
         ) : null}
       </div>
-    </button>
+    </div>
   );
+}
+
+function markdownExcerpt(source: string): string {
+  return source
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "• ")
+    .replace(/^\s*\d+[.)]\s+/gm, "• ")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/(`{1,3}|\*\*|__|~~)/g, "")
+    .trim();
 }

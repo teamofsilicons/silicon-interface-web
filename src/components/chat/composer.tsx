@@ -7,6 +7,7 @@ import {
   CircleNotch,
   File as FileIcon,
   FilePdf,
+  Gif,
   Microphone,
   Paperclip,
   PaperPlaneRight,
@@ -53,7 +54,9 @@ import type { AnnotationDraft, Event, EventType, HeldSend } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
+import { GifPicker } from "@/components/chat/gif-picker";
 import { SiliconAudio } from "@/components/chat/silicon-audio";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
@@ -61,6 +64,7 @@ import { MediaPreviewer } from "@/components/chat/media-previewer";
 import { looksLikeMarkdown } from "@/lib/markdown";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { sendTimeoutMs } from "@/lib/send-timeout";
+import type { GifResult } from "@/lib/giphy";
 
 
 /** Slice of an `Event` we can fabricate locally before the server responds. */
@@ -732,6 +736,8 @@ export function Composer({
   const voiceSession = useVoiceRecordingSession();
   const recordingActive = voiceSession.phase !== "idle";
   const [busy, setBusy] = React.useState(false);
+  const [gifOpen, setGifOpen] = React.useState(false);
+  const [stagingGif, setStagingGif] = React.useState(false);
   const [editSaving, setEditSaving] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
   // control during the upload, and retain the recorded blob if it fails so the
@@ -912,6 +918,27 @@ export function Composer({
     },
     [isEditing, uploadOne],
   );
+
+  const stageGif = React.useCallback(async (gif: GifResult) => {
+    setStagingGif(true);
+    try {
+      const response = await fetch(gif.downloadUrl, { mode: "cors" });
+      if (!response.ok) throw new Error(`GIF download failed (${response.status})`);
+      const blob = await response.blob();
+      const safeTitle = gif.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 48);
+      const file = new File([blob], `${safeTitle || gif.id}.gif`, { type: "image/gif" });
+      attachFiles([file]);
+      setGifOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Couldn’t add this GIF");
+    } finally {
+      setStagingGif(false);
+    }
+  }, [attachFiles]);
   // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
   // the active token (':grin', ':lol', …) and surface matches in a small
   // popover anchored to the textarea.
@@ -2299,6 +2326,22 @@ export function Composer({
         >
           <Paperclip />
         </button>
+        <Popover open={gifOpen} onOpenChange={setGifOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              title="add GIF"
+              aria-label="add GIF"
+              disabled={busy || isEditing || stagingGif}
+              className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            >
+              {stagingGif ? <CircleNotch className="h-4 w-4 animate-spin" /> : <Gif className="h-5 w-5" />}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent side="top" align="start" sideOffset={8} className="w-auto">
+            <GifPicker onPick={(gif) => void stageGif(gif)} />
+          </PopoverContent>
+        </Popover>
         <div className="relative flex min-h-11 min-w-0 flex-1 items-center border border-input transition-colors focus-within:border-ring">
           <div
             ref={mentionMirrorRef}

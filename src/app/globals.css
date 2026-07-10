@@ -185,6 +185,29 @@ body {
   font-feature-settings: "calt" 1;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Selection is content-first throughout the app. Interactive chrome should not
+   turn into blue label fragments while dragging, but message/file content must
+   remain selectable on mouse and long-press (including Android WebView). */
+button,
+input[type="button"],
+input[type="submit"],
+input[type="reset"],
+[role="menuitem"],
+[role="tab"] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input:not([type="button"]):not([type="submit"]):not([type="reset"]),
+textarea,
+[contenteditable="true"],
+[data-selectable-text="true"] {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 ::selection {

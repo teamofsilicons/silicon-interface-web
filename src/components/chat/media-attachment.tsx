@@ -13,6 +13,7 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
+import { languageForFile } from "@/lib/programmatic-files";
 import type { AnnotationDraft, MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -354,8 +355,9 @@ export function MediaAttachment({
             <img
               src={url}
               alt={caption || ""}
+              draggable={false}
               onError={refreshUrl}
-              className="sdr-media absolute inset-0 h-full w-full object-contain transition-opacity hover:opacity-90"
+              className="sdr-media absolute inset-0 h-full w-full select-none object-contain transition-opacity hover:opacity-90"
             />
             <DownloadOverlay onClick={() => downloadAsset(url, filename, { mediaId })} />
           </div>
@@ -450,6 +452,7 @@ export function MediaAttachment({
         filename={filename}
         thumbnailUrl={pdfThumb}
         textPreview={textPeek}
+        textPreviewFormat={languageForFile(filename, m)?.id === "markdown" ? "markdown" : "plain"}
         sizeLabel={sizeLabel}
         onClick={() => {
           if (canPreview) setPreviewOpen(true);

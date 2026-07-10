@@ -1,0 +1,59 @@
+export interface GifResult {
+  id: string;
+  title: string;
+  pageUrl: string;
+  previewUrl: string;
+  stillUrl: string;
+  downloadUrl: string;
+  width: number;
+  height: number;
+}
+
+const API_BASE = "https://api.giphy.com/v1/gifs";
+
+type GiphyImage = { url?: string; width?: string; height?: string };
+type GiphyItem = {
+  id?: string;
+  title?: string;
+  url?: string;
+  images?: Record<string, GiphyImage | undefined>;
+};
+
+export function giphyConfigured(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim());
+}
+
+export async function fetchGifs(query: string, signal?: AbortSignal): Promise<GifResult[]> {
+  const apiKey = process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim();
+  if (!apiKey) throw new Error("GIPHY is not configured");
+  const trimmed = query.trim().slice(0, 50);
+  const endpoint = trimmed ? `${API_BASE}/search` : `${API_BASE}/trending`;
+  const params = new URLSearchParams({
+    api_key: apiKey,
+    limit: "24",
+    rating: "pg-13",
+    bundle: "messaging_non_clips",
+    remove_low_contrast: "true",
+  });
+  if (trimmed) params.set("q", trimmed);
+  const response = await fetch(`${endpoint}?${params}`, { signal });
+  if (!response.ok) throw new Error(`GIPHY request failed (${response.status})`);
+  const payload = await response.json() as { data?: GiphyItem[] };
+  return (payload.data ?? []).flatMap((item): GifResult[] => {
+    const images = item.images ?? {};
+    const preview = images.fixed_width_small ?? images.fixed_width ?? images.original;
+    const still = images.fixed_width_small_still ?? images.fixed_width_still ?? preview;
+    const download = images.downsized_medium ?? images.downsized ?? images.original ?? images.fixed_width;
+    if (!item.id || !preview?.url || !download?.url) return [];
+    return [{
+      id: item.id,
+      title: item.title?.trim() || "GIF",
+      pageUrl: item.url || `https://giphy.com/gifs/${item.id}`,
+      previewUrl: preview.url,
+      stillUrl: still?.url || preview.url,
+      downloadUrl: download.url,
+      width: Number(download.width || preview.width || 0),
+      height: Number(download.height || preview.height || 0),
+    }];
+  });
+}

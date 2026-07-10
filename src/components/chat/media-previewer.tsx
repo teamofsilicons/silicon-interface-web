@@ -147,7 +147,7 @@ export function MediaPreviewer({
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[95vh] w-[min(96vw,1100px)] max-w-none flex-col gap-0 overflow-hidden p-0">
+      <DialogContent className="flex h-[calc(100vh-1rem)] h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-none min-w-0 flex-col gap-0 overflow-hidden p-0 sm:h-[95vh] sm:h-[95dvh] sm:w-[min(96vw,1100px)]">
         {/* Required for a11y — Radix throws a console error if there is no
             DialogTitle. We don't want it visible, so wrap in sr-only. */}
         <DialogHeader className="sr-only">
@@ -208,7 +208,7 @@ export function MediaPreviewer({
         </div>
         <div
           className={cn(
-            "flex min-h-0 flex-1 bg-card",
+            "flex min-h-0 min-w-0 flex-1 bg-card",
             // Text is top-left aligned and scrolls; media is centered.
             isText || isPdf
               ? renderedSourceOpen
@@ -222,7 +222,8 @@ export function MediaPreviewer({
             <img
               src={url}
               alt={label}
-              className="sdr-media max-h-full max-w-full object-contain"
+              draggable={false}
+              className="sdr-media max-h-full max-w-full select-none object-contain"
             />
           )}
           {isVideo && (
@@ -247,7 +248,7 @@ export function MediaPreviewer({
             />
           )}
           {isText && (
-            <div className={cn("w-full", renderedSourceOpen ? "h-full min-h-[40vh]" : "p-6")}>
+            <div className={cn("min-w-0 max-w-full flex-1", renderedSourceOpen ? "h-full min-h-[40dvh]" : "p-4 sm:p-6")}>
               {textError ? (
                 <p className="text-sm text-muted-foreground">
                   couldn&rsquo;t load the file - use the download button.
@@ -261,8 +262,8 @@ export function MediaPreviewer({
               ) : activeSourceMode === "preview" && isSvgDocument ? (
                 <SvgPreviewFrame source={textForUrl} title={label} />
               ) : activeSourceMode === "preview" && isMarkdown ? (
-                <div className="h-full overflow-auto p-6">
-                  <MarkdownView source={textForUrl} className="mx-auto max-w-3xl" />
+                <div className="h-full min-w-0 max-w-full overflow-y-auto overflow-x-hidden px-4 py-5 [overscroll-behavior:contain] sm:p-6">
+                  <MarkdownView source={textForUrl} className="mx-auto w-full min-w-0 max-w-3xl" />
                 </div>
               ) : (
                 <SourceCodeViewer source={textForUrl} language={language} />

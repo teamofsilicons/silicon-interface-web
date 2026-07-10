@@ -125,7 +125,13 @@ export function MarkdownView({
   const mentionLookup = React.useMemo(() => buildMentionLookup(mentions), [mentions]);
   const mentionPlugin = React.useMemo(() => createRemarkMentions(mentions), [mentions]);
   return (
-    <div className={cn("text-sm leading-relaxed text-foreground", className)}>
+    <div
+      data-selectable-text="true"
+      className={cn(
+        "min-w-0 max-w-full select-text overflow-x-hidden break-words text-sm leading-relaxed text-foreground [overflow-wrap:anywhere]",
+        className,
+      )}
+    >
       <Markdown
         remarkPlugins={[remarkGfm, remarkSoftBreaks, mentionPlugin]}
         components={{
@@ -180,7 +186,7 @@ export function MarkdownView({
             </h6>
           ),
           p: ({ children }) => (
-            <p className={cn("first:mt-0 last:mb-0", c ? "my-1.5" : "my-3")}>{children}</p>
+            <p className={cn("min-w-0 break-words first:mt-0 last:mb-0 [overflow-wrap:anywhere]", c ? "my-1.5" : "my-3")}>{children}</p>
           ),
           a: ({ href, children }) => {
             const mention = mentionFromHref(typeof href === "string" ? href : undefined, mentionLookup);
@@ -254,7 +260,7 @@ export function MarkdownView({
           pre: ({ children }) => (
             <pre
               className={cn(
-                "overflow-x-auto border bg-foreground/5 p-3 font-mono text-[13px] leading-relaxed first:mt-0 last:mb-0",
+                "max-w-full touch-pan-x overflow-x-auto overscroll-x-contain border bg-foreground/5 p-3 font-mono text-[13px] leading-relaxed first:mt-0 last:mb-0 [-webkit-overflow-scrolling:touch]",
                 c ? "my-2" : "my-3",
               )}
             >
@@ -262,7 +268,7 @@ export function MarkdownView({
             </pre>
           ),
           table: ({ children }) => (
-            <div className={cn("overflow-x-auto", c ? "my-2" : "my-3")}>
+            <div className={cn("max-w-full touch-pan-x overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch]", c ? "my-2" : "my-3")}>
               <table className="w-full border-collapse text-sm">{children}</table>
             </div>
           ),

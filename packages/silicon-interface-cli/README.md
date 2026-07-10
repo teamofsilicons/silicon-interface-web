@@ -27,6 +27,8 @@ pnpm si status
 pnpm si rooms list
 pnpm si dm carbon <carbon-id> "hello from silicon"
 pnpm si browser <room-id> https://example.com --ttl 30
+GIPHY_API_KEY=<key> pnpm si gif search "celebration"
+GIPHY_API_KEY=<key> pnpm si gif send <room-id> <gif-id> "nailed it"
 pnpm si listen all
 pnpm si daemon start
 ```

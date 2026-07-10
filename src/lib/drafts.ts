@@ -70,12 +70,10 @@ function migratedKey(): string | null {
 
 
 function cleanupOwnerDraftStorage(owner: string | null) {
-  if (typeof window === "undefined" || !owner) return;
+  if (typeof window === "undefined") return;
   try {
     const prefixes = [
-      `${PREFIX}${owner}:`,
-      `${BACKUP_PREFIX}${owner}:`,
-      `${MIGRATED_PREFIX}${owner}`,
+      ...(owner ? [`${PREFIX}${owner}:`, `${BACKUP_PREFIX}${owner}:`, `${MIGRATED_PREFIX}${owner}`] : []),
       LEGACY_TEXT_PREFIX,
       LEGACY_ATT_PREFIX,
     ];
@@ -160,6 +158,12 @@ function readLocal(roomId: string): LocalDraft {
   if (typeof window === "undefined") return blank(roomId);
   const cached = liveCache.get(roomId);
   if (cached) return cached;
+  if (!canPersist()) {
+    const draft = blank(roomId);
+    liveCache.set(roomId, draft);
+    if (!publishedCache.has(roomId)) publishedCache.set(roomId, draft.text);
+    return draft;
+  }
   const key = storageKey(roomId);
   const raw = key ? safeLocalGet(key) : null;
   if (raw) {
@@ -489,9 +493,12 @@ function subscribe(cb: () => void): () => void {
   };
 }
 
+let lastSeenOwnerKey: string | null = null;
+
 function ensureStorageBound() {
   if (storageBound || typeof window === "undefined") return;
   storageBound = true;
+  lastSeenOwnerKey = ownerKey();
   window.addEventListener("storage", (e) => {
     if (e.key && !e.key.startsWith(PREFIX) && !e.key.startsWith(LEGACY_TEXT_PREFIX)) return;
     liveCache.clear();
@@ -506,6 +513,11 @@ function ensureStorageBound() {
     emit();
   });
   authStore.subscribe(() => {
+    const nextOwner = ownerKey();
+    if (lastSeenOwnerKey && nextOwner && lastSeenOwnerKey !== nextOwner) {
+      cleanupOwnerDraftStorage(null);
+    }
+    lastSeenOwnerKey = nextOwner;
     liveCache.clear();
     publishedCache.clear();
     emit();

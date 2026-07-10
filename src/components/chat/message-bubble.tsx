@@ -632,37 +632,43 @@ export function MessageBubble({
           status === "failed" ||
           mightStream ||
           eventShowsEdited(event)) && (
-          <div
-            className={cn(
-              "flex items-center gap-1.5 text-[10px] text-muted-foreground",
-              isMine && "justify-end",
-            )}
-          >
-            {showHeldCountdown && holdReleaseAt ? (
-              <HeldSendCountdown releaseAt={holdReleaseAt} />
-            ) : (
-              showTime && <HoverTime iso={event.created_at} />
-            )}
-            {eventShowsEdited(event) && <span>edited</span>}
-            {(showTime || showPausedHoldClock || status === "failed") &&
-              isMine && status && !showHeldCountdown && (
-              status === "failed" && onRetry ? (
-                // Failed → the receipt becomes tap-to-retry (same clientId, so
-                // the server-side idempotency guarantees no duplicate).
-                <button
-                  type="button"
-                  onClick={() => onRetry(event)}
-                  title="send failed — click to retry"
-                  className="inline-flex items-center gap-1 text-destructive transition-colors hover:underline"
-                >
-                  <Receipt status={status} />
-                  <span>retry</span>
-                </button>
+          // Reserve only vertical space in normal flow. The status itself is
+          // absolutely anchored to the message edge, so labels such as
+          // "sending in 10" cannot widen a short bubble or make it pulse as
+          // the countdown text changes.
+          <div className="relative h-4">
+            <div
+              className={cn(
+                "absolute top-0 flex items-center gap-1.5 whitespace-nowrap text-[10px] text-muted-foreground",
+                isMine ? "right-0" : "left-0",
+              )}
+            >
+              {showHeldCountdown && holdReleaseAt ? (
+                <HeldSendCountdown releaseAt={holdReleaseAt} />
               ) : (
-                <Receipt status={status} />
-              )
-            )}
-            {mightStream && <StreamingPill body={String(event.content.body ?? "")} />}
+                showTime && <HoverTime iso={event.created_at} />
+              )}
+              {eventShowsEdited(event) && <span>edited</span>}
+              {(showTime || showPausedHoldClock || status === "failed") &&
+                isMine && status && !showHeldCountdown && (
+                status === "failed" && onRetry ? (
+                  // Failed → the receipt becomes tap-to-retry (same clientId,
+                  // so server-side idempotency guarantees no duplicate).
+                  <button
+                    type="button"
+                    onClick={() => onRetry(event)}
+                    title="send failed — click to retry"
+                    className="inline-flex items-center gap-1 text-destructive transition-colors hover:underline"
+                  >
+                    <Receipt status={status} />
+                    <span>retry</span>
+                  </button>
+                ) : (
+                  <Receipt status={status} />
+                )
+              )}
+              {mightStream && <StreamingPill body={String(event.content.body ?? "")} />}
+            </div>
           </div>
         )}
       </div>

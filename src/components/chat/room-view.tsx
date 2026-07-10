@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Clock, Eye, MagnifyingGlass, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
+import { useRouter } from "next/navigation";
+import { Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -29,6 +30,7 @@ import { track } from "@/lib/analytics";
 import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
 import { useDraftReply } from "@/lib/drafts";
+import { useVoiceRecordingSession } from "@/lib/voice-recording-session";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -255,9 +257,22 @@ export function RoomView({
   onContactsChanged,
   connectionStatePending = false,
 }: Props) {
+  const router = useRouter();
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
   const display = roomDisplay(room);
+  const voiceSession = useVoiceRecordingSession();
+  const recordingOrigin = React.useMemo(
+    () => allRooms.find((candidate) => candidate.room_id === voiceSession.roomId) ?? null,
+    [allRooms, voiceSession.roomId],
+  );
+  const recordingOriginName = recordingOrigin
+    ? roomDisplay(recordingOrigin).name
+    : "the original chat";
+  const showRecordingBanner =
+    voiceSession.phase !== "idle" &&
+    voiceSession.roomId !== null &&
+    voiceSession.roomId !== room.room_id;
   const peers = React.useMemo(() => (Array.isArray(room.peers) ? room.peers : []), [room.peers]);
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
   // header title (saved name vs @id), avatar, and the Save Contact button.
@@ -2482,6 +2497,21 @@ export function RoomView({
           <SearchBar value={search} onChange={setSearch} onClose={() => setSearch(null)} />
         )}
       </header>
+
+      {showRecordingBanner && voiceSession.roomId && (
+        <button
+          type="button"
+          aria-live="polite"
+          onClick={() => router.push(`/chat?room=${encodeURIComponent(voiceSession.roomId!)}`)}
+          className="flex w-full items-center justify-center gap-2 border-b border-input bg-card px-4 py-2 text-xs text-foreground transition-colors hover:bg-accent"
+        >
+          <Microphone className="h-3.5 w-3.5 animate-pulse" />
+          <span>
+            voice note is being recorded in <strong>{recordingOriginName}</strong>
+          </span>
+          <span className="text-muted-foreground">· return</span>
+        </button>
+      )}
 
       {peer?.kind === "silicon" && (
         <CronDrawer

@@ -38,6 +38,10 @@ import {
   saveVoiceDraft,
   type VoiceDraft,
 } from "@/lib/voice-drafts";
+import {
+  useVoiceRecordingSession,
+  voiceRecordingSession,
+} from "@/lib/voice-recording-session";
 import { editableTextForEvent } from "@/lib/event-edit";
 import { clearAnnotationSession } from "@/lib/annotation-session";
 import type { AnnotationDraft, Event, EventType } from "@/lib/types";
@@ -694,25 +698,11 @@ export function Composer({
     },
     [roomId],
   );
-  const [recording, setRecording] = React.useState(false);
-  // §6.5 — Mirror `recording` in a ref so the unmount cleanup can clear a
-  // dangling "recording…" beacon for the *current* room even if the room
-  // switches while we're mid-record.
-  const recordingRef = React.useRef(false);
-  React.useEffect(() => {
-    recordingRef.current = recording;
-  }, [recording]);
-  React.useEffect(
-    () => () => {
-      // On unmount (e.g. switching rooms while recording), explicitly clear the
-      // peer "recording…" beacon — otherwise it sticks until it times out
-      // server-side. The VoiceRecorder's own cleanup stops the MediaStream.
-      if (recordingRef.current) {
-        api.activity(roomId, "recording", false).catch(() => undefined);
-      }
-    },
-    [roomId],
-  );
+  // MediaRecorder is browser-tab-wide rather than Composer-owned, so a keyed
+  // RoomView remount cannot interrupt a voice note when the user changes chat.
+  const voiceSession = useVoiceRecordingSession();
+  const recordingHere =
+    voiceSession.phase !== "idle" && voiceSession.roomId === roomId;
   const [busy, setBusy] = React.useState(false);
   const [editSaving, setEditSaving] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
@@ -754,8 +744,7 @@ export function Composer({
     textRef.current = text;
   }, [text]);
 
-  // A room switch remounts Composer. Recover any voice note that was finalized
-  // during that navigation (or retained after a failed upload/reload).
+  // Recover a finalized voice note retained after a failed upload/reload.
   React.useEffect(() => {
     let alive = true;
     void getVoiceDraft(roomId).then((draft) => {
@@ -1872,7 +1861,6 @@ export function Composer({
   };
 
   const onVoiceSubmit = (blob: Blob, durationMs: number) => {
-    setRecording(false);
     api.activity(roomId, "recording", false).catch(() => undefined);
     const draft = { blob, durationMs, savedAt: Date.now() };
     setPendingVoice(draft);
@@ -1884,24 +1872,16 @@ export function Composer({
     })();
   };
 
-  const onVoicePreserve = (blob: Blob, durationMs: number) => {
-    const draft = { blob, durationMs, savedAt: Date.now() };
-    void saveVoiceDraft(roomId, draft);
-    toast.success("voice note saved to this chat");
-  };
-
-  // Render the recorder in place of the textarea row when active.
-  if (recording) {
+  // The controls remount only in the origin room; the global session keeps
+  // recording while other rooms show the banner in RoomView.
+  if (recordingHere) {
     return (
       <div className="border-t bg-background p-3">
         <VoiceRecorder
-          active
           onCancel={() => {
-            setRecording(false);
             api.activity(roomId, "recording", false).catch(() => undefined);
           }}
           onSubmit={onVoiceSubmit}
-          onPreserve={onVoicePreserve}
         />
       </div>
     );
@@ -2336,11 +2316,30 @@ export function Composer({
                 toast.message("send or discard the saved voice note first");
                 return;
               }
-              setRecording(true);
               api.activity(roomId, "recording", true).catch(() => undefined);
+              void voiceRecordingSession.start(roomId).catch((error) => {
+                api.activity(roomId, "recording", false).catch(() => undefined);
+                if (error instanceof DOMException && error.name === "AbortError") return;
+                toast.error(
+                  error instanceof DOMException && error.name === "NotAllowedError"
+                    ? "microphone permission denied"
+                    : error instanceof Error
+                      ? error.message
+                      : "couldn't start recorder",
+                );
+              });
             }}
-            disabled={busy || sendDisabled || Boolean(pendingVoice)}
-            title="record voice message"
+            disabled={
+              busy ||
+              sendDisabled ||
+              Boolean(pendingVoice) ||
+              voiceSession.phase !== "idle"
+            }
+            title={
+              voiceSession.phase === "idle"
+                ? "record voice message"
+                : "a voice note is already being recorded"
+            }
             aria-label="record voice message"
             className="flex h-11 w-11 shrink-0 items-center justify-center border border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >

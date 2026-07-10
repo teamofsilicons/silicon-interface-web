@@ -4,278 +4,103 @@ import * as React from "react";
 import { PaperPlaneRight, Trash } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
+import {
+  useVoiceRecordingSession,
+  voiceRecordingSession,
+} from "@/lib/voice-recording-session";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import { vibrate } from "@/lib/sounds";
 
 interface Props {
-  /** Recording is "locked" the moment the icon is clicked — there is no
-   *  hold-to-talk. Active = the recorder bar replaces the composer body. */
-  active: boolean;
-  /** Cancel / discard the recording. */
+  /** Explicit discard — no Blob is emitted. */
   onCancel: () => void;
-  /** Recording finalized — the parent should upload + send as `m.voice`. */
+  /** Explicit send — the parent uploads the one finalized Blob. */
   onSubmit: (blob: Blob, durationMs: number) => void;
-  /** Navigation finalized the recording — preserve it as a room draft. */
-  onPreserve: (blob: Blob, durationMs: number) => void;
-}
-
-// Use whichever WebM/Opus mime the browser supports; fall back to default.
-function pickMime(): string {
-  if (typeof MediaRecorder === "undefined") return "";
-  for (const m of [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4;codecs=mp4a.40.2",
-    "audio/mp4",
-  ]) {
-    if (MediaRecorder.isTypeSupported(m)) return m;
-  }
-  return "";
 }
 
 /**
- * Telegram-style locked voice recorder.
+ * Controls for the browser-tab-wide voice recording session.
  *
- * The icon in the composer flips this on. We immediately request mic access,
- * start a MediaRecorder, and replace the composer body with a recording bar:
- *
- *   ┌──────────────────────────────────────────────┐
- *   │ 🗑  ● 00:42  ▁▂▄▆▇▆▄▂▁                  ➤    │
- *   └──────────────────────────────────────────────┘
- *
- * Cancel discards the captured audio. Send finalizes, hands the blob up to
- * the composer to upload + post as an `m.voice` event. The recording does
- * not stop on focus changes — only on user action.
+ * MediaRecorder itself lives in `voice-recording-session.ts`, outside the
+ * keyed RoomView tree. This component can therefore unmount while another chat
+ * is open and remount later without interrupting the recording.
  */
-export function VoiceRecorder({ active, onCancel, onSubmit, onPreserve }: Props) {
-  const recRef = React.useRef<MediaRecorder | null>(null);
-  const streamRef = React.useRef<MediaStream | null>(null);
-  const chunksRef = React.useRef<BlobPart[]>([]);
-  const startedAtRef = React.useRef<number>(0);
-  const intentRef = React.useRef<"send" | "cancel" | "preserve">("cancel");
-  const finalizedRef = React.useRef(false);
+export function VoiceRecorder({ onCancel, onSubmit }: Props) {
+  const session = useVoiceRecordingSession();
   const [elapsed, setElapsed] = React.useState(0);
-  const [armed, setArmed] = React.useState(false);
-
-  // Wave bars — purely cosmetic, sampled in real time from an AnalyserNode.
-  // Bar count grows with the container's actual width so the waveform spans
-  // the whole remaining strip instead of clustering on the left.
-  const audioCtxRef = React.useRef<AudioContext | null>(null);
-  const analyserRef = React.useRef<AnalyserNode | null>(null);
   const wavesContainerRef = React.useRef<HTMLDivElement>(null);
   const [barCount, setBarCount] = React.useState(48);
   const [waves, setWaves] = React.useState<number[]>(() => new Array(48).fill(0));
 
-  const stopLiveCapture = React.useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    audioCtxRef.current?.close().catch(() => undefined);
-    streamRef.current = null;
-    audioCtxRef.current = null;
-    analyserRef.current = null;
-  }, []);
-
-  const releaseResources = React.useCallback((updateUi: boolean) => {
-    stopLiveCapture();
-    recRef.current = null;
-    if (updateUi) {
-      setElapsed(0);
-      setArmed(false);
-      setWaves((w) => w.map(() => 0));
-    }
-  }, [stopLiveCapture]);
-
-  // Start / stop with the `active` flag.
   React.useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    intentRef.current = "cancel";
-    finalizedRef.current = false;
-
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        streamRef.current = stream;
-        const mime = pickMime();
-        const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-        recRef.current = rec;
-        chunksRef.current = [];
-        rec.ondataavailable = (e) => {
-          if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-        };
-        rec.onstop = () => {
-          if (finalizedRef.current) return;
-          finalizedRef.current = true;
-          const duration = Date.now() - startedAtRef.current;
-          const blob = new Blob(chunksRef.current, { type: mime || "audio/webm" });
-          chunksRef.current = [];
-          // Explicit cancel is the only destructive route. Navigation uses a
-          // third intent so teardown finalizes a recoverable room draft rather
-          // than silently throwing the captured chunks away.
-          if (intentRef.current === "send" && blob.size > 0) {
-            onSubmit(blob, duration);
-          } else if (intentRef.current === "preserve" && blob.size > 0) {
-            onPreserve(blob, duration);
-          }
-          releaseResources(!cancelled);
-        };
-        startedAtRef.current = Date.now();
-        rec.start(200); // 200ms timeslice — even pacing for the level meter
-        vibrate(8); // §3c — feather-light haptic on record start
-        setArmed(true);
-
-        // Live level meter. fftSize 2048 gives 2048 time-domain samples per
-        // read — plenty of headroom for the rolling RMS used to drive the bars.
-        const ctx = new AudioContext();
-        const src = ctx.createMediaStreamSource(stream);
-        const an = ctx.createAnalyser();
-        an.fftSize = 2048;
-        src.connect(an);
-        audioCtxRef.current = ctx;
-        analyserRef.current = an;
-      } catch (err) {
-        toast.error(
-          err instanceof DOMException && err.name === "NotAllowedError"
-            ? "microphone permission denied"
-            : "couldn't start recorder",
-        );
-        releaseResources(!cancelled);
-        onCancel();
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      // Navigation is not an explicit discard. Stop the recorder so its final
-      // dataavailable event lands, then preserve the resulting Blob for the
-      // original room. Tracks/context are still released immediately so the
-      // microphone never continues invisibly in another chat.
-      const recorder = recRef.current;
-      if (recorder?.state === "recording") {
-        intentRef.current = "preserve";
-        try {
-          recorder.stop();
-          // `stop()` has already queued the final dataavailable/stop events.
-          // Release the physical microphone immediately while leaving chunks
-          // intact for the onstop preservation handler.
-          stopLiveCapture();
-        } catch {
-          releaseResources(false);
-        }
-      } else {
-        releaseResources(false);
-      }
-    };
-    // Callbacks are stable for the lifetime of this hook invocation.
-    // invocation — re-running on every render would tear down the recorder.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
-
-  // Resize observer: keep bar count proportional to the available width.
-  // Each bar gets ~5px of horizontal real estate (3px bar + 2px gap), so we
-  // divide and clamp to a sensible minimum.
-  React.useEffect(() => {
-    const el = wavesContainerRef.current;
-    if (!el) return;
+    const element = wavesContainerRef.current;
+    if (!element) return;
     const measure = () => {
-      const w = el.clientWidth || 200;
-      setBarCount(Math.max(24, Math.floor(w / 5)));
+      const width = element.clientWidth || 200;
+      setBarCount(Math.max(24, Math.floor(width / 5)));
     };
     measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
-  // Timer + waveform tick. We use time-domain data (an oscilloscope-style
-  // signal in [0,255] around 128) and compute a single RMS amplitude per
-  // sample, then *roll* the wave array: the newest amplitude becomes the
-  // rightmost bar and everything older scrolls one step left. This is what
-  // makes every bar react to incoming sound — the previous approach split
-  // a tiny frequency-bin buffer across the bars, leaving everything past
-  // the buffer length stuck at zero.
   React.useEffect(() => {
-    if (!armed) return;
-    let raf = 0;
+    if (session.phase === "idle") return;
+    let frame = 0;
     let lastSampleAt = 0;
-    const SAMPLE_MS = 50; // 20 samples/sec — smooth without overdrawing.
-    const loop = (now: number) => {
-      setElapsed(Date.now() - startedAtRef.current);
-      const an = analyserRef.current;
-      if (an && now - lastSampleAt >= SAMPLE_MS) {
+    const sampleEveryMs = 50;
+
+    const tick = (now: number) => {
+      setElapsed(session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0);
+      if (now - lastSampleAt >= sampleEveryMs) {
         lastSampleAt = now;
-        const buf = new Uint8Array(an.fftSize);
-        an.getByteTimeDomainData(buf);
-        let sumSq = 0;
-        for (let i = 0; i < buf.length; i++) {
-          const v = (buf[i] - 128) / 128; // → [-1, 1]
-          sumSq += v * v;
-        }
-        const rms = Math.sqrt(sumSq / buf.length);
-        // Boost so quiet speech still moves the bars; cap at 1. Add a tiny
-        // breathing floor (a slow sine on the sample clock) so a silent mic
-        // still scrolls a faint ripple instead of looking frozen/flatlined.
+        const measured = voiceRecordingSession.getLevel();
         const idleFloor = 0.06 + 0.04 * Math.abs(Math.sin(now / 350));
-        const amp = Math.min(1, Math.max(idleFloor, rms * 4));
-        setWaves((prev) => {
-          // Keep length === barCount: drop the oldest, push the newest.
-          const next =
-            prev.length >= barCount
-              ? prev.slice(prev.length - barCount + 1)
-              : [...new Array(barCount - prev.length - 1).fill(0), ...prev];
-          next.push(amp);
-          return next;
+        const amplitude = Math.max(idleFloor, measured);
+        setWaves((previous) => {
+          const fitted =
+            previous.length >= barCount
+              ? previous.slice(previous.length - barCount + 1)
+              : [...new Array(Math.max(0, barCount - previous.length - 1)).fill(0), ...previous];
+          fitted.push(amplitude);
+          return fitted.slice(-barCount);
         });
       }
-      raf = requestAnimationFrame(loop);
+      frame = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [armed, barCount]);
 
-  // When the strip resizes mid-recording, reshape the waves array so the
-  // newest samples stay anchored to the right edge.
-  React.useEffect(() => {
-    setWaves((prev) => {
-      if (prev.length === barCount) return prev;
-      if (prev.length > barCount) return prev.slice(prev.length - barCount);
-      return [...new Array(barCount - prev.length).fill(0), ...prev];
-    });
-  }, [barCount]);
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [barCount, session.phase, session.startedAt]);
 
-  const handleSend = () => {
-    intentRef.current = "send";
+  const handleSend = async () => {
     try {
-      recRef.current?.stop();
-    } catch {
-      releaseResources(true);
+      const result = await voiceRecordingSession.finish();
+      onSubmit(result.blob, result.durationMs);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "couldn't finish voice note");
     }
   };
 
-  const handleCancel = () => {
-    intentRef.current = "cancel";
+  const handleCancel = async () => {
     try {
-      recRef.current?.stop();
-    } catch {
-      /* nothing to stop */
-      chunksRef.current = [];
-      releaseResources(true);
+      await voiceRecordingSession.cancel();
+    } finally {
+      onCancel();
     }
-    onCancel();
   };
 
-  if (!active) return null;
+  if (session.phase === "idle") return null;
+  const canSend = session.phase === "recording";
+  const canCancel = session.phase !== "stopping";
 
   return (
     <div className="flex items-center gap-3 border border-input bg-card px-3 py-2">
       <Button
         size="icon"
         variant="ghost"
-        onClick={handleCancel}
+        onClick={() => void handleCancel()}
+        disabled={!canCancel}
         aria-label="discard recording"
         className="text-destructive hover:bg-destructive/10"
       >
@@ -284,24 +109,22 @@ export function VoiceRecorder({ active, onCancel, onSubmit, onPreserve }: Props)
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <span className="flex items-center gap-1.5 label-mono text-xs">
           <span className="inline-block h-2 w-2 animate-pulse bg-foreground" />
-          {formatElapsed(elapsed)}
+          {session.phase === "requesting" ? "starting…" : formatElapsed(elapsed)}
         </span>
-        <div
-          ref={wavesContainerRef}
-          className="flex h-7 flex-1 items-center gap-[2px]"
-        >
-          {waves.map((v, i) => (
+        <div ref={wavesContainerRef} className="flex h-7 flex-1 items-center gap-[2px]">
+          {waves.map((value, index) => (
             <span
-              key={i}
-              className={cn("inline-block w-[3px] bg-foreground/70")}
-              style={{ height: `${Math.max(3, v * 100)}%` }}
+              key={index}
+              className="inline-block w-[3px] bg-foreground/70"
+              style={{ height: `${Math.max(3, value * 100)}%` }}
             />
           ))}
         </div>
       </div>
       <Button
         size="icon"
-        onClick={handleSend}
+        onClick={() => void handleSend()}
+        disabled={!canSend}
         aria-label="send recording"
       >
         <PaperPlaneRight />
@@ -311,8 +134,8 @@ export function VoiceRecorder({ active, onCancel, onSubmit, onPreserve }: Props)
 }
 
 function formatElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }

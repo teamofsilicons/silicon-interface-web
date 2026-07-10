@@ -1453,8 +1453,10 @@ export function Composer({
             return;
           }
           heldSendIdsRef.current.set(clientId, held.held_send_id);
-          item.releaseAt = held.release_at;
-          onOptimisticUpdate?.(clientId, buildQueuedPayload(item, queue.length));
+          // Keep the locally-anchored 10s display deadline. `held.release_at`
+          // is an absolute server timestamp; replacing the local deadline with
+          // it makes clock skew look like a 60s+ hold even though Glass stored
+          // exactly ten seconds.
         })
         .catch(async (err) => {
           if (cancelledHeldClientIdsRef.current.has(clientId)) {

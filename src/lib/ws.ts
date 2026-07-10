@@ -37,6 +37,8 @@ const STALE_AFTER_MS = PING_INTERVAL_MS * 2.5;
 const TICKET_MINT_TIMEOUT_MS = 5_000;
 const HELD_SEND_SYNC_MS = 15_000;
 const HELD_SEND_RETRY_MS = 2_000;
+const HELD_SEND_PENDING_MAX_DELAY_MS = 10_100;
+const HELD_SEND_RELEASING_MAX_DELAY_MS = 5_100;
 
 /** Resolve to a ticket string, or null when minting failed/timed out
  *  (network down, 5xx, endpoint not deployed yet). Never rejects. */
@@ -281,16 +283,17 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
         releasing.delete(held.held_send_id);
         return;
       }
-      // Pending rows fire at their deadline. Releasing rows get a short grace
-      // period for the active worker, then send-now asks Glass to reclaim a
-      // worker claim that died mid-release.
-      const targetAt =
+      // Use server-relative duration, never its absolute wall clock. A browser
+      // clock that is ahead/behind cannot turn ten seconds into zero or sixty.
+      // Releasing rows get a short grace before send-now reclaims a dead worker.
+      const serverHoldMs =
+        Date.parse(held.release_at) - Date.parse(held.created_at) + 100;
+      const delay =
         held.state === "releasing"
-          ? Date.parse(held.updated_at) + 5_100
-          : Date.parse(held.release_at) + 100;
-      const delay = Number.isFinite(targetAt)
-        ? Math.max(0, targetAt - Date.now())
-        : HELD_SEND_RETRY_MS;
+          ? HELD_SEND_RELEASING_MAX_DELAY_MS
+          : Number.isFinite(serverHoldMs)
+            ? Math.min(HELD_SEND_PENDING_MAX_DELAY_MS, Math.max(0, serverHoldMs))
+            : HELD_SEND_RETRY_MS;
       const timer = window.setTimeout(() => {
         timers.delete(held.held_send_id);
         void requestRelease(held);

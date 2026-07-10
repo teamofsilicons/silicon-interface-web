@@ -71,6 +71,7 @@ const SELECTABLE_FORWARD_TYPES = new Set<EventType>([
   "m.voice",
   "m.tts",
 ]);
+const VISIBLE_SILICON_HOLD_SECONDS = 10;
 
 /** Deterministic tilt in [-3, 3] degrees, hashed from a stable key so each
  *  pin keeps its angle across re-renders (a fresh Math.random would jitter on
@@ -988,7 +989,10 @@ function HeldSendCountdown({ releaseAt }: { releaseAt: string }) {
   }, [releaseAt]);
   const deadline = Date.parse(releaseAt);
   const seconds = Number.isFinite(deadline)
-    ? Math.max(0, Math.ceil((deadline - now) / 1000))
+    ? Math.min(
+        VISIBLE_SILICON_HOLD_SECONDS,
+        Math.max(0, Math.ceil((deadline - now) / 1000)),
+      )
     : 0;
   return (
     <span className="inline-flex items-center gap-1 tabular-nums">

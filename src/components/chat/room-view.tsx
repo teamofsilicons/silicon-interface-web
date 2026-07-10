@@ -92,6 +92,18 @@ type LocalEvent = Event & {
   _sendTimeoutMs?: number;
 };
 
+const VISIBLE_HELD_SEND_MS = 10_000;
+const HELD_SEND_RECOVERY_MAX_DELAY_MS = VISIBLE_HELD_SEND_MS + 100;
+
+function localHeldReleaseAt(held: HeldSend): string {
+  const now = Date.now();
+  const serverHoldMs = Date.parse(held.release_at) - Date.parse(held.created_at);
+  const localDelay = Number.isFinite(serverHoldMs)
+    ? Math.min(VISIBLE_HELD_SEND_MS, Math.max(0, serverHoldMs))
+    : VISIBLE_HELD_SEND_MS;
+  return new Date(now + localDelay).toISOString();
+}
+
 interface PendingUnsend {
   event: Event;
   attachments: Event[];
@@ -827,11 +839,26 @@ export function RoomView({
       );
       if (existingIndex >= 0) {
         const existing = prev[existingIndex];
-        if (existing.content.hold_release_at === held.release_at) return prev;
+        const currentReleaseAt =
+          typeof existing.content.hold_release_at === "string"
+            ? existing.content.hold_release_at
+            : null;
+        const currentDeadline = currentReleaseAt ? Date.parse(currentReleaseAt) : Number.NaN;
+        // Preserve a valid locally-anchored countdown. Only replace an absent
+        // or visibly skewed (>10s) deadline with a capped local projection.
+        if (
+          Number.isFinite(currentDeadline) &&
+          currentDeadline <= Date.now() + VISIBLE_HELD_SEND_MS
+        ) {
+          return prev;
+        }
         const next = [...prev];
         next[existingIndex] = {
           ...existing,
-          content: { ...existing.content, hold_release_at: held.release_at },
+          content: {
+            ...existing.content,
+            hold_release_at: localHeldReleaseAt(held),
+          },
         };
         return next;
       }
@@ -842,7 +869,11 @@ export function RoomView({
         sender_id: null,
         sender_handle: myUsername,
         type: "m.text",
-        content: { body, client_id: clientId, hold_release_at: held.release_at },
+        content: {
+          body,
+          client_id: clientId,
+          hold_release_at: localHeldReleaseAt(held),
+        },
         reply_to_event_id: held.reply_to_event_id || "",
         is_final: true,
         created_at: held.created_at || new Date().toISOString(),
@@ -1972,11 +2003,9 @@ export function RoomView({
           schedule(heldSendId, 1_000);
           return;
         }
-        const remaining = Date.parse(held.release_at) - Date.now();
-        if (Number.isFinite(remaining) && remaining > 100) {
-          schedule(heldSendId, remaining + 100);
-          return;
-        }
+        // This recovery callback was already scheduled from the server's
+        // relative hold duration. Do not compare its absolute timestamp to the
+        // browser clock again or skew can add another minute here.
         const released = await api.sendHeldNow(room.room_id, held.held_send_id);
         if (cancelled) return;
         applyHeldSendFrame(released);
@@ -2006,8 +2035,14 @@ export function RoomView({
       for (const held of res.held_sends) {
         clientIds.set(held.held_send_id, held.client_id);
         applyHeldSendFrame(held);
-        const releaseAt = Date.parse(held.release_at);
-        const delay = Number.isFinite(releaseAt) ? releaseAt - Date.now() + 100 : 0;
+        const serverHoldMs =
+          Date.parse(held.release_at) - Date.parse(held.created_at) + 100;
+        const delay = Number.isFinite(serverHoldMs)
+          ? Math.min(
+              HELD_SEND_RECOVERY_MAX_DELAY_MS,
+              Math.max(0, serverHoldMs),
+            )
+          : 0;
         schedule(held.held_send_id, delay);
       }
     }).catch(() => undefined);

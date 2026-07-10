@@ -1807,18 +1807,90 @@ export function RoomView({
     [room.room_id],
   );
 
+  const heldAckRef = React.useRef(onAck);
+  React.useEffect(() => {
+    heldAckRef.current = onAck;
+  }, [onAck]);
 
   React.useEffect(() => {
     let cancelled = false;
-    api
-      .heldSends(room.room_id)
-      .then((res) => {
+    const timers = new Set<number>();
+    const clientIds = new Map<string, string>();
+
+    const schedule = (heldSendId: string, delay: number) => {
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        void recover(heldSendId);
+      }, Math.max(0, delay));
+      timers.add(timer);
+    };
+
+    const recover = async (heldSendId: string) => {
+      if (cancelled) return;
+      try {
+        const latest = await api.heldSends(room.room_id);
         if (cancelled) return;
-        for (const held of res.held_sends) applyHeldSendFrame(held);
-      })
-      .catch(() => undefined);
+        const held = latest.held_sends.find((item) => item.held_send_id === heldSendId);
+        if (!held) {
+          // The hold may already have reached a terminal state while its WS
+          // frame was missed. Reconcile the optimistic row from event history.
+          const recent = await api.events(room.room_id, undefined, 50);
+          const clientId = clientIds.get(heldSendId);
+          const sent = clientId
+            ? recent.find((event) => event.content.client_id === clientId)
+            : undefined;
+          if (sent && clientId) heldAckRef.current(clientId, sent);
+          return;
+        }
+        clientIds.set(held.held_send_id, held.client_id);
+        applyHeldSendFrame(held);
+        if (held.state === "releasing") {
+          schedule(heldSendId, 1_000);
+          return;
+        }
+        const remaining = Date.parse(held.release_at) - Date.now();
+        if (Number.isFinite(remaining) && remaining > 100) {
+          schedule(heldSendId, remaining + 100);
+          return;
+        }
+        const released = await api.sendHeldNow(room.room_id, held.held_send_id);
+        if (cancelled) return;
+        applyHeldSendFrame(released);
+        if (released.state === "sent") {
+          // The send-now endpoint returns the hold projection, not the Event.
+          // An idempotent event POST retrieves the already-created Event so the
+          // optimistic bubble resolves even if its WebSocket echo was missed.
+          const event = await api.sendEvent(
+            room.room_id,
+            {
+              type: held.type,
+              content: held.content,
+              reply_to_event_id: held.reply_to_event_id || undefined,
+            },
+            held.client_id,
+          );
+          if (!cancelled) heldAckRef.current(held.client_id, event);
+        }
+      } catch {
+        // The server ETA task + beat sweep remain authoritative. Retry once
+        // this room is reopened rather than spinning while offline.
+      }
+    };
+
+    void api.heldSends(room.room_id).then((res) => {
+      if (cancelled) return;
+      for (const held of res.held_sends) {
+        clientIds.set(held.held_send_id, held.client_id);
+        applyHeldSendFrame(held);
+        const releaseAt = Date.parse(held.release_at);
+        const delay = Number.isFinite(releaseAt) ? releaseAt - Date.now() + 100 : 0;
+        schedule(held.held_send_id, delay);
+      }
+    }).catch(() => undefined);
     return () => {
       cancelled = true;
+      for (const timer of timers) window.clearTimeout(timer);
+      timers.clear();
     };
   // applyHeldSendFrame is intentionally omitted; this effect should only refetch
   // server holds when the room changes.

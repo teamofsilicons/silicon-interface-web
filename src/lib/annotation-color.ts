@@ -1,16 +1,17 @@
 import { geometryBBox } from "./annotation-coords";
 import { MARKUP_COLOR, type Geometry } from "./annotation-types";
 
-const CANDIDATES = [
+const COLOR_CANDIDATES = [
   MARKUP_COLOR,
-  "#2563eb",
-  "#0891b2",
-  "#16a34a",
-  "#9333ea",
-  "#f59e0b",
-  "#111827",
-  "#ffffff",
+  "#a8e6cf",
+  "#f7b2d9",
+  "#b9c8ff",
+  "#004c6d",
+  "#5b2c6f",
+  "#6b341e",
+  "#1b5e3f",
 ] as const;
+const NEUTRAL_FALLBACKS = ["#111827", "#ffffff"] as const;
 
 interface Rgb {
   r: number;
@@ -42,6 +43,18 @@ function contrast(a: Rgb, b: Rgb): number {
   const hi = Math.max(la, lb);
   const lo = Math.min(la, lb);
   return (hi + 0.05) / (lo + 0.05);
+}
+
+function colorDistance(candidate: Rgb, samples: Rgb[]): number {
+  if (!samples.length) return 0;
+  return samples.reduce(
+    (total, sample) => total + Math.hypot(
+      candidate.r - sample.r,
+      candidate.g - sample.g,
+      candidate.b - sample.b,
+    ),
+    0,
+  ) / samples.length;
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -94,10 +107,7 @@ function samplePixels(ctx: CanvasRenderingContext2D, w: number, h: number, geome
 
 function chooseByContrast(samples: Rgb[]): string {
   if (!samples.length) return MARKUP_COLOR;
-  let best = MARKUP_COLOR;
-  let bestCount = -1;
-  let bestAverage = -1;
-  for (const candidate of CANDIDATES) {
+  const score = (candidate: string) => {
     const c = parseHex(candidate);
     let count = 0;
     let total = 0;
@@ -106,14 +116,27 @@ function chooseByContrast(samples: Rgb[]): string {
       total += ratio;
       if (ratio >= 7) count += 1;
     }
-    const average = total / samples.length;
-    if (count > bestCount || (count === bestCount && average > bestAverage)) {
-      best = candidate;
-      bestCount = count;
-      bestAverage = average;
-    }
-  }
-  return best;
+    return {
+      candidate,
+      count,
+      average: total / samples.length,
+      distance: colorDistance(c, samples),
+    };
+  };
+  const colorful = COLOR_CANDIDATES.map(score);
+  // Prefer a real marker color whenever it maintains AAA contrast across at
+  // least 80% of the marked pixels. Black/white are safety fallbacks for busy
+  // or mixed regions where no chromatic marker remains reliably readable.
+  const strongColorExists = colorful.some((item) => item.count / samples.length >= 0.8);
+  const pool = strongColorExists
+    ? colorful
+    : [...colorful, ...NEUTRAL_FALLBACKS.map(score)];
+  pool.sort((a, b) =>
+    b.count - a.count ||
+    b.distance - a.distance ||
+    b.average - a.average,
+  );
+  return pool[0]?.candidate ?? MARKUP_COLOR;
 }
 
 /**

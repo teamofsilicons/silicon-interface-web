@@ -62,8 +62,6 @@ export function newAnnotationId(): string {
 }
 
 export function annotationMarkups(a: Annotation): MarkupDraft[] {
-  if (Array.isArray(a.markups) && a.markups.length > 0) {
-    return a.markups.map((markup) => ({ ...markup, color: MARKUP_COLOR }));
-  }
-  return [{ geometry: a.geometry, color: MARKUP_COLOR }];
+  if (Array.isArray(a.markups) && a.markups.length > 0) return a.markups;
+  return [{ geometry: a.geometry, color: a.color || MARKUP_COLOR }];
 }

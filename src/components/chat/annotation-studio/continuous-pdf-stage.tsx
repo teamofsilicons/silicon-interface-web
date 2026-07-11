@@ -25,7 +25,7 @@ interface Props {
   label: string;
   annotations: Annotation[];
   tool: ToolKind;
-  onCommit: (page: number, g: Geometry) => void;
+  onCommit: (page: number, g: Geometry, imageSrc: string) => void;
   onMove: (id: string, dx: number, dy: number) => void;
   onSelect: (annotation: Annotation) => void;
   pending?: { page: number; markups: MarkupDraft[] } | null;
@@ -124,7 +124,7 @@ export function ContinuousPdfStage({
               width={pageW}
               annotations={pageAnnotations}
               tool={tool}
-              onCommit={page ? (g) => onCommit(page0, g) : () => undefined}
+              onCommit={page ? (g) => onCommit(page0, g, page.dataUrl) : () => undefined}
               onMove={onMove}
               onSelect={onSelect}
               pending={pagePending}

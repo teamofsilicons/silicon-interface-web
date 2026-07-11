@@ -23,12 +23,12 @@ import { generateAnnotatedImage } from "@/lib/annotation-image";
 import { generateAnnotatedPdf } from "@/lib/annotation-pdf";
 import {
   newAnnotationId,
-  MARKUP_COLOR,
   type Annotation,
   type Geometry,
   type MarkupDraft,
   type ToolKind,
 } from "@/lib/annotation-types";
+import { chooseMarkupColor } from "@/lib/annotation-color";
 import { uploadMediaBlob } from "@/lib/media-upload";
 import { getPdfPageCount, releasePdfDocument, renderPdfPage } from "@/lib/pdf-render";
 import type { AnnotationDraft, AnnotationItem } from "@/lib/types";
@@ -189,13 +189,49 @@ export function AnnotationStudio({
   const zoomOut = React.useCallback(() => setZoom((z) => stepZoom(z, -1)), []);
   const resetZoom = React.useCallback(() => setZoom(1), []);
 
+  // Cache authenticated source bytes once. Each sample gets a short-lived blob
+  // URL, so repeated pins do not redownload the original and nothing leaks when
+  // the picker finishes reading pixels.
+  const sourceBlobPromiseRef = React.useRef<{
+    mediaId: string;
+    promise: Promise<Blob>;
+  } | null>(null);
+  const readableSamplingSource = React.useCallback(async (fallback: string) => {
+    if (fallback.startsWith("data:") || fallback.startsWith("blob:")) {
+      return { src: fallback, revoke: null as string | null };
+    }
+    try {
+      if (sourceBlobPromiseRef.current?.mediaId !== sourceMediaId) {
+        sourceBlobPromiseRef.current = {
+          mediaId: sourceMediaId,
+          promise: api.mediaContent(sourceMediaId),
+        };
+      }
+      const objectUrl = URL.createObjectURL(await sourceBlobPromiseRef.current.promise);
+      return { src: objectUrl, revoke: objectUrl };
+    } catch {
+      sourceBlobPromiseRef.current = null;
+      return { src: fallback, revoke: null as string | null };
+    }
+  }, [sourceMediaId]);
+  const choosingColorRef = React.useRef(false);
+
   // Finishing a markup opens the required-comment gate rather than committing.
-  const onMarkup = React.useCallback((geometry: Geometry, page = 0) => {
+  const onMarkup = React.useCallback(async (geometry: Geometry, page = 0, imageSrc = url) => {
+    if (choosingColorRef.current) return;
+    choosingColorRef.current = true;
     setEditingId(null);
     setSelectedId(null); // a fresh markup shifts focus off any prior selection
     setPendingPage(page);
-    setPending([{ geometry, color: MARKUP_COLOR }]);
-  }, []);
+    const readable = await readableSamplingSource(imageSrc);
+    try {
+      const color = await chooseMarkupColor({ imageSrc: readable.src, geometry });
+      setPending([{ geometry, color }]);
+    } finally {
+      if (readable.revoke) URL.revokeObjectURL(readable.revoke);
+      choosingColorRef.current = false;
+    }
+  }, [readableSamplingSource, url]);
 
   const goToPage = React.useCallback(
     (page0: number) => {
@@ -557,7 +593,7 @@ export function AnnotationStudio({
                   label={label}
                   annotations={annotations}
                   tool={tool}
-                  onCommit={(page, geometry) => onMarkup(geometry, page)}
+                  onCommit={(page, geometry, imageSrc) => void onMarkup(geometry, page, imageSrc)}
                   onMove={moveExistingAnnotation}
                   onSelect={selectAnnotation}
                   pending={pending.length > 0 ? { page: pendingPage, markups: pending } : null}
@@ -588,7 +624,7 @@ export function AnnotationStudio({
                 pageH={imgDims.h}
                 annotations={imageAnnotations}
                 tool={tool}
-                onCommit={(geometry) => onMarkup(geometry, 0)}
+                onCommit={(geometry) => void onMarkup(geometry, 0, url)}
                 onMove={moveExistingAnnotation}
                 onSelect={selectAnnotation}
                 pending={pending}

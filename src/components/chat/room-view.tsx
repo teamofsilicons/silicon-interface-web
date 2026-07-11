@@ -33,7 +33,7 @@ import { advanceEventCursor } from "@/lib/event-cursor";
 import { track } from "@/lib/analytics";
 import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
-import { useDraftReply } from "@/lib/drafts";
+import { setDraftReply, useDraftReply } from "@/lib/drafts";
 import { useVoiceRecordingSession } from "@/lib/voice-recording-session";
 import { loadCachedTeamRoster, saveCachedTeamRoster } from "@/lib/sidebar-cache";
 
@@ -134,6 +134,22 @@ const TEMP_ID = (clientId: string) => `temp-${clientId}`;
 function newClientId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function replyPreviewOf(event: Event): string {
+  const content = event.content as Record<string, unknown>;
+  if (event.type === "m.text") {
+    const body = String(content.body ?? "");
+    return body.length > 80 ? `${body.slice(0, 80)}…` : body;
+  }
+  if (event.type === "m.image") return "photo";
+  if (event.type === "m.file") {
+    return String(content.filename ?? content.caption ?? "attachment");
+  }
+  if (event.type === "m.voice") return "voice note";
+  if (event.type === "m.remote_browser") return "Silicon Browser link";
+  if (event.type === "m.tts") return "audio";
+  return event.type;
 }
 
 /** One-line text for an outgoing (optimistic) message, shown in the sidebar
@@ -422,6 +438,25 @@ export function RoomView({
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const draftReply = useDraftReply(room.room_id);
   const restoredDraftReplyIdRef = React.useRef<string | null>(null);
+  const updateReplyDraft = React.useCallback(
+    (event: Event | null) => {
+      restoredDraftReplyIdRef.current = null;
+      setReplyTo(event);
+      setDraftReply(
+        room.room_id,
+        event
+          ? {
+              event_id: event.event_id,
+              sender_handle: event.sender_handle || undefined,
+              sender_kind: event.sender_kind,
+              type: event.type,
+              preview: replyPreviewOf(event),
+            }
+          : null,
+      );
+    },
+    [room.room_id],
+  );
   const [editingEvent, setEditingEvent] = React.useState<Event | null>(null);
   const [restoreDraft, setRestoreDraft] = React.useState<ComposerRestoreDraft | null>(null);
   // A flattened annotation set handed off from the studio, staged into the
@@ -1336,8 +1371,7 @@ export function RoomView({
 
   const onReply = (ev: Event) => {
     setEditingEvent(null);
-    restoredDraftReplyIdRef.current = null;
-    setReplyTo(ev);
+    updateReplyDraft(ev);
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
   };
 
@@ -1371,10 +1405,10 @@ export function RoomView({
   const beginEdit = React.useCallback(
     (ev: Event) => {
       if (!canEditMessage(ev)) return;
-      setReplyTo(null);
+      updateReplyDraft(null);
       setEditingEvent(ev);
     },
-    [canEditMessage],
+    [canEditMessage, updateReplyDraft],
   );
 
   const persistEdit = React.useCallback(
@@ -1745,12 +1779,11 @@ export function RoomView({
     (draft: AnnotationDraft) => {
       const src = draft.sourceEventId ? eventById.get(draft.sourceEventId) : undefined;
       if (src) {
-        restoredDraftReplyIdRef.current = null;
-        setReplyTo(src);
+        updateReplyDraft(src);
       }
       setPendingAnnotationDraft(draft);
     },
-    [eventById],
+    [eventById, updateReplyDraft],
   );
   const onOpenAnnotation = React.useCallback((request: AnnotationOpenRequest) => {
     setAnnotationSource(request);
@@ -3062,10 +3095,7 @@ export function RoomView({
             pendingAnnotationDraft={pendingAnnotationDraft}
             onAnnotationDraftConsumed={() => setPendingAnnotationDraft(null)}
             replyTo={replyTo}
-            onClearReply={() => {
-              restoredDraftReplyIdRef.current = null;
-              setReplyTo(null);
-            }}
+            onClearReply={() => updateReplyDraft(null)}
             delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
             onHoldStateChange={setHoldingMessage}
             cancelQueuedRef={cancelQueuedRef}

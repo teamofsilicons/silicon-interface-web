@@ -30,7 +30,6 @@ import {
   loadServerDraft,
   setDraft,
   setDraftFocused,
-  setDraftReply,
 } from "@/lib/drafts";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
 import {
@@ -1097,21 +1096,6 @@ export function Composer({
       flushDraft(roomId);
     };
   }, [roomId]);
-
-  React.useEffect(() => {
-    setDraftReply(
-      roomId,
-      replyTo
-        ? {
-            event_id: replyTo.event_id,
-            sender_handle: replyTo.sender_handle || undefined,
-            sender_kind: replyTo.sender_kind,
-            type: replyTo.type,
-            preview: previewOf(replyTo),
-          }
-        : null,
-    );
-  }, [replyTo, roomId]);
 
   React.useEffect(() => {
     if (!restoreDraft) return;

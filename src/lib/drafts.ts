@@ -369,7 +369,16 @@ export function setDraftReply(roomId: string, reply: ReplyDraftTarget | null): v
   if (typeof window === "undefined" || !roomId) return;
   const draft = readLocal(roomId);
   const nextId = reply?.event_id ?? "";
-  if (draft.reply_to_event_id === nextId) return;
+  const current = draft.reply_to_snapshot ?? {};
+  if (
+    draft.reply_to_event_id === nextId &&
+    (current.sender_handle ?? undefined) === reply?.sender_handle &&
+    (current.sender_kind ?? undefined) === reply?.sender_kind &&
+    (current.type ?? undefined) === reply?.type &&
+    (current.preview ?? undefined) === reply?.preview
+  ) {
+    return;
+  }
   draft.reply_to_event_id = nextId;
   draft.reply_to_snapshot = reply ?? {};
   markDirty(roomId);

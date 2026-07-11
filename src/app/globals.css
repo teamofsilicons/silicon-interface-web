@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "video.js/dist/video-js.css";
 
 /* Video.js keeps its battle-tested playback UI while these overrides bring it
    into Interface's square, high-contrast visual system. */
@@ -15,8 +16,6 @@
 }
 
 .silicon-video-player .vjs-control-bar {
-  height: 3.25rem;
-  padding-top: 0.5rem;
   background: linear-gradient(to top, rgb(0 0 0 / 0.96), rgb(0 0 0 / 0.72), transparent);
 }
 

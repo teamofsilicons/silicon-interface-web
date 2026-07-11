@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { PushInit } from "@/components/push-init";
 import { RouteRecovery } from "@/components/route-recovery";
 
+import "video.js/dist/video-js.css";
 import "./globals.css";
 
 // Two faces for a more dynamic feel: TikTok Sans is the workhorse (body,

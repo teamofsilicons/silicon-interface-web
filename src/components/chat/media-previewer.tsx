@@ -229,6 +229,7 @@ export function MediaPreviewer({
           {isVideo && (
             <CustomVideoPlayer
               url={url}
+              mime={m}
               autoPlay
               className="aspect-video max-h-full w-full max-w-full"
             />

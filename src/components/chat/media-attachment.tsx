@@ -5,6 +5,7 @@ import {
   ArrowsOutSimple,
   CircleNotch,
   DownloadSimple,
+  Play,
   ShieldWarning,
   WarningCircle,
 } from "@phosphor-icons/react/dist/ssr";
@@ -18,7 +19,6 @@ import type { AnnotationDraft, MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { AttachmentCard } from "./attachment-card";
-import { CustomVideoPlayer } from "./custom-video-player";
 import { fileGlyph, isPreviewable } from "./file-icon";
 import { MediaPreviewer, downloadAsset, type AnnotationOpenRequest } from "./media-previewer";
 import { SiliconAudio } from "./silicon-audio";
@@ -382,18 +382,39 @@ export function MediaAttachment({
     );
   }
 
-  // Video — same fixed-aspect-frame treatment so loading doesn't shift the
-  // bubble; the inline player handles its own controls. Real dims (#22)
-  // override the 16/9 fallback.
+  // Video — the timeline is a lightweight preview. Clicking anywhere opens
+  // the dialog, where the actual Video.js player owns playback and controls.
   if (isVideo && !isDev) {
     const vidAspect = aspectFrom("16 / 9");
     return (
       <>
         <div
-          className="group relative w-72 max-w-full overflow-hidden bg-card"
+          role="button"
+          tabIndex={0}
+          aria-label="open video player"
+          onClick={() => setPreviewOpen(true)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              setPreviewOpen(true);
+            }
+          }}
+          className="group relative w-72 max-w-full cursor-pointer overflow-hidden bg-card"
           style={{ aspectRatio: vidAspect }}
         >
-          <CustomVideoPlayer url={url} className="absolute inset-0 h-full w-full" />
+          <video
+            src={url}
+            muted
+            playsInline
+            preload="metadata"
+            tabIndex={-1}
+            draggable={false}
+            onError={refreshUrl}
+            className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain"
+          />
+          <span className="pointer-events-none absolute left-1/2 top-1/2 grid size-12 -translate-x-1/2 -translate-y-1/2 place-items-center border border-white/80 bg-black/70 text-white">
+            <Play weight="fill" className="size-6" />
+          </span>
           <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             <IconChip onClick={() => setPreviewOpen(true)} label="expand">
               <ArrowsOutSimple />
@@ -489,7 +510,10 @@ function DownloadOverlay({ onClick }: { onClick: () => void }) {
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
       aria-label="download"
       className={cn(
         "absolute right-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center border",

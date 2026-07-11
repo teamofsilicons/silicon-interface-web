@@ -11,7 +11,17 @@ import { pauseOtherMedia, registerMediaPauser } from "./media-playback";
 const PLAYBACK_RATES = [1, 1.25, 1.5, 2];
 
 function sourceType(url: string, mime?: string): string | undefined {
-  if (mime?.trim()) return mime;
+  const normalizedMime = mime?.split(";", 1)[0]?.trim().toLowerCase();
+  // Chrome can decode H.264/AAC in a QuickTime container but reports
+  // `video/quicktime` itself as unsupported. Advertising the ISO-BMFF source
+  // as MP4 lets the browser inspect and play the compatible streams.
+  if (normalizedMime === "video/quicktime") return "video/mp4";
+  if (
+    normalizedMime?.startsWith("video/") ||
+    normalizedMime === "application/x-mpegurl" ||
+    normalizedMime === "application/vnd.apple.mpegurl" ||
+    normalizedMime === "application/dash+xml"
+  ) return normalizedMime;
   let pathname = url.toLowerCase();
   try {
     pathname = new URL(url, window.location.href).pathname.toLowerCase();
@@ -22,7 +32,7 @@ function sourceType(url: string, mime?: string): string | undefined {
   if (pathname.endsWith(".mpd")) return "application/dash+xml";
   if (pathname.endsWith(".webm")) return "video/webm";
   if (pathname.endsWith(".ogv") || pathname.endsWith(".ogg")) return "video/ogg";
-  if (pathname.endsWith(".mov")) return "video/quicktime";
+  if (pathname.endsWith(".mov")) return "video/mp4";
   if (pathname.endsWith(".mp4") || pathname.endsWith(".m4v")) return "video/mp4";
   return undefined;
 }

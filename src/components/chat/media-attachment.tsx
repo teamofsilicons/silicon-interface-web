@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import {
-  ArrowsOutSimple,
   CircleNotch,
   DownloadSimple,
   Play,
@@ -389,17 +388,7 @@ export function MediaAttachment({
     return (
       <>
         <div
-          role="button"
-          tabIndex={0}
-          aria-label="open video player"
-          onClick={() => setPreviewOpen(true)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              setPreviewOpen(true);
-            }
-          }}
-          className="group relative w-72 max-w-full cursor-pointer overflow-hidden bg-card"
+          className="group relative w-72 max-w-full overflow-hidden bg-card"
           style={{ aspectRatio: vidAspect }}
         >
           <video
@@ -412,13 +401,17 @@ export function MediaAttachment({
             onError={refreshUrl}
             className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain"
           />
-          <span className="pointer-events-none absolute left-1/2 top-1/2 grid size-12 -translate-x-1/2 -translate-y-1/2 place-items-center border border-white/80 bg-black/70 text-white">
-            <Play weight="fill" className="size-6" />
-          </span>
-          <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            <IconChip onClick={() => setPreviewOpen(true)} label="expand">
-              <ArrowsOutSimple />
-            </IconChip>
+          <button
+            type="button"
+            onClick={() => setPreviewOpen(true)}
+            aria-label="open video player"
+            className="absolute inset-0 cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-white"
+          >
+            <span className="pointer-events-none absolute left-1/2 top-1/2 grid size-12 -translate-x-1/2 -translate-y-1/2 place-items-center border border-white/80 bg-black/70 text-white">
+              <Play weight="fill" className="size-6" />
+            </span>
+          </button>
+          <div className="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
             <IconChip
               onClick={() => downloadAsset(url, filename, { mediaId })}
               label="download"

@@ -75,7 +75,6 @@ export function CustomVideoPlayer({
       autoplay: false,
       playbackRates: PLAYBACK_RATES,
       enableSmoothSeeking: true,
-      experimentalSvgIcons: true,
       notSupportedMessage: "this video can’t be played in the browser",
       userActions: { hotkeys: true },
     });

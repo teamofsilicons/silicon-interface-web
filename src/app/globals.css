@@ -41,6 +41,28 @@
   border-radius: 0;
 }
 
+/* Keep the volume slider independent of the dialog/player scale. Video.js's
+   experimental SVG thumb inherits sizing poorly inside our fill layout. */
+.silicon-video-player .vjs-volume-control.vjs-volume-horizontal,
+.silicon-video-player .vjs-volume-bar.vjs-slider-horizontal {
+  width: 50px;
+}
+
+.silicon-video-player .vjs-volume-bar.vjs-slider-horizontal {
+  height: 3px;
+  margin: 13.5px 4.5px;
+}
+
+.silicon-video-player .vjs-slider-horizontal .vjs-volume-level {
+  height: 3px;
+}
+
+.silicon-video-player .vjs-slider-horizontal .vjs-volume-level::before {
+  right: -5px;
+  font-size: 9px;
+  line-height: 3.5px;
+}
+
 .silicon-video-player .vjs-menu-content {
   background: rgb(26 26 26 / 0.96);
 }

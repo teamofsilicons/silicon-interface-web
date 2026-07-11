@@ -25,7 +25,7 @@ interface Props {
   label: string;
   annotations: Annotation[];
   tool: ToolKind;
-  onCommit: (page: number, g: Geometry, imageSrc: string) => void;
+  onCommit: (page: number, g: Geometry) => void;
   onMove: (id: string, dx: number, dy: number) => void;
   onSelect: (annotation: Annotation) => void;
   pending?: { page: number; markups: MarkupDraft[] } | null;
@@ -124,7 +124,7 @@ export function ContinuousPdfStage({
               width={pageW}
               annotations={pageAnnotations}
               tool={tool}
-              onCommit={page ? (g) => onCommit(page0, g, page.dataUrl) : () => undefined}
+              onCommit={page ? (g) => onCommit(page0, g) : () => undefined}
               onMove={onMove}
               onSelect={onSelect}
               pending={pagePending}
@@ -249,8 +249,6 @@ const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(function PdfPage(
               title={comment.title}
               onSubmit={comment.onSubmit}
               onCancel={comment.onCancel}
-              onAddMarkup={comment.onAddMarkup}
-              markupCount={comment.markupCount}
             />
           </div>
         )}

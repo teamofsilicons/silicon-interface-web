@@ -148,6 +148,23 @@ async function call<T>(
   return parsed as T;
 }
 
+async function callBlob(path: string, retried = false): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const tok = authStore.getAccess();
+  if (tok) headers.Authorization = `Bearer ${tok}`;
+  const silKey = authStore.getSiliconKey();
+  if (silKey) headers["X-Silicon-Key"] = silKey;
+  const resp = await fetch(`${env.apiBase}${path}`, { headers });
+  if (resp.status === 401 && !retried && tok && (await tryRefresh())) {
+    return callBlob(path, true);
+  }
+  if (!resp.ok) {
+    const parsed = await resp.json().catch(() => null) as { detail?: string } | null;
+    throw new ApiError(resp.status, parsed, parsed?.detail ?? `GET ${path} → ${resp.status}`);
+  }
+  return resp.blob();
+}
+
 export const api = {
   // -------- web push --------
   pushVapidKey: () => call<{ public_key: string }>("GET", "/api/v1/push/vapid-key"),
@@ -517,6 +534,10 @@ export const api = {
       "GET",
       `/api/v1/media/${media_id}`,
     ),
+  /** Authenticated, CORS-readable bytes for canvas/PDF processing. Normal
+   * playback still uses the direct presigned download URL. */
+  mediaContent: (media_id: string) =>
+    callBlob(`/api/v1/media/${encodeURIComponent(media_id)}/content`),
   /**
    * Confirm an S3 upload completed. Flips MediaObject.status from "pending"
    * to "ready" so subsequent /media/<id> returns a download_url instead of

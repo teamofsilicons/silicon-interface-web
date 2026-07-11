@@ -171,8 +171,6 @@ async function vectorOverlay(
 
       // Ref-code badge above the markup anchor.
       const firstMarkup = markups[0];
-      const markup = hexToRgb(firstMarkup.color || MARKUP_COLOR);
-      const markupColor = rgb(markup.r, markup.g, markup.b);
       const anc = anchorOf(firstMarkup.geometry);
       const badgeSize = Math.max(8, Math.min(W, H) * 0.016);
       const padX = badgeSize * 0.4;
@@ -186,8 +184,8 @@ async function vectorOverlay(
         y: by,
         width: bw,
         height: bh,
-        color: rgb(0.067, 0.094, 0.153),
-        borderColor: markupColor,
+        color: rgb(0.929, 0.91, 0.878),
+        borderColor: rgb(0.102, 0.102, 0.102),
         borderWidth: 1,
       });
       page.drawText(a.refCode, {
@@ -195,11 +193,9 @@ async function vectorOverlay(
         y: by + bh * 0.28,
         size: badgeSize,
         font: bold,
-        color: rgb(1, 1, 1),
+        color: rgb(0.102, 0.102, 0.102),
       });
       for (const m of markups.slice(1)) {
-        const c = hexToRgb(m.color || MARKUP_COLOR);
-        const color = rgb(c.r, c.g, c.b);
         const extraAnchor = anchorOf(m.geometry);
         const extraBw = bold.widthOfTextAtSize(a.refCode, badgeSize) + padX * 2;
         const extraBh = bh;
@@ -211,8 +207,8 @@ async function vectorOverlay(
           y: extraBy,
           width: extraBw,
           height: extraBh,
-          color: rgb(0.067, 0.094, 0.153),
-          borderColor: color,
+          color: rgb(0.929, 0.91, 0.878),
+          borderColor: rgb(0.102, 0.102, 0.102),
           borderWidth: 1,
         });
         page.drawText(a.refCode, {
@@ -220,7 +216,7 @@ async function vectorOverlay(
           y: extraBy + extraBh * 0.28,
           size: badgeSize,
           font: bold,
-          color: rgb(1, 1, 1),
+          color: rgb(0.102, 0.102, 0.102),
         });
       }
 
@@ -242,8 +238,8 @@ async function vectorOverlay(
         y: cy,
         width: boxW,
         height: boxH,
-        color: rgb(1, 1, 0.86),
-        borderColor: markupColor,
+        color: rgb(0.929, 0.91, 0.878),
+        borderColor: rgb(0.102, 0.102, 0.102),
         borderWidth: 0.75,
         opacity: 0.92,
       });

@@ -701,6 +701,7 @@ export function Composer({
   sendDisabledReason = "sending is disabled",
 }: Props) {
   const [text, setText] = React.useState("");
+  const annotationFeedbackRef = React.useRef(new Map<string, string>());
   // Multiple attachments can be staged at once; each uploads in the background
   // and is sent as its own message. `xhrRefs` lets us abort a specific in-flight
   // upload when its chip is removed.
@@ -1034,6 +1035,16 @@ export function Composer({
         annotation: draft,
       };
       return [...withoutDupe, row];
+    });
+    setText((current) => {
+      const nextFeedback = draft.feedbackText.trim();
+      const previousFeedback = annotationFeedbackRef.current.get(draft.sourceMediaId);
+      annotationFeedbackRef.current.set(draft.sourceMediaId, nextFeedback);
+      if (!nextFeedback || current.includes(nextFeedback)) return current;
+      if (previousFeedback && current.includes(previousFeedback)) {
+        return current.replace(previousFeedback, nextFeedback);
+      }
+      return current.trim() ? `${current.trimEnd()}\n\n${nextFeedback}` : nextFeedback;
     });
   }, []);
 

@@ -45,6 +45,8 @@ export interface AnnotationDraft {
   annotatedName: string;
   /** The annotations, for the chip label + reference (not sent as event data). */
   annotations: AnnotationItem[];
+  /** Composer copy generated from the positional references. */
+  feedbackText: string;
 }
 
 export type ProgressState =

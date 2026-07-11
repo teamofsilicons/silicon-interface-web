@@ -18,8 +18,6 @@ export interface CommentState {
   anchor: Geometry;
   onSubmit: (comment: string) => void;
   onCancel: () => void;
-  onAddMarkup?: (commentDraft: string) => void;
-  markupCount?: number;
 }
 
 interface Props {
@@ -167,8 +165,6 @@ export function StudioStage({
                 title={comment.title}
                 onSubmit={comment.onSubmit}
                 onCancel={comment.onCancel}
-                onAddMarkup={comment.onAddMarkup}
-                markupCount={comment.markupCount}
               />
             </div>
           )}

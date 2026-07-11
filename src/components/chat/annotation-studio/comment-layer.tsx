@@ -11,8 +11,8 @@ import { cn } from "@/lib/utils";
  *  studio through both stages. */
 export interface CommentLayerState {
   selectedId: string | null;
-  /** Chip-only mode: bubbles collapse to their ref-code chip (hover expands). */
-  collapsed: boolean;
+  /** Comment cards become drag handles for the complete annotation in move mode. */
+  moveEnabled: boolean;
   /** Annotation whose comment is being edited — its bubble hides so it doesn't
    *  double up with the comment prompt anchored at the same markup. */
   hideId?: string | null;
@@ -21,6 +21,7 @@ export interface CommentLayerState {
   onSelect: (a: Annotation) => void;
   onEdit: (a: Annotation) => void;
   onDelete: (a: Annotation) => void;
+  onMove: (id: string, dx: number, dy: number) => void;
 }
 
 interface Props extends CommentLayerState {
@@ -32,7 +33,6 @@ interface Props extends CommentLayerState {
 }
 
 const BUBBLE_W = 208; // w-52
-const CHIP_W = 34;
 const GAP = 10;
 const EDGE = 6;
 const V_GAP = 6;
@@ -55,8 +55,7 @@ function annotationBBox(a: Annotation): { x0: number; y0: number; x1: number; y1
 
 /** Rough bubble height for the stacking pass — exact heights don't matter, we
  *  only need overlapping bubbles pushed apart enough to stay grabbable. */
-function estimateHeight(a: Annotation, collapsed: boolean): number {
-  if (collapsed) return 26;
+function estimateHeight(a: Annotation): number {
   const lines = Math.min(3, Math.max(1, Math.ceil(a.comment.length / 32)));
   return 32 + lines * 16;
 }
@@ -74,13 +73,23 @@ export function CommentLayer({
   boxW,
   boxH,
   selectedId,
-  collapsed,
+  moveEnabled,
   hideId,
   muted,
   onSelect,
   onEdit,
   onDelete,
+  onMove,
 }: Props) {
+  const dragRef = React.useRef<{
+    id: string;
+    pointerId: number;
+    x: number;
+    y: number;
+    moved: boolean;
+  } | null>(null);
+  const ignoreClickRef = React.useRef<string | null>(null);
+  const [draggingId, setDraggingId] = React.useState<string | null>(null);
   const placed = React.useMemo(() => {
     if (boxW <= 0 || boxH <= 0) return [];
     const items = annotations
@@ -90,13 +99,12 @@ export function CommentLayer({
 
     const rects: { left: number; top: number; h: number; w: number }[] = [];
     return items.map(({ a, bb }) => {
-      const expanded = !collapsed || a.id === selectedId;
-      const w = expanded ? BUBBLE_W : CHIP_W;
+      const w = BUBBLE_W;
       // Prefer the right of the markup; flip left if it would overflow the page.
       let left = bb.x1 * boxW + GAP;
       if (left + w > boxW - EDGE) left = bb.x0 * boxW - GAP - w;
       left = clamp(left, EDGE, Math.max(EDGE, boxW - w - EDGE));
-      const h = estimateHeight(a, !expanded);
+      const h = estimateHeight(a);
       let top = clamp(bb.y0 * boxH, EDGE, Math.max(EDGE, boxH - h - EDGE));
       // Push below any already-placed bubble it would cover.
       for (const r of rects) {
@@ -108,7 +116,7 @@ export function CommentLayer({
       rects.push({ left, top, h, w });
       return { a, left, top, w };
     });
-  }, [annotations, boxW, boxH, collapsed, hideId, selectedId]);
+  }, [annotations, boxW, boxH, hideId]);
 
   if (placed.length === 0) return null;
 
@@ -122,8 +130,8 @@ export function CommentLayer({
     >
       {placed.map(({ a, left, top, w }) => {
         const selected = a.id === selectedId;
-        const color = a.color || annotationMarkups(a)[0]?.color || MARKUP_COLOR;
-        const expanded = !collapsed || selected;
+        const color = annotationMarkups(a)[0]?.color || MARKUP_COLOR;
+        const dragging = draggingId === a.id;
         return (
           <div
             key={a.id}
@@ -131,6 +139,10 @@ export function CommentLayer({
             tabIndex={muted ? -1 : 0}
             onClick={(e) => {
               e.stopPropagation();
+              if (ignoreClickRef.current === a.id) {
+                ignoreClickRef.current = null;
+                return;
+              }
               onSelect(a);
             }}
             onDoubleClick={(e) => {
@@ -143,10 +155,48 @@ export function CommentLayer({
                 onSelect(a);
               }
             }}
+            onPointerDown={(e) => {
+              if (!moveEnabled || muted || (e.target as HTMLElement).closest("button")) return;
+              e.preventDefault();
+              e.stopPropagation();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              dragRef.current = {
+                id: a.id,
+                pointerId: e.pointerId,
+                x: e.clientX,
+                y: e.clientY,
+                moved: false,
+              };
+              setDraggingId(a.id);
+              onSelect(a);
+            }}
+            onPointerMove={(e) => {
+              const drag = dragRef.current;
+              if (!drag || drag.id !== a.id || drag.pointerId !== e.pointerId) return;
+              const dxPx = e.clientX - drag.x;
+              const dyPx = e.clientY - drag.y;
+              if (Math.abs(dxPx) + Math.abs(dyPx) >= 2) drag.moved = true;
+              if (dxPx || dyPx) onMove(a.id, dxPx / boxW, dyPx / boxH);
+              drag.x = e.clientX;
+              drag.y = e.clientY;
+            }}
+            onPointerUp={(e) => {
+              const drag = dragRef.current;
+              if (!drag || drag.id !== a.id || drag.pointerId !== e.pointerId) return;
+              if (drag.moved) ignoreClickRef.current = a.id;
+              dragRef.current = null;
+              setDraggingId(null);
+            }}
+            onPointerCancel={() => {
+              dragRef.current = null;
+              setDraggingId(null);
+            }}
             aria-label={`annotation ${a.refCode}: ${a.comment}`}
             className={cn(
-              "group/bubble absolute cursor-pointer border bg-[#fffdf5] text-[#111827] shadow-sm transition-colors hover:z-[2]",
+              "group/bubble absolute border bg-background text-foreground shadow-sm transition-colors hover:z-[2]",
               muted ? "pointer-events-none" : "pointer-events-auto",
+              moveEnabled && (dragging ? "cursor-grabbing" : "cursor-grab"),
+              !moveEnabled && "cursor-pointer",
               selected
                 ? "z-[2] border-foreground"
                 : "z-[1] border-border hover:border-foreground/50",
@@ -155,7 +205,7 @@ export function CommentLayer({
           >
             <div className="flex items-center gap-1 px-1.5 py-1">
               <span
-                className="label-mono shrink-0 bg-[#111827] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
+                className="label-mono shrink-0 border border-foreground bg-background px-1.5 py-0.5 text-[10px] font-semibold leading-none text-foreground"
               >
                 {a.refCode}
               </span>
@@ -168,7 +218,7 @@ export function CommentLayer({
                 }}
                 aria-label={`edit ${a.refCode}`}
                 className={cn(
-                  "p-0.5 text-[#374151] transition-opacity hover:text-[#111827]",
+                  "p-0.5 text-foreground transition-opacity hover:bg-muted",
                   selected ? "opacity-100" : "opacity-0 group-hover/bubble:opacity-100",
                 )}
               >
@@ -182,7 +232,7 @@ export function CommentLayer({
                 }}
                 aria-label={`delete ${a.refCode}`}
                 className={cn(
-                  "p-0.5 text-[#374151] transition-opacity hover:text-[#7f1d1d]",
+                  "p-0.5 text-foreground transition-opacity hover:text-destructive",
                   selected ? "opacity-100" : "opacity-0 group-hover/bubble:opacity-100",
                 )}
               >
@@ -191,9 +241,8 @@ export function CommentLayer({
             </div>
             <p
               className={cn(
-                "whitespace-pre-wrap break-words px-1.5 pb-1.5 text-xs leading-snug text-[#111827]",
+                "whitespace-pre-wrap break-words px-1.5 pb-1.5 text-xs leading-snug text-foreground",
                 !selected && "line-clamp-3",
-                expanded ? "block" : "hidden",
               )}
             >
               {a.comment}

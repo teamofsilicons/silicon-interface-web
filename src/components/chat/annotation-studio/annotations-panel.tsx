@@ -64,7 +64,7 @@ export function AnnotationsPanel({ annotations, isPdf, selectedId, onSelect, onE
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="label-mono shrink-0 bg-foreground px-1.5 py-0.5 text-[11px] font-semibold text-background">
+                  <span className="label-mono shrink-0 border border-foreground bg-background px-1.5 py-0.5 text-[11px] font-semibold text-foreground">
                     {a.refCode}
                   </span>
                   {isPdf && (

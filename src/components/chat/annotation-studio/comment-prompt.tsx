@@ -11,8 +11,6 @@ interface Props {
   title?: string;
   onSubmit: (comment: string) => void;
   onCancel: () => void;
-  onAddMarkup?: (commentDraft: string) => void;
-  markupCount?: number;
 }
 
 export const COMMENT_PROMPT_WIDTH = 300;
@@ -32,8 +30,6 @@ export function CommentPrompt({
   title = "new markup",
   onSubmit,
   onCancel,
-  onAddMarkup,
-  markupCount = 1,
 }: Props) {
   const [text, setText] = React.useState(initial);
   const ref = React.useRef<HTMLTextAreaElement | null>(null);
@@ -78,17 +74,6 @@ export function CommentPrompt({
         className="w-full resize-none border bg-card px-2 py-1.5 text-sm outline-none focus:border-foreground"
       />
       <div className="mt-2 flex items-center justify-end gap-2">
-        {onAddMarkup && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onAddMarkup(text)}
-            aria-label="add another markup to this annotation"
-          >
-            add mark
-            {markupCount > 1 ? ` (${markupCount})` : ""}
-          </Button>
-        )}
         <Button size="sm" variant="ghost" onClick={onCancel} aria-label="cancel comment">
           cancel
         </Button>

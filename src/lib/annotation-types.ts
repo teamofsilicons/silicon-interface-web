@@ -53,7 +53,7 @@ export interface Annotation {
 /** Markup color, shared by the live overlay and the flatten export so the
  *  attached image matches exactly what was drawn on screen. (Stroke/pin/label
  *  sizes are computed proportionally in `annotation-draw.ts`.) */
-export const MARKUP_COLOR = "#e5484d"; // vivid red — reads on light documents
+export const MARKUP_COLOR = "#f4c44e"; // warm marker yellow, paired with ink outlines
 
 /** New stable id for an annotation. */
 export function newAnnotationId(): string {
@@ -62,6 +62,8 @@ export function newAnnotationId(): string {
 }
 
 export function annotationMarkups(a: Annotation): MarkupDraft[] {
-  if (Array.isArray(a.markups) && a.markups.length > 0) return a.markups;
-  return [{ geometry: a.geometry, color: a.color || MARKUP_COLOR }];
+  if (Array.isArray(a.markups) && a.markups.length > 0) {
+    return a.markups.map((markup) => ({ ...markup, color: MARKUP_COLOR }));
+  }
+  return [{ geometry: a.geometry, color: MARKUP_COLOR }];
 }

@@ -23,12 +23,12 @@ import { generateAnnotatedImage } from "@/lib/annotation-image";
 import { generateAnnotatedPdf } from "@/lib/annotation-pdf";
 import {
   newAnnotationId,
+  MARKUP_COLOR,
   type Annotation,
   type Geometry,
   type MarkupDraft,
   type ToolKind,
 } from "@/lib/annotation-types";
-import { chooseMarkupColor } from "@/lib/annotation-color";
 import { uploadMediaBlob } from "@/lib/media-upload";
 import { getPdfPageCount, releasePdfDocument, renderPdfPage } from "@/lib/pdf-render";
 import type { AnnotationDraft, AnnotationItem } from "@/lib/types";
@@ -94,7 +94,7 @@ export function AnnotationStudio({
   const label = filename?.trim() || "annotate";
 
   // --- tool + annotations ---------------------------------------------------
-  const [tool, setTool] = React.useState<ToolKind>("pen");
+  const [tool, setTool] = React.useState<ToolKind>("pin");
   // Restore any autosaved draft for this (room, attachment) on mount.
   const [annotations, setAnnotations] = React.useState<Annotation[]>(() =>
     loadAnnotationSession(roomId, sourceMediaId),
@@ -102,8 +102,6 @@ export function AnnotationStudio({
   // Finished-but-uncommitted markups awaiting one required shared comment.
   const [pending, setPending] = React.useState<MarkupDraft[]>([]);
   const [pendingPage, setPendingPage] = React.useState(0);
-  const [groupingMore, setGroupingMore] = React.useState(false);
-  const [pendingCommentDraft, setPendingCommentDraft] = React.useState("");
   // Existing annotation whose comment is being edited (mutually exclusive with
   // `pending`).
   const [editingId, setEditingId] = React.useState<string | null>(null);
@@ -111,11 +109,8 @@ export function AnnotationStudio({
   // Shown when closing with unattached annotations (anti-loss guard).
   const [confirmClose, setConfirmClose] = React.useState(false);
   const [zoom, setZoom] = React.useState(1);
-  // On-document comment bubbles: full cards by default, collapsible to chips
-  // when they get in the way of reading/drawing.
-  const [commentsCollapsed, setCommentsCollapsed] = React.useState(false);
   const hasPending = pending.length > 0;
-  const promptOpen = (hasPending && !groupingMore) || editingId !== null;
+  const promptOpen = hasPending || editingId !== null;
 
   // Autosave: persist the draft whenever it changes (external-system sync, not
   // React state — so it's the correct use of an effect).
@@ -195,18 +190,12 @@ export function AnnotationStudio({
   const resetZoom = React.useCallback(() => setZoom(1), []);
 
   // Finishing a markup opens the required-comment gate rather than committing.
-  const onMarkup = React.useCallback(async (geometry: Geometry, page = 0, imageSrc = url) => {
-    if (pending.length > 0 && page !== pendingPage) {
-      toast.error("grouped markups must stay on the same page for now");
-      return;
-    }
+  const onMarkup = React.useCallback((geometry: Geometry, page = 0) => {
     setEditingId(null);
     setSelectedId(null); // a fresh markup shifts focus off any prior selection
     setPendingPage(page);
-    const color = await chooseMarkupColor({ imageSrc, geometry });
-    setPending((prev) => [...prev, { geometry, color }]);
-    setGroupingMore(false);
-  }, [pending.length, pendingPage, url]);
+    setPending([{ geometry, color: MARKUP_COLOR }]);
+  }, []);
 
   const goToPage = React.useCallback(
     (page0: number) => {
@@ -232,8 +221,6 @@ export function AnnotationStudio({
         setAnnotations((prev) => [...prev, { ...a, refCode: annotationLabel(prev.length) }]);
         setSelectedId(id);
         setPending([]);
-        setGroupingMore(false);
-        setPendingCommentDraft("");
       } else if (editingId) {
         setAnnotations((prev) =>
           prev.map((a) => (a.id === editingId ? { ...a, comment } : a)),
@@ -245,9 +232,7 @@ export function AnnotationStudio({
   );
 
   const cancelComment = React.useCallback(() => {
-    setPending([]); // discard the pending markup group
-    setGroupingMore(false);
-    setPendingCommentDraft("");
+    setPending([]); // discard the pending markup
     setEditingId(null);
   }, []);
 
@@ -264,8 +249,6 @@ export function AnnotationStudio({
       setSelectedId(a.id);
       goToPage(a.page);
       setPending([]);
-      setGroupingMore(false);
-      setPendingCommentDraft("");
       setEditingId(a.id);
     },
     [goToPage],
@@ -287,10 +270,6 @@ export function AnnotationStudio({
     if (pending.length > 0) {
       setPending((prev) => {
         const next = prev.slice(0, -1);
-        if (next.length === 0) {
-          setGroupingMore(false);
-          setPendingCommentDraft("");
-        }
         return next;
       });
       return;
@@ -304,15 +283,25 @@ export function AnnotationStudio({
   const attach = React.useCallback(async () => {
     if (annotations.length === 0 || attaching) return;
     setAttaching(true);
+    let sourceObjectUrl: string | null = null;
     try {
       const baseName = (filename || "attachment").replace(/\.[^.]+$/, "");
+      let exportUrl = url;
+      try {
+        const sourceBlob = await api.mediaContent(sourceMediaId);
+        sourceObjectUrl = URL.createObjectURL(sourceBlob);
+        exportUrl = sourceObjectUrl;
+      } catch {
+        // Local/dev media may not have object-store bytes behind Glass. Its
+        // original URL remains a valid fallback when it is already readable.
+      }
       // Generate ONE annotated file: a PDF (markup + comments burned onto the
       // original via vector overlay) for a PDF source, or an annotated PNG for
       // an image source. Upload it as a normal file.
       const isPdfSource = isPdf;
       const blob = isPdfSource
-        ? await generateAnnotatedPdf({ url, annotations, sourceFilename: filename || "attachment" })
-        : await generateAnnotatedImage({ url, annotations });
+        ? await generateAnnotatedPdf({ url: exportUrl, annotations, sourceFilename: filename || "attachment" })
+        : await generateAnnotatedImage({ url: exportUrl, annotations });
       const annotatedMime = isPdfSource ? "application/pdf" : "image/png";
       const annotatedName = `${baseName}_annotated.${isPdfSource ? "pdf" : "png"}`;
       const annotatedMediaId = await uploadMediaBlob({
@@ -331,13 +320,17 @@ export function AnnotationStudio({
         markups: a.markups?.map((m) => ({ geometry: m.geometry, color: m.color })),
         comment: a.comment,
       }));
-      const draft = {
+      const feedbackText = `Feedback:\n${items
+        .map((item) => `${item.ref_code}: ${item.comment}`)
+        .join("\n")}`;
+      const draft: AnnotationDraft = {
         sourceMediaId,
         sourceFilename: filename || "attachment",
         annotatedMediaId,
         annotatedMime,
         annotatedName,
         annotations: items,
+        feedbackText,
         ...(sourceEventId ? { sourceEventId } : {}),
       };
 
@@ -361,6 +354,11 @@ export function AnnotationStudio({
           ...(sourceEventId ? { reply_to_event_id: sourceEventId } : {}),
         },
       );
+      await api.sendEvent(roomId, {
+        type: "m.text",
+        content: { body: feedbackText },
+        ...(sourceEventId ? { reply_to_event_id: sourceEventId } : {}),
+      });
       clearAnnotationSession(roomId, sourceMediaId);
       setAnnotations([]);
       setConfirmClose(false);
@@ -370,6 +368,7 @@ export function AnnotationStudio({
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : "couldn't attach annotations");
     } finally {
+      if (sourceObjectUrl) URL.revokeObjectURL(sourceObjectUrl);
       setAttaching(false);
     }
   }, [
@@ -392,21 +391,23 @@ export function AnnotationStudio({
   const commentLayer = React.useMemo(
     () => ({
       selectedId,
-      collapsed: commentsCollapsed,
+      moveEnabled: tool === "move",
       hideId: editingId,
       muted: promptOpen,
       onSelect: selectAnnotation,
       onEdit: editAnnotation,
       onDelete: deleteAnnotation,
+      onMove: moveExistingAnnotation,
     }),
     [
       selectedId,
-      commentsCollapsed,
+      tool,
       editingId,
       promptOpen,
       selectAnnotation,
       editAnnotation,
       deleteAnnotation,
+      moveExistingAnnotation,
     ],
   );
 
@@ -419,18 +420,11 @@ export function AnnotationStudio({
     promptOpen && commentAnchor
       ? {
           promptKey: editingAnnotation ? `edit:${editingAnnotation.id}` : `new:${pendingPage}:${pending.length}`,
-          initial: editingAnnotation ? editingAnnotation.comment : pendingCommentDraft,
+          initial: editingAnnotation ? editingAnnotation.comment : "",
           title: editingAnnotation ? editingAnnotation.refCode : "new markup",
           anchor: commentAnchor,
           onSubmit: submitComment,
           onCancel: cancelComment,
-          onAddMarkup: editingAnnotation
-            ? undefined
-            : (commentDraft: string) => {
-                setPendingCommentDraft(commentDraft);
-                setGroupingMore(true);
-              },
-          markupCount: pending.length,
         }
       : null;
 
@@ -442,10 +436,6 @@ export function AnnotationStudio({
         onOpenChange(true);
         return;
       }
-      if (hasPending && groupingMore) {
-        setGroupingMore(false);
-        return;
-      }
       if (promptOpen) return; // ignore while a comment gate is open
       if (annotations.length > 0 || hasPending) {
         setConfirmClose(true);
@@ -454,7 +444,7 @@ export function AnnotationStudio({
       clearRenderedMedia();
       onOpenChange(false);
     },
-    [onOpenChange, promptOpen, annotations.length, hasPending, groupingMore, clearRenderedMedia],
+    [onOpenChange, promptOpen, annotations.length, hasPending, clearRenderedMedia],
   );
 
   return (
@@ -471,10 +461,7 @@ export function AnnotationStudio({
         onEscapeKeyDown={(e) => {
           // Escape peels back one layer at a time instead of nuking the studio:
           // comment gate → confirm-close guard → (default) close attempt.
-          if (groupingMore && hasPending) {
-            e.preventDefault();
-            setGroupingMore(false);
-          } else if (promptOpen) {
+          if (promptOpen) {
             e.preventDefault();
             cancelComment();
           } else if (confirmClose) {
@@ -515,11 +502,6 @@ export function AnnotationStudio({
               setTool("move");
               return;
             }
-            if (key === "c") {
-              e.preventDefault();
-              setCommentsCollapsed((v) => !v);
-              return;
-            }
           }
           if (key === "+" || key === "=") {
             e.preventDefault();
@@ -551,8 +533,6 @@ export function AnnotationStudio({
           onZoomIn={zoomIn}
           onZoomOut={zoomOut}
           onZoomReset={resetZoom}
-          commentsCollapsed={commentsCollapsed}
-          onToggleComments={() => setCommentsCollapsed((v) => !v)}
           onAttach={attach}
           canAttach={annotations.length > 0 && !promptOpen}
           attaching={attaching}
@@ -577,7 +557,7 @@ export function AnnotationStudio({
                   label={label}
                   annotations={annotations}
                   tool={tool}
-                  onCommit={(page, geometry, imageSrc) => void onMarkup(geometry, page, imageSrc)}
+                  onCommit={(page, geometry) => onMarkup(geometry, page)}
                   onMove={moveExistingAnnotation}
                   onSelect={selectAnnotation}
                   pending={pending.length > 0 ? { page: pendingPage, markups: pending } : null}
@@ -608,7 +588,7 @@ export function AnnotationStudio({
                 pageH={imgDims.h}
                 annotations={imageAnnotations}
                 tool={tool}
-                onCommit={(geometry) => void onMarkup(geometry, 0, url)}
+                onCommit={(geometry) => onMarkup(geometry, 0)}
                 onMove={moveExistingAnnotation}
                 onSelect={selectAnnotation}
                 pending={pending}
@@ -643,8 +623,6 @@ export function AnnotationStudio({
               setConfirmClose(false);
               setAnnotations([]);
               setPending([]);
-              setGroupingMore(false);
-              setPendingCommentDraft("");
               setEditingId(null);
               setSelectedId(null);
               clearAnnotationSession(roomId, sourceMediaId);

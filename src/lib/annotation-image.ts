@@ -13,7 +13,7 @@ import { MARKUP_COLOR, type Annotation } from "./annotation-types";
  * annotation-flatten.ts) so the canvas is never tainted and `toBlob` works.
  */
 
-const CALLOUT_BG = "#fff8dc";
+const CALLOUT_BG = "#ede8e0";
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -173,7 +173,7 @@ function drawCallout(ctx: CanvasRenderingContext2D, a: Annotation, W: number, H:
   ctx.fillStyle = CALLOUT_BG;
   ctx.fillRect(x, y, boxW, boxH);
   ctx.globalAlpha = 1;
-  ctx.strokeStyle = a.color || MARKUP_COLOR;
+  ctx.strokeStyle = "#1a1a1a";
   ctx.lineWidth = 1;
   ctx.strokeRect(x, y, boxW, boxH);
   ctx.fillStyle = "#1a1a1a";

@@ -88,7 +88,14 @@ export default function PrivacyPage() {
           </li>
           <li>
             To let the AI agents (&quot;silicons&quot;) you or your team converse with
-            respond to the messages you send them.
+            respond to the messages you send them. Silicons are clearly labeled as AI
+            in the apps; messages you send in a conversation that includes a silicon
+            are processed by the AI model providers listed below to generate its
+            responses.
+          </li>
+          <li>
+            To transcribe the voice notes you record and convert silicon replies to
+            speech, using the speech providers listed below.
           </li>
           <li>To keep accounts secure (one-time login codes, abuse prevention).</li>
           <li>To handle team billing, for customers on paid team plans.</li>
@@ -118,6 +125,22 @@ export default function PrivacyPage() {
           <li>
             <strong>Dodo Payments</strong> — payment processing for team billing (we
             never see your card details).
+          </li>
+          <li>
+            <strong>Anthropic and OpenAI</strong> — AI model providers that power the
+            silicons. Messages sent in a conversation that includes a silicon (and
+            attachments you share with it) are processed by these providers to
+            generate the silicon&apos;s responses. Conversations that do not include
+            a silicon are never sent to these providers.
+          </li>
+          <li>
+            <strong>OpenAI Whisper, ElevenLabs, and Deepgram</strong> — speech-to-text
+            for the voice notes you record.
+          </li>
+          <li>
+            <strong>Google Gemini and ElevenLabs</strong> — text-to-speech for spoken
+            silicon replies, and the assistant that helps teams set up their
+            infrastructure.
           </li>
         </ul>
         <p>

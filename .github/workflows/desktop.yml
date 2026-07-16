@@ -103,6 +103,19 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
       - name: Verify update artifacts
         run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist ${{ matrix.platform }} ${{ matrix.arch }}
+      - name: Prove unsigned Windows candidates fail the release signature gate
+        if: ${{ matrix.target == 'win' }}
+        shell: pwsh
+        run: |
+          $output = & node desktop/scripts/smoke-windows-package.mjs desktop/dist --require-signature 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            throw "Unsigned engineering application unexpectedly passed the Authenticode gate"
+          }
+          $output | Write-Host
+          if ($output -notmatch 'Authenticode verification failed') {
+            throw "Signature gate failed for an unexpected reason"
+          }
+          Write-Host "windows-signature-smoke: unsigned candidate correctly rejected"
       - name: Install Linux runtime-smoke dependencies
         if: ${{ matrix.target == 'linux' }}
         run: |

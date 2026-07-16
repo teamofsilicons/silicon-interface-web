@@ -107,12 +107,19 @@ jobs:
         if: ${{ matrix.target == 'win' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
           $output = & node desktop/scripts/smoke-windows-package.mjs desktop/dist --require-signature 2>&1
-          if ($LASTEXITCODE -eq 0) {
+          $signatureExitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($signatureExitCode -eq 0) {
             throw "Unsigned engineering application unexpectedly passed the Authenticode gate"
           }
-          $output | Write-Host
-          if ($output -notmatch 'Authenticode verification failed') {
+          $outputText = $output | Out-String
+          $outputText | Write-Host
+          if ($outputText -notmatch 'Authenticode verification failed') {
             throw "Signature gate failed for an unexpected reason"
           }
           Write-Host "windows-signature-smoke: unsigned candidate correctly rejected"

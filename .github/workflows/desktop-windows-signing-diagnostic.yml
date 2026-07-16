@@ -78,7 +78,7 @@ jobs:
           )
           Write-Host 'checkpoint: cer'
           $publicCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
-          foreach ($storeName in @('Root', 'TrustedPublisher')) {
+          foreach ($storeName in @('TrustedPeople', 'TrustedPublisher')) {
             Write-Host "checkpoint: opening $storeName"
             $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
               $storeName,
@@ -93,4 +93,24 @@ jobs:
               $store.Close()
             }
           }
+          $probePath = Join-Path $env:RUNNER_TEMP 'silicon-engineering-signature-probe.ps1'
+          [IO.File]::WriteAllText($probePath, "Write-Output 'engineering signature probe'`n")
+          Write-Host 'checkpoint: signing probe'
+          $signedProbe = Set-AuthenticodeSignature `
+            -FilePath $probePath `
+            -Certificate $certificate `
+            -HashAlgorithm SHA256 `
+            -TimestampServer 'http://timestamp.digicert.com'
+          if ($signedProbe.Status -ne 'Valid') {
+            throw "Probe signing failed: $($signedProbe.Status) - $($signedProbe.StatusMessage)"
+          }
+          Write-Host 'checkpoint: signed probe'
+          $verifiedProbe = Get-AuthenticodeSignature -FilePath $probePath
+          if ($verifiedProbe.Status -ne 'Valid') {
+            throw "Probe verification failed: $($verifiedProbe.Status) - $($verifiedProbe.StatusMessage)"
+          }
+          if ($null -eq $verifiedProbe.TimeStamperCertificate) {
+            throw 'Probe signature has no trusted timestamp'
+          }
+          Write-Host 'checkpoint: verified probe'
           Write-Host 'checkpoint: PASS'

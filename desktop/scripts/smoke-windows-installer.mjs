@@ -143,9 +143,11 @@ function registeredInstallLocation() {
 async function waitForRegisteredInstall(timeoutMs = INSTALL_APPEAR_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
+  let observedInstallDirectory = null;
   while (Date.now() < deadline) {
     const installDirectory = registeredInstallLocation();
     if (installDirectory) {
+      observedInstallDirectory = installDirectory;
       try {
         return {
           installDirectory,
@@ -157,7 +159,55 @@ async function waitForRegisteredInstall(timeoutMs = INSTALL_APPEAR_TIMEOUT_MS) {
     }
     await sleep(200);
   }
+  if (observedInstallDirectory) {
+    console.error(
+      `windows-installer-smoke: registered directory contents:\n${await boundedDirectoryListing(observedInstallDirectory)}`,
+    );
+    const defender = windowsDefenderDiagnostics();
+    if (defender) console.error(`windows-installer-smoke: Defender diagnostics: ${defender}`);
+  }
   throw lastError ?? new Error(`NSIS did not register ${INSTALL_REGISTRY_KEY}`);
+}
+
+async function boundedDirectoryListing(root, maxEntries = 160) {
+  const rows = [];
+  const pending = [{ directory: root, depth: 0 }];
+  while (pending.length > 0 && rows.length < maxEntries) {
+    const { directory, depth } = pending.shift();
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      rows.push(`${path.relative(root, directory) || "."}: ${error.code || error.message}`);
+      continue;
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (rows.length >= maxEntries) break;
+      const absolute = path.join(directory, entry.name);
+      const relative = path.relative(root, absolute);
+      rows.push(`${relative}${entry.isDirectory() ? "/" : ""}`);
+      if (entry.isDirectory() && depth < 3) pending.push({ directory: absolute, depth: depth + 1 });
+    }
+  }
+  if (pending.length > 0 || rows.length >= maxEntries) rows.push("… listing truncated …");
+  return rows.length > 0 ? rows.join("\n") : "(empty)";
+}
+
+function windowsDefenderDiagnostics() {
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$rows = Get-MpThreatDetection | Sort-Object InitialDetectionTime -Descending | Select-Object -First 5 ThreatID,ActionSuccess,InitialDetectionTime,Resources",
+    "if ($rows) { $rows | ConvertTo-Json -Depth 4 -Compress } else { Write-Output '[]' }",
+  ].join("\n");
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const result = spawnSync(
+    "pwsh.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+    { encoding: "utf8", timeout: 15_000, windowsHide: true },
+  );
+  if (result.error || result.signal || result.status !== 0) return "unavailable";
+  return result.stdout.trim() || "[]";
 }
 
 function run(command, args) {

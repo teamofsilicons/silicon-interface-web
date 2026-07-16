@@ -183,6 +183,7 @@ jobs:
           "WINDOWS_PUBLISHER_NAME=$publisher" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SILICON_ENGINEERING_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Package
+        id: package
         run: |
           pnpm -C desktop build
           pnpm -C desktop exec electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish never
@@ -235,6 +236,7 @@ jobs:
         if: ${{ matrix.target == 'linux' }}
         run: node desktop/scripts/smoke-linux-package.mjs desktop/dist --format deb --deb-mode install
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() && steps.package.outcome == 'success' }}
         with:
           name: silicon-interface-${{ matrix.target }}-${{ matrix.arch }}
           path: desktop/dist/*

@@ -198,9 +198,10 @@ To activate that path after SSL.com finishes identity validation:
    `SSL_ESIGNER_TOTP_SECRET`.
 4. Add the Actions variable `WINDOWS_SIGNING_PROVIDER` with the exact value
    `sslcom-esigner`.
-5. Run a private release candidate and confirm the workflow's Authenticode,
-   installed-app launch, installer, and uninstall gates before creating the
-   public tag.
+5. Run **Desktop signing preflight** with `platform: windows`. It signs but does
+   not publish, and must pass Authenticode signer/timestamp checks, packaged and
+   installed-app launch, installer, uninstaller, and removal gates before the
+   public tag is created.
 
 The existing `WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` path remains only
 for a CA-provided, CA/B-compliant PFX usable by the hosted runner. Leave

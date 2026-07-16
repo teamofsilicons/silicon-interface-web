@@ -232,6 +232,8 @@ Windows cloud-signing decision are documented in
 [`SIGNING_SETUP.md`](SIGNING_SETUP.md). Complete that guide before adding any
 secret below; modern Windows public-trust keys are commonly cloud-HSM backed and
 may require a provider-specific workflow instead of the classic `.pfx` path.
+The manual **Desktop signing preflight** workflow can independently exercise
+either the macOS or Windows signing path without publishing a release.
 
 Add these encrypted Actions secrets:
 

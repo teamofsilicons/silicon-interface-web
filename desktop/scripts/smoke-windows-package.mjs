@@ -262,7 +262,13 @@ export function verifyAuthenticodeSignature(executablePath) {
     "if ($signature.Status -ne 'Valid') {",
     "  throw \"Invalid Authenticode signature: $($signature.Status) - $($signature.StatusMessage)\"",
     "}",
-    "Write-Output $signature.SignerCertificate.Thumbprint",
+    "if ($null -eq $signature.SignerCertificate) {",
+    "  throw 'Authenticode signature has no signer certificate'",
+    "}",
+    "if ($null -eq $signature.TimeStamperCertificate) {",
+    "  throw 'Authenticode signature has no trusted timestamp'",
+    "}",
+    "Write-Output \"$($signature.SignerCertificate.Thumbprint):$($signature.TimeStamperCertificate.Thumbprint)\"",
   ].join("\n");
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   const result = spawnSync(
@@ -281,7 +287,7 @@ export function verifyAuthenticodeSignature(executablePath) {
     const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
     fail(`Authenticode verification failed${output ? `:\n${output}` : ""}`);
   }
-  if (!result.stdout.trim()) fail("Authenticode verification returned no signer thumbprint");
+  if (!result.stdout.trim()) fail("Authenticode verification returned no signer/timestamp thumbprints");
 }
 
 async function verifyPortableExecutable(executablePath) {

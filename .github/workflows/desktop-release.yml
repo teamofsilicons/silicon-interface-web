@@ -202,10 +202,22 @@ jobs:
           $applications = Get-ChildItem "desktop/dist-${{ matrix.arch }}" -Recurse -File -Filter "Silicon Interface.exe" |
             Where-Object { $_.Directory.Name -match '^win(?:-[a-z0-9]+)?-unpacked$' }
           if ($applications.Count -ne 1) { throw "Expected exactly one unpacked application, found $($applications.Count)" }
+          $signerSubject = $null
           foreach ($candidate in @($installers) + @($applications)) {
             $signature = Get-AuthenticodeSignature $candidate.FullName
             if ($signature.Status -ne "Valid") {
               throw "Invalid signature on $($candidate.FullName): $($signature.Status)"
+            }
+            if ($null -eq $signature.SignerCertificate) {
+              throw "Signature on $($candidate.FullName) has no signer certificate"
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "Signature on $($candidate.FullName) has no trusted timestamp"
+            }
+            if ($null -eq $signerSubject) {
+              $signerSubject = $signature.SignerCertificate.Subject
+            } elseif ($signature.SignerCertificate.Subject -ne $signerSubject) {
+              throw "Windows artifacts were signed by different publishers"
             }
           }
       - name: Launch signed Windows application

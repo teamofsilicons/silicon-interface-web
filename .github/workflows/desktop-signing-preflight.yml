@@ -2,6 +2,15 @@ name: Desktop signing preflight
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Signing path to verify without publishing
+        required: true
+        default: macos
+        type: choice
+        options:
+          - macos
+          - windows
 
 permissions:
   contents: read
@@ -13,6 +22,7 @@ concurrency:
 jobs:
   macos:
     name: macOS sign, notarize, and verify
+    if: ${{ inputs.platform == 'macos' }}
     runs-on: macos-14
     timeout-minutes: 45
     env:
@@ -98,6 +108,70 @@ jobs:
           name: desktop-macos-signing-preflight
           path: |
             desktop/dist-signing-preflight/*.dmg
+            desktop/dist-signing-preflight/*.zip
+            desktop/dist-signing-preflight/*.yml
+            desktop/dist-signing-preflight/*.blockmap
+          if-no-files-found: warn
+          retention-days: 3
+
+  windows:
+    name: Windows sign, install, launch, and verify
+    if: ${{ inputs.platform == 'windows' }}
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER }}
+      WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      SSL_ESIGNER_USERNAME: ${{ secrets.SSL_ESIGNER_USERNAME }}
+      SSL_ESIGNER_PASSWORD: ${{ secrets.SSL_ESIGNER_PASSWORD }}
+      SSL_ESIGNER_CREDENTIAL_ID: ${{ secrets.SSL_ESIGNER_CREDENTIAL_ID }}
+      SSL_ESIGNER_TOTP_SECRET: ${{ secrets.SSL_ESIGNER_TOTP_SECRET }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
+        if: ${{ env.WINDOWS_SIGNING_PROVIDER == 'sslcom-esigner' }}
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: pnpm install --frozen-lockfile
+      - name: Verify and install SSL.com CodeSignTool
+        if: ${{ env.WINDOWS_SIGNING_PROVIDER == 'sslcom-esigner' }}
+        shell: pwsh
+        run: desktop/scripts/setup-esigner.ps1
+      - run: node desktop/scripts/check-release-env.mjs win
+      - run: pnpm -C desktop build
+      - name: Build and sign native candidate
+        shell: pwsh
+        run: |
+          $arguments = @(
+            "--win", "--x64",
+            "--publish", "never",
+            "--config.directories.output=dist-signing-preflight"
+          )
+          if ($env:WINDOWS_SIGNING_PROVIDER -eq "sslcom-esigner") {
+            $arguments += "--config.win.signtoolOptions.sign=scripts/esigner-sign.cjs"
+          }
+          pnpm -C desktop exec electron-builder @arguments
+      - name: Verify update artifacts
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight win32 x64
+      - name: Launch signed packaged application
+        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist-signing-preflight --require-signature
+      - name: Install, launch, and uninstall signed package
+        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist-signing-preflight --require-signature
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: desktop-windows-signing-preflight
+          path: |
+            desktop/dist-signing-preflight/*.exe
             desktop/dist-signing-preflight/*.zip
             desktop/dist-signing-preflight/*.yml
             desktop/dist-signing-preflight/*.blockmap

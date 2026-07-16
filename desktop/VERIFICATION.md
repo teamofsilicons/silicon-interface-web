@@ -365,6 +365,22 @@ artifacts `8387266251` and `8387331646`. The subsequent `34e3323` commit changes
 only release provenance enforcement, documentation, and its contract test; it
 does not change macOS package, signing, notarization, or preflight inputs.
 
+The exact arm64 artifact `8387266251` was then downloaded from GitHub Actions
+to the physical Apple Silicon development Mac. The GitHub archive digest was
+`sha256:95fec0c31c0fb4e240fc414a664bae7528717faec0488eefe97501149e93c2ce`;
+inside it, the DMG and ZIP SHA-256 values were respectively
+`336531de980e2c79565b2bcc1c5aa4cb913e4547f7ba907d7697c2c2aad0976c`
+and `8aeb5b4d3837fcd758245a6342816ee7ea389fb6fb83466dcff6014b7cd90971`.
+Updater metadata matched both exact files. The DMG checksum passed, and the
+applications from both the read-only DMG and untouched ZIP passed deep strict
+code-sign verification, stapler validation, and Gatekeeper with source
+`Notarized Developer ID`. The executable was native arm64 and the release
+signature resolved to `Developer ID Application: Shubham Gupta (LTBSK59BJ2)`
+with the expected team, secure timestamp, and hardened runtime. Finally, the
+exact ZIP application reported `https://interface.teamofsilicons.com/` and
+remained healthy through the ten-second local stability window without a
+Gatekeeper bypass or signature mutation.
+
 Artifact `8382689613` from the prior exact-certificate arm64 preflight was also
 downloaded to the local Apple Silicon Mac, its DMG checksum verified, mounted
 read-only, copied to an isolated Applications directory, and re-checked with

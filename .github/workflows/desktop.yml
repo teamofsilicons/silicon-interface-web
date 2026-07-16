@@ -111,6 +111,7 @@ jobs:
       - name: Create isolated Windows engineering signing identity
         if: ${{ matrix.target == 'win' }}
         shell: pwsh
+        timeout-minutes: 2
         run: |
           $ErrorActionPreference = 'Stop'
           $publisher = 'Silicon Interface Engineering CI'
@@ -164,10 +165,19 @@ jobs:
             $cerPath,
             $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
           )
-          & certutil.exe -user -f -addstore Root $cerPath | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not trust engineering root certificate' }
-          & certutil.exe -user -f -addstore TrustedPublisher $cerPath | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not trust engineering publisher certificate' }
+          $publicCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
+          foreach ($storeName in @('Root', 'TrustedPublisher')) {
+            $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+              $storeName,
+              [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+            )
+            try {
+              $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              $store.Add($publicCertificate)
+            } finally {
+              $store.Close()
+            }
+          }
           "WIN_CSC_LINK=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "WIN_CSC_KEY_PASSWORD=$passwordText" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "WINDOWS_PUBLISHER_NAME=$publisher" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -235,8 +245,23 @@ jobs:
         shell: pwsh
         run: |
           if ($env:SILICON_ENGINEERING_CERT_THUMBPRINT) {
-            & certutil.exe -user -delstore Root $env:SILICON_ENGINEERING_CERT_THUMBPRINT | Out-Null
-            & certutil.exe -user -delstore TrustedPublisher $env:SILICON_ENGINEERING_CERT_THUMBPRINT | Out-Null
+            foreach ($storeName in @('Root', 'TrustedPublisher')) {
+              $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+                $storeName,
+                [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+              )
+              try {
+                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                $matches = $store.Certificates.Find(
+                  [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+                  $env:SILICON_ENGINEERING_CERT_THUMBPRINT,
+                  $false
+                )
+                foreach ($certificate in $matches) { $store.Remove($certificate) }
+              } finally {
+                $store.Close()
+              }
+            }
           }
           Remove-Item (Join-Path $env:RUNNER_TEMP 'silicon-engineering-signing.pfx') -Force -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $env:RUNNER_TEMP 'silicon-engineering-signing.cer') -Force -ErrorAction SilentlyContinue

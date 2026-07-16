@@ -57,6 +57,22 @@ The command never reads `.env.local` or `.vercel/.env.production.local` into the
 archive. Vercel supplies production environment variables from the linked
 project. Do not replace this workflow with a direct `vercel --prod` command.
 
+## Git-triggered web builds
+
+Vercel runs `node scripts/vercel-ignore-build.mjs` before a Git-triggered web
+build. A normal single-parent commit is skipped only when every changed path is
+under `desktop/`, `.github/`, `docs/`, or `tests/`. These paths cannot change
+the deployed Next.js application. Changes to source, public assets, root
+configuration, dependencies, lockfiles, or deployment tooling always build.
+
+The decision deliberately fails open. CLI deployments without
+`VERCEL_GIT_COMMIT_SHA`, root or merge commits, unavailable Git history,
+invalid commit identities, ambiguous paths, and unreadable or empty diffs all
+proceed with a web build. Rename detection is disabled so moving a web file into
+an ignored directory still includes the deleted web path and triggers a build.
+The manual production command above therefore always performs its Vercel build
+when it has no Vercel Git commit environment.
+
 ## Prerequisites
 
 - Node.js 24 recommended (a different local major is recorded as a parity

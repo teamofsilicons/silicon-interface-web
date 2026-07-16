@@ -338,12 +338,20 @@ async function terminateProcessGroup(child) {
   };
 
   signalGroup("SIGTERM");
-  if (!(await waitForExit(child, TERMINATION_GRACE_MS))) {
+  if (await waitForExit(child, TERMINATION_GRACE_MS)) {
+    // The leader can exit before a Chromium helper drains. This branch has not
+    // yet sent SIGKILL, so make one bounded best effort for the remaining group.
     signalGroup("SIGKILL");
-    await waitForExit(child, TERMINATION_GRACE_MS);
+    return;
   }
-  // The group may retain a Chromium helper after its leader exits.
+
+  // SIGTERM did not stop the leader. A single group SIGKILL covers the leader
+  // and every helper; do not send it again after the group has disappeared,
+  // because macOS can report EPERM for that completed teardown race.
   signalGroup("SIGKILL");
+  if (!(await waitForExit(child, TERMINATION_GRACE_MS))) {
+    fail("packaged macOS process did not exit after SIGKILL");
+  }
 }
 
 function parseArguments(argv) {

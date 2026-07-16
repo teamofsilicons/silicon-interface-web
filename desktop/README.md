@@ -189,15 +189,17 @@ runner. Before stable promotion, run this physical acceptance slice on every OS:
 
 ## Release workflow
 
-`.github/workflows/desktop-release.yml` is the only production release path. It:
+`.github/workflows/desktop-release.yml` is the only production release path. It
+is tag-triggered only, matching the tag-only AWS OIDC trust policy, and it:
 
 1. requires a tag matching `desktop/package.json`, for example
    `desktop-v0.1.0`;
 2. runs desktop unit tests, all Interface reliability tests, type checking, and
    the exact production web build;
 3. builds x64 and arm64 packages on macOS, Windows, and Linux runners;
-4. verifies every updater file name, size, and SHA-512 value, rejecting missing
-   or duplicate update metadata;
+4. verifies every updater file name, size, and SHA-512 value plus all required
+   portable archives and block-map sidecars, rejecting missing or duplicate
+   update metadata;
 5. signs/notarizes macOS, signs Windows, verifies the notarization ticket inside
    the unpacked app, DMG, and ZIP, and launches the app extracted from the exact
    host-native macOS ZIP plus the installed Windows application;

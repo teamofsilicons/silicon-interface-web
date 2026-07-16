@@ -15,7 +15,7 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke/signing tests | 54/54 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 55/55 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite | 249/249 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |

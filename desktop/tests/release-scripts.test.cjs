@@ -53,6 +53,8 @@ test("update artifact gate verifies names, sizes, and SHA-512 values", () => {
   const dmg = "Silicon Interface-0.1.0-mac-arm64.dmg";
   const zipInfo = writeUpdateCandidate(root, zip, "signed zip");
   const dmgInfo = writeUpdateCandidate(root, dmg, "signed dmg");
+  writeUpdateCandidate(root, `${zip}.blockmap`, "zip block map");
+  writeUpdateCandidate(root, `${dmg}.blockmap`, "dmg block map");
   writeFileSync(
     path.join(root, "latest-mac.yml"),
     `version: 0.1.0\nfiles:\n  - url: ${zip}\n    sha512: ${zipInfo.sha512}\n    size: ${zipInfo.size}\n  - url: ${dmg}\n    sha512: ${dmgInfo.sha512}\n    size: ${dmgInfo.size}\npath: ${zip}\nsha512: ${zipInfo.sha512}\n`,
@@ -76,6 +78,8 @@ test("update artifact gate rejects duplicate metadata entries", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "silicon-update-"));
   const installer = "Silicon Interface-0.1.0-win-x64.exe";
   const info = writeUpdateCandidate(root, installer);
+  writeUpdateCandidate(root, "Silicon Interface-0.1.0-win-x64.zip", "portable zip");
+  writeUpdateCandidate(root, `${installer}.blockmap`, "installer block map");
   const entry = `  - url: ${installer}\n    sha512: ${info.sha512}\n    size: ${info.size}\n`;
   writeFileSync(
     path.join(root, "latest.yml"),
@@ -100,6 +104,8 @@ test("Windows update artifact gate requires the exact cloud-signing publisher", 
   const root = mkdtempSync(path.join(os.tmpdir(), "silicon-update-publisher-"));
   const installer = "Silicon Interface-0.1.0-win-x64.exe";
   const info = writeUpdateCandidate(root, installer);
+  writeUpdateCandidate(root, "Silicon Interface-0.1.0-win-x64.zip", "portable zip");
+  writeUpdateCandidate(root, `${installer}.blockmap`, "installer block map");
   writeFileSync(
     path.join(root, "latest.yml"),
     `version: 0.1.0\nfiles:\n  - url: ${installer}\n    sha512: ${info.sha512}\n    size: ${info.size}\npath: ${installer}\nsha512: ${info.sha512}\n`,
@@ -140,6 +146,30 @@ test("Windows update artifact gate requires the exact cloud-signing publisher", 
   );
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /do not exactly match/);
+});
+
+test("update artifact gate rejects a missing installer sidecar", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "silicon-update-sidecar-"));
+  const installer = "Silicon Interface-0.1.0-win-x64.exe";
+  const info = writeUpdateCandidate(root, installer);
+  writeUpdateCandidate(root, "Silicon Interface-0.1.0-win-x64.zip", "portable zip");
+  writeFileSync(
+    path.join(root, "latest.yml"),
+    `version: 0.1.0\nfiles:\n  - url: ${installer}\n    sha512: ${info.sha512}\n    size: ${info.size}\npath: ${installer}\nsha512: ${info.sha512}\n`,
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(__dirname, "..", "scripts", "verify-update-artifacts.mjs"),
+      root,
+      "win32",
+      "x64",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /\.exe\.blockmap/);
 });
 
 test("Linux arm64 update gate follows electron-builder's architecture-scoped pointer", () => {

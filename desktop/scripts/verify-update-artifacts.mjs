@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readdir, readFile, stat } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -138,6 +138,34 @@ function expectedNames() {
   return new Set([`${prefix}-linux-arm64.AppImage`, `${prefix}-linux-arm64.deb`]);
 }
 
+function requiredCompanionNames() {
+  const prefix = `${productName}-${packageJson.version}`;
+  if (platform === "darwin") {
+    const base = `${prefix}-mac-${arch}`;
+    return [`${base}.zip.blockmap`, `${base}.dmg.blockmap`];
+  }
+  if (platform === "win32") {
+    const base = `${prefix}-win-${arch}`;
+    return [`${base}.zip`, `${base}.exe.blockmap`];
+  }
+  return [];
+}
+
+async function requireRegularNonempty(filename) {
+  const absolute = path.join(outputRoot, filename);
+  let information;
+  try {
+    information = await lstat(absolute);
+  } catch (error) {
+    fail(`cannot read ${filename}: ${error.message}`);
+  }
+  if (!information.isFile() || information.isSymbolicLink()) {
+    fail(`${filename} is not a regular file`);
+  }
+  if (information.size <= 0) fail(`${filename} is empty`);
+  return information;
+}
+
 const metadataName = metadataByPlatform[platform](arch);
 let source;
 try {
@@ -180,18 +208,16 @@ for (const file of metadata.files) {
   }
 
   const absolute = path.join(outputRoot, file.url);
-  let information;
-  try {
-    information = await stat(absolute);
-  } catch (error) {
-    fail(`cannot read ${file.url}: ${error.message}`);
-  }
-  if (!information.isFile()) fail(`${file.url} is not a regular file`);
+  const information = await requireRegularNonempty(file.url);
   if (information.size !== Number(file.size)) {
     fail(`${file.url} is ${information.size} bytes; metadata says ${file.size}`);
   }
   const digest = await sha512(absolute);
   if (digest !== file.sha512) fail(`${file.url} SHA-512 does not match its metadata`);
+}
+
+for (const companion of requiredCompanionNames()) {
+  await requireRegularNonempty(companion);
 }
 
 const primary = metadata.files.find((file) => file.url === metadata.top.path);

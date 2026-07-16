@@ -22,9 +22,10 @@ on:
       - "scripts/dependency-audit.mjs"
       - "tests/deploy/dependency-audit.test.mjs"
       - ".github/workflows/desktop.yml"
+      - ".github/workflows/desktop-release.yml"
+      - ".github/workflows/desktop-signing-preflight.yml"
   push:
     branches: [main]
-    tags: ["desktop-v*"]
     paths:
       - "desktop/build/**"
       - "desktop/resources/**"
@@ -45,6 +46,8 @@ on:
       - "scripts/dependency-audit.mjs"
       - "tests/deploy/dependency-audit.test.mjs"
       - ".github/workflows/desktop.yml"
+      - ".github/workflows/desktop-release.yml"
+      - ".github/workflows/desktop-signing-preflight.yml"
   workflow_dispatch:
 
 permissions:
@@ -52,7 +55,7 @@ permissions:
 
 concurrency:
   group: desktop-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: true
 
 jobs:
   test:

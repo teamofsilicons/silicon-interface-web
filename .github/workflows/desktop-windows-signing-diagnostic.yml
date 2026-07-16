@@ -78,17 +78,17 @@ jobs:
           )
           Write-Host 'checkpoint: cer'
           $publicCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
-          foreach ($storeName in @('TrustedPeople', 'TrustedPublisher')) {
-            Write-Host "checkpoint: opening $storeName"
+          foreach ($storeName in @('Root', 'TrustedPublisher')) {
+            Write-Host "checkpoint: opening LocalMachine/$storeName"
             $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
               $storeName,
-              [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+              [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
             )
             try {
               $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-              Write-Host "checkpoint: adding $storeName"
+              Write-Host "checkpoint: adding LocalMachine/$storeName"
               $store.Add($publicCertificate)
-              Write-Host "checkpoint: added $storeName"
+              Write-Host "checkpoint: added LocalMachine/$storeName"
             } finally {
               $store.Close()
             }

@@ -22,6 +22,30 @@ The exact current tree passed:
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
 
+Commit `421159a` passed the complete native GitHub Actions Desktop workflow
+([run 29494688591](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29494688591)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87608754087` | passed in 1m33s | n/a |
+| macOS 14 arm64 package/runtime | `87609067290` | passed in 1m52s | `8373939899` |
+| Windows Server 2022 x64 package/runtime/install | `87609067277` | passed in 5m28s | `8374031376` |
+| Ubuntu 22.04 x64 package/runtime/install | `87609067283` | passed in 3m03s | `8373969674` |
+
+This run exercised every Linux format users receive. The exact x64 AppImage
+was extracted without relying on FUSE, launched under isolated Xvfb/D-Bus/XDG
+state, loaded `https://interface.teamofsilicons.com/`, and remained healthy for
+10 seconds. The exact DEB was then installed with apt, launched under the same
+bounded runtime checks, and removed. Both gates validated that the authenticated
+readiness PID resolved to the packaged executable and reported `PASS`.
+
+The same run also reconfirmed the packaged macOS arm64 bundle and both Windows
+runtime paths. Windows launched the unpacked candidate, silently installed the
+NSIS candidate, launched the executable from that isolated installation, loaded
+the production renderer, remained healthy for 10 seconds, and verified that
+uninstall removed the application. Artifact upload occurred only after every
+host-native runtime gate passed.
+
 Commit `57d07eb` passed the complete native GitHub Actions Desktop workflow
 ([run 29494174322](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29494174322)):
 

@@ -108,18 +108,49 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Create isolated Windows engineering signing identity
+        if: ${{ matrix.target == 'win' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publisher = 'Silicon Interface Engineering CI'
+          $passwordBytes = New-Object byte[] 32
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($passwordBytes)
+          $passwordText = [Convert]::ToBase64String($passwordBytes)
+          Write-Output "::add-mask::$passwordText"
+          $password = ConvertTo-SecureString -String $passwordText -AsPlainText -Force
+          $certificate = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=$publisher" `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -KeyExportPolicy Exportable `
+            -KeyLength 3072 `
+            -HashAlgorithm SHA256 `
+            -NotAfter (Get-Date).AddDays(2)
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'silicon-engineering-signing.pfx'
+          $cerPath = Join-Path $env:RUNNER_TEMP 'silicon-engineering-signing.cer'
+          Export-PfxCertificate -Cert $certificate -FilePath $pfxPath -Password $password | Out-Null
+          Export-Certificate -Cert $certificate -FilePath $cerPath | Out-Null
+          Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+          Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+          "WIN_CSC_LINK=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WIN_CSC_KEY_PASSWORD=$passwordText" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WINDOWS_PUBLISHER_NAME=$publisher" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SILICON_ENGINEERING_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Package
         run: |
           pnpm -C desktop build
           pnpm -C desktop exec electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish never
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.target == 'win' && 'true' || 'false' }}
       - name: Verify update artifacts
         run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist ${{ matrix.platform }} ${{ matrix.arch }}
-      - name: Prove unsigned Windows candidates fail the release signature gate
+      - name: Prove engineering Windows identity fails the production publisher gate
         if: ${{ matrix.target == 'win' }}
         shell: pwsh
         run: |
+          $engineeringPublisher = $env:WINDOWS_PUBLISHER_NAME
+          $env:WINDOWS_PUBLISHER_NAME = 'CA Verified Production Publisher'
           $ErrorActionPreference = 'Continue'
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
@@ -128,14 +159,15 @@ jobs:
           $signatureExitCode = $LASTEXITCODE
           $ErrorActionPreference = 'Stop'
           if ($signatureExitCode -eq 0) {
-            throw "Unsigned engineering application unexpectedly passed the Authenticode gate"
+            throw "Engineering identity unexpectedly passed the production publisher gate"
           }
           $outputText = $output | Out-String
           $outputText | Write-Host
-          if ($outputText -notmatch 'Authenticode verification failed') {
+          if ($outputText -notmatch 'does not exactly match') {
             throw "Signature gate failed for an unexpected reason"
           }
-          Write-Host "windows-signature-smoke: unsigned candidate correctly rejected"
+          $env:WINDOWS_PUBLISHER_NAME = $engineeringPublisher
+          Write-Host "windows-signature-smoke: engineering publisher correctly rejected for production"
           $global:LASTEXITCODE = 0
       - name: Install Linux runtime-smoke dependencies
         if: ${{ matrix.target == 'linux' }}
@@ -147,10 +179,10 @@ jobs:
         run: node desktop/scripts/smoke-mac-engineering.mjs desktop/dist
       - name: Launch packaged Windows application
         if: ${{ matrix.target == 'win' }}
-        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist
+        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist --require-signature
       - name: Install and uninstall Windows package
         if: ${{ matrix.target == 'win' }}
-        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist
+        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist --require-signature
       - name: Launch packaged Linux AppImage
         if: ${{ matrix.target == 'linux' }}
         run: node desktop/scripts/smoke-linux-package.mjs desktop/dist --format appimage
@@ -163,3 +195,14 @@ jobs:
           path: desktop/dist/*
           if-no-files-found: error
           retention-days: 14
+      - name: Remove Windows engineering signing identity
+        if: ${{ always() && matrix.target == 'win' }}
+        shell: pwsh
+        run: |
+          if ($env:SILICON_ENGINEERING_CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:SILICON_ENGINEERING_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\CurrentUser\Root\$env:SILICON_ENGINEERING_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\CurrentUser\TrustedPublisher\$env:SILICON_ENGINEERING_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'silicon-engineering-signing.pfx') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'silicon-engineering-signing.cer') -Force -ErrorAction SilentlyContinue

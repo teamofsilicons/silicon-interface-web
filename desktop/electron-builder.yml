@@ -41,6 +41,11 @@ protocols:
 win:
   icon: build/icon.png
   requestedExecutionLevel: asInvoker
+  signtoolOptions:
+    # One current SHA-256 signature avoids obsolete SHA-1 and unnecessary
+    # cloud-HSM operations. The release job independently verifies Authenticode.
+    signingHashAlgorithms:
+      - sha256
   target:
     - nsis
     - zip

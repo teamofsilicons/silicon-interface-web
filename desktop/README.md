@@ -242,8 +242,12 @@ Add these encrypted Actions secrets:
 | `APPLE_ID` | Apple notarization account |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific notarization password |
 | `APPLE_TEAM_ID` | Apple Developer team ID |
-| `WINDOWS_CSC_LINK` | Base64 trusted Windows code-signing `.pfx` |
-| `WINDOWS_CSC_KEY_PASSWORD` | Password for that certificate |
+| `WINDOWS_CSC_LINK` | Base64 trusted Windows code-signing `.pfx` (legacy PFX path only) |
+| `WINDOWS_CSC_KEY_PASSWORD` | Password for that certificate (legacy PFX path only) |
+| `SSL_ESIGNER_USERNAME` | Dedicated SSL.com eSigner automation username |
+| `SSL_ESIGNER_PASSWORD` | Dedicated SSL.com eSigner automation password |
+| `SSL_ESIGNER_CREDENTIAL_ID` | Cloud-HSM signing credential ID |
+| `SSL_ESIGNER_TOTP_SECRET` | OAuth TOTP automation secret; never a one-time code |
 
 Add these Actions variables:
 
@@ -253,6 +257,7 @@ Add these Actions variables:
 | `AWS_RELEASE_BUCKET` | Private-origin bucket behind `downloads.teamofsilicons.com` |
 | `AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID` | Optional CDN invalidation target |
 | `ENABLE_GITHUB_ATTESTATIONS` | Set `true` only when the repository plan supports them |
+| `WINDOWS_SIGNING_PROVIDER` | Set `sslcom-esigner` for the cloud-HSM adapter; leave unset for PFX |
 
 The AWS role should trust only this repository and release workflow/ref. Its
 permissions should be limited to the bucket's `interface/stable/*` prefix plus
@@ -285,7 +290,9 @@ foundation are complete. A public production release is not complete until all
 of the following remaining external gates are satisfied and the tagged release
 workflow is green:
 
-- trusted Windows code-signing identity and its provider-specific CI adapter;
+- CA validation and credentials for the trusted Windows signing identity (the
+  SSL.com eSigner CI adapter is implemented; the verified publisher is not yet
+  issued);
 - clean-machine install/runtime acceptance on actual Windows and Linux systems;
 - final `desktop-vX.Y.Z` signed release run and stable-feed promotion.
 

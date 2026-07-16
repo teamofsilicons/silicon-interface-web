@@ -176,11 +176,36 @@ a shipped USB token. Complete the CA's legal identity, phone/address, domain,
 and authorization checks. When the service is active, retain its service
 credentials only in GitHub Actions secrets and the password manager.
 
-The existing `WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` workflow is retained
-only for a CA delivery method that is both CA/B-compliant and usable by a hosted
-runner. A cloud-provider purchase normally requires a provider-specific signing
-adapter instead; implement and natively verify that adapter before tagging a
-release.
+The repository includes a fail-closed SSL.com eSigner adapter for the globally
+available cloud-HSM path. It downloads the official platform-neutral
+CodeSignTool v1.3.2 archive, verifies its pinned SHA-256 digest before use, runs
+it under Temurin Java 21 without a shell, signs each Electron-builder EXE/DLL
+with SHA-256 only, blocks malware-detected files, and redacts all eSigner
+credentials from failures. The workflow then independently requires Windows to
+report a valid Authenticode signature on the unpacked app and NSIS installer.
+
+To activate that path after SSL.com finishes identity validation:
+
+1. Choose **IV** only if the desired Windows publisher is the verified person's
+   legal name. Choose **OV** if the publisher must be a registered company's
+   exact legal name. The publisher cannot be a brand alias that the CA did not
+   validate.
+2. Activate eSigner and create a dedicated automation user/credential. Enable
+   the OAuth TOTP automation flow documented by SSL.com; do not share a human
+   one-time code with CI.
+3. Add these encrypted GitHub Actions secrets: `SSL_ESIGNER_USERNAME`,
+   `SSL_ESIGNER_PASSWORD`, `SSL_ESIGNER_CREDENTIAL_ID`, and
+   `SSL_ESIGNER_TOTP_SECRET`.
+4. Add the Actions variable `WINDOWS_SIGNING_PROVIDER` with the exact value
+   `sslcom-esigner`.
+5. Run a private release candidate and confirm the workflow's Authenticode,
+   installed-app launch, installer, and uninstall gates before creating the
+   public tag.
+
+The existing `WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` path remains only
+for a CA-provided, CA/B-compliant PFX usable by the hosted runner. Leave
+`WINDOWS_SIGNING_PROVIDER` unset for that legacy path. Never configure both
+signers for one release.
 
 ## Release acceptance after credentials exist
 

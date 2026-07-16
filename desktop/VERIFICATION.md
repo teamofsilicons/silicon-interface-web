@@ -15,12 +15,28 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke tests | 37/37 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 52/52 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite | 249/249 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
+
+Commit `dd5ba18` passed the complete native GitHub Actions Desktop workflow
+([run 29510506523](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29510506523)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87662477366` | passed | n/a |
+| macOS 14 arm64 package/runtime | `87662938861` | passed | `8380511548` |
+| Windows Server 2022 x64 package/runtime/install | `87662938845` | passed | `8380645602` |
+| Ubuntu 22.04 x64 package/runtime/install | `87662938939` | passed | `8380569280` |
+
+This run includes the final dependency-audit gate, Electron 42.7.0 package,
+payload-first stable-feed publisher, and digest-verified GitHub draft-release
+transaction. The unsigned Windows branch candidate was rejected by the release
+signature check as expected before its isolated engineering runtime/install
+checks; unsigned output was not promoted.
 
 Commit `9d30221` passed the complete native GitHub Actions Desktop workflow
 ([run 29496175052](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29496175052)):
@@ -242,13 +258,25 @@ ZIP application without mutating it, received the authenticated production
 readiness receipt, and uploaded the preflight evidence. The workflow publishes
 nothing and is safe to repeat before a tag.
 
+The replacement Developer ID archive and updated export password were proven
+again by
+[run 29512015715](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29512015715)
+at commit `dd5ba18`. The 4m30s run passed certificate import, Developer ID
+selection, hardened-runtime signing, Apple notarization, stapling, Gatekeeper
+assessment in the app/DMG/ZIP, updater metadata verification, exact signed ZIP
+launch, and artifact upload (`8381150742`). This is the currently configured
+GitHub certificate archive, not a superseded local export.
+
 ## External gates before a public stable release
 
 These are not source defects and cannot be silently bypassed:
 
-1. Acquire and integrate a CI-compatible trusted Windows signing identity;
-   modern public-trust private keys must remain in approved hardware/cloud HSM
-   custody, so the exact workflow adapter depends on the selected provider.
+1. Complete CA identity validation and provide the credentials for a trusted
+   Windows signing identity. The SSL.com eSigner cloud-HSM adapter is integrated
+   and locally passed its fail-closed unit/config-resolution gates; it pins and
+   verifies CodeSignTool v1.3.2, accepts only SHA-256, redacts credentials, and
+   is followed by native Authenticode verification. No certificate has yet been
+   issued for the desired Windows publisher.
 2. Complete the interactive acceptance slice in `desktop/README.md` on clean
    physical Windows, macOS, and Linux machines. CI now covers deterministic
    package/runtime readiness; it cannot click native dialogs, test IME/screen

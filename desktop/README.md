@@ -154,6 +154,7 @@ The branch workflow also executes these fresh-package gates on the native host:
 node desktop/scripts/smoke-windows-package.mjs desktop/dist
 
 # Ubuntu 22.04 after installing xvfb
+node desktop/scripts/smoke-linux-package.mjs desktop/dist --format appimage
 node desktop/scripts/smoke-linux-package.mjs desktop/dist --format deb --deb-mode install
 ```
 
@@ -161,12 +162,13 @@ These commands use an isolated session and require a one-time app-authored
 receipt after the deployed Interface has hydrated its trusted desktop bridge.
 They validate package version, platform, architecture, process identity, and
 the exact HTTPS production origin, hold a stability window, terminate the full
-process tree, and remove all smoke data. Linux performs a real DEB install and
-uninstall; Windows separately performs a silent NSIS install, launches the
-installed executable through the same readiness gate, and then confirms a
-silent uninstall in an ephemeral directory. The smoke mode never reads a
-user's cookies or drafts, takes over an installed app, changes the protocol
-handler, or checks for updates.
+process tree, and remove all smoke data. Linux extracts and launches the exact
+AppImage without depending on FUSE, then separately performs a real DEB install
+and uninstall. Windows performs a silent NSIS install, launches the installed
+executable through the same readiness gate, and then confirms a silent
+uninstall in an ephemeral directory. The smoke mode never reads a user's
+cookies or drafts, takes over an installed app, changes the protocol handler,
+or checks for updates.
 
 Cross-compilation proves that files can be assembled, but it does not replace a
 launch/install check on the target OS. CI builds each target on its native GitHub
@@ -197,8 +199,10 @@ runner. Before stable promotion, run this physical acceptance slice on every OS:
 4. verifies every updater file name, size, and SHA-512 value, rejecting missing
    or duplicate update metadata;
 5. signs/notarizes macOS, signs Windows, verifies the notarization ticket inside
-   the unpacked app, DMG, and ZIP, and launches every host-native package;
-6. performs a real host-native Linux DEB install/runtime/uninstall gate;
+   the unpacked app, DMG, and ZIP, and launches the app extracted from the exact
+   host-native macOS ZIP plus the installed Windows application;
+6. launches the host-native Linux AppImage and separately performs a real DEB
+   install/runtime/uninstall gate;
 7. emits DMG/ZIP, NSIS/ZIP, AppImage/DEB, updater metadata, a CycloneDX SBOM,
    `SHA256SUMS.txt`, and `release-manifest.json`;
 8. optionally emits GitHub/Sigstore provenance when the repository plan supports

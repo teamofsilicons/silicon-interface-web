@@ -117,9 +117,17 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$zip_app"
           xcrun stapler validate -v "$zip_app"
           spctl --assess --type execute --verbose=2 "$zip_app"
-      - name: Launch signed macOS application
+      - name: Launch signed macOS ZIP application
         if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
-        run: node desktop/scripts/smoke-mac-engineering.mjs desktop/dist-${{ matrix.arch }} --signature-mode release
+        run: |
+          zip_path="$(find desktop/dist-${{ matrix.arch }} -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$zip_path"
+          run_dir="$(mktemp -d)"
+          trap 'rm -rf "$run_dir"' EXIT
+          ditto -x -k "$zip_path" "$run_dir"
+          zip_app="$(find "$run_dir" -maxdepth 2 -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$zip_app"
+          node desktop/scripts/smoke-mac-engineering.mjs "$zip_app" --signature-mode release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-mac-${{ matrix.arch }}
@@ -216,7 +224,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb dbus-x11
-      - name: Install and launch packaged Linux application
+      - name: Launch packaged Linux AppImage
+        if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
+        run: node desktop/scripts/smoke-linux-package.mjs desktop/dist-${{ matrix.arch }} --format appimage
+      - name: Install and launch packaged Linux DEB
         if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
         run: node desktop/scripts/smoke-linux-package.mjs desktop/dist-${{ matrix.arch }} --format deb --deb-mode install
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

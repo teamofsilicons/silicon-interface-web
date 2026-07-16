@@ -131,11 +131,17 @@ The branch and tagged workflows now include app-authored native runtime gates:
 macOS launches the real packaged bundle; Windows launches and supervises the
 unpacked packaged executable, installs the NSIS candidate in an ephemeral
 directory, launches that installed executable, and confirms uninstall; Ubuntu
-validates and installs the exact DEB,
-launches it under isolated Xvfb/D-Bus/XDG state, proves the receipt PID resolves
-to the packaged executable, and uninstalls it. A process merely staying alive
+extracts and launches the exact AppImage, then validates and installs the exact
+DEB under isolated Xvfb/D-Bus/XDG state, proves each receipt PID resolves to the
+packaged executable, and uninstalls the DEB. A process merely staying alive
 is insufficient—the receipt must match version, platform, architecture, PID,
 timestamp, packaged state, and the exact production HTTPS origin.
+
+The tagged release gate is stricter than branch engineering smoke: it verifies
+the stapled Developer ID application inside both DMG and ZIP containers, then
+extracts and launches the exact host-native ZIP artifact without mutating its
+signature. The Windows release gate likewise launches both the signed unpacked
+candidate and the application installed from the signed NSIS executable.
 
 The release rehearsal produced a CycloneDX SBOM with 275 components and a
 16-file, 706,677,312-byte manifest whose SHA-256 entries all verified.

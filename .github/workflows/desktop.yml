@@ -117,7 +117,10 @@ jobs:
       - name: Install and uninstall Windows package
         if: ${{ matrix.target == 'win' }}
         run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist
-      - name: Install and launch packaged Linux application
+      - name: Launch packaged Linux AppImage
+        if: ${{ matrix.target == 'linux' }}
+        run: node desktop/scripts/smoke-linux-package.mjs desktop/dist --format appimage
+      - name: Install and launch packaged Linux DEB
         if: ${{ matrix.target == 'linux' }}
         run: node desktop/scripts/smoke-linux-package.mjs desktop/dist --format deb --deb-mode install
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

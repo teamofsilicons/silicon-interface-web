@@ -68,9 +68,10 @@ history are known. Apple permits multiple active Developer ID certificates.
    place either in the repository, Downloads CDN, Drive link, email, or chat.
 
 Before leaving Keychain Access, verify that the selected/exported row is exactly
-`Developer ID Application: Shubham Gupta (LTBSK59BJ2)`. The build configuration
-pins that identity and intentionally rejects Apple Development or Apple
-Distribution archives.
+`Developer ID Application: Shubham Gupta (LTBSK59BJ2)`. The non–Mac App Store
+build pins the `Shubham Gupta (LTBSK59BJ2)` subject/team qualifier while
+electron-builder pins the required Developer ID Application certificate type;
+Apple Development and Apple Distribution archives are therefore rejected.
 
 The release workflow consumes the base64 form of that `.p12` as
 `MACOS_CSC_LINK` and its export password as `MACOS_CSC_KEY_PASSWORD`.

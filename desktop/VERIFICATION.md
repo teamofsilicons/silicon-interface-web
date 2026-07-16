@@ -22,6 +22,23 @@ The exact current tree passed:
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
 
+Commit `57d07eb` passed the complete native GitHub Actions Desktop workflow
+([run 29494174322](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29494174322)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87607109988` | passed in 1m48s | n/a |
+| macOS 14 arm64 package/runtime | `87607466611` | passed in 1m45s | `8373737615` |
+| Windows Server 2022 x64 package/runtime/install | `87607466621` | passed in 4m22s | `8373799843` |
+| Ubuntu 22.04 x64 package/runtime/install | `87607466609` | passed in 3m02s | `8373768247` |
+
+The Windows job first launched the unpacked candidate, then silently installed
+the NSIS candidate, launched the executable from that isolated installation,
+and required a second authenticated production-renderer readiness receipt plus
+10-second stability window before running and verifying uninstall. Both native
+launches loaded `https://interface.teamofsilicons.com/`. This closes the gap
+between package assembly evidence and the executable users actually install.
+
 Commit `c3ae6a9` passed the complete native GitHub Actions Desktop workflow
 ([run 29493558076](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29493558076)):
 

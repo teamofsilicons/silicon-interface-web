@@ -24,6 +24,26 @@ The exact current tree passed:
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
 
+Implementation commit `92f235d` passed the complete seven-job native GitHub
+Actions Desktop workflow
+([run 29542354930](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29542354930))
+after the SSL.com sandbox rehearsal and fail-closed signer hardening:
+
+| Native job | Job ID | Result |
+| --- | --- | --- |
+| Shared Ubuntu test/build gate | `87767020219` | passed |
+| macOS 15 Intel x64 package/runtime | `87767193764` | passed |
+| macOS 14 arm64 package/runtime | `87767193780` | passed |
+| Windows Server 2022 x64 package/runtime/install | `87767193731` | passed |
+| Windows 11 ARM arm64 package/runtime/install | `87767193732` | passed |
+| Ubuntu 22.04 x64 package/runtime/install | `87767193778` | passed |
+| Ubuntu 22.04 ARM arm64 package/runtime/install | `87767193748` | passed |
+
+The same implementation commit was then re-run locally through the exact
+shared release sequence: all 15 deployment-contract tests, the locked-package
+advisory gate, all 65 desktop tests, TypeScript, all 252 chat reliability
+tests, and the 14-route production build passed. The worktree remained clean.
+
 Commit `34e3323` passed the complete six-architecture native GitHub Actions
 Desktop workflow
 ([run 29527546566](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29527546566)):

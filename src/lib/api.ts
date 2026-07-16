@@ -90,7 +90,27 @@ export interface ModerationAppeal {
   resolved_at: string | null;
 }
 
+// tsx/ESM can load the same TypeScript module through both extensionless and
+// explicit `.ts` specifiers on case-sensitive CI filesystems. A plain
+// `instanceof` then fails because each loader instance owns a different class
+// constructor. Brand the error through the process-wide symbol registry so the
+// finite failure contracts remain stable across loader instances and realms.
+const API_ERROR_BRAND = Symbol.for("silicon-interface.api-error.v1");
+
+function hasApiErrorBrand(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  try {
+    return (value as Record<symbol, unknown>)[API_ERROR_BRAND] === true;
+  } catch {
+    return false;
+  }
+}
+
 class ApiError extends Error {
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return hasApiErrorBrand(value);
+  }
+
   constructor(
     public status: number,
     public body: unknown,
@@ -98,6 +118,13 @@ class ApiError extends Error {
     public retryAfterMs: number | null = null,
   ) {
     super(message);
+    this.name = "ApiError";
+    Object.defineProperty(this, API_ERROR_BRAND, {
+      value: true,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
   }
 }
 

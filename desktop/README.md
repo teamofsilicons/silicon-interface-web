@@ -222,6 +222,12 @@ https://downloads.teamofsilicons.com/interface/stable/win32/arm64
 
 ### One-time GitHub configuration
 
+Certificate acquisition, Apple Developer ID export, notarization, and the
+Windows cloud-signing decision are documented in
+[`SIGNING_SETUP.md`](SIGNING_SETUP.md). Complete that guide before adding any
+secret below; modern Windows public-trust keys are commonly cloud-HSM backed and
+may require a provider-specific workflow instead of the classic `.pfx` path.
+
 Add these encrypted Actions secrets:
 
 | Secret | Purpose |

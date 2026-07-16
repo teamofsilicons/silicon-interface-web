@@ -4,7 +4,7 @@ Date: 2026-07-16
 
 Release candidate version: `0.1.0`
 
-Platforms: macOS x64/arm64, Windows x64/arm64, Linux x64/arm64
+Target platforms: macOS x64/arm64, Windows x64/arm64, Linux x64/arm64
 
 This record distinguishes implementation evidence from the external signing and
 clean-machine checks that cannot be truthfully replaced by cross-compilation.
@@ -21,6 +21,30 @@ The exact current tree passed:
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
+
+The pushed tree at commit `2857b38` also passed the full native GitHub Actions
+Desktop workflow ([run 29486760897](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29486760897)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87582982956` | passed in 1m58s | n/a |
+| macOS 14 arm64 package | `87583387078` | passed in 2m05s | `8370781556` |
+| Windows Server 2022 x64 package | `87583387059` | passed in 3m54s | `8370828250` |
+| Ubuntu 22.04 x64 package | `87583387080` | passed in 2m05s | `8370790623` |
+
+The three CI artifacts were downloaded after the run. Their updater metadata
+matched the exact candidate names, byte sizes, and SHA-512 digests. The CI DMG,
+macOS ZIP, and Windows ZIP passed container integrity checks; the CI Debian
+archive had the expected `debian-binary`, control, and data members. The
+AppImage was identified as an x86-64 ELF executable, the Windows installer as
+an NSIS GUI executable, and the macOS application as an arm64 Mach-O binary.
+All three CI binaries had the required fuse policy, and all three CI ASARs had
+the same 311-entry allow-list.
+
+This branch build intentionally disables signing-key discovery. Its native
+artifacts prove native assembly and package integrity, but remain unsigned
+engineering candidates; distributable signatures are enforced by the separate
+tagged release workflow.
 
 The reliability suite covers draft journaling and conflict recovery, durable
 outbox behavior, held sends, attachment staging/resume, receipts, reconnect and

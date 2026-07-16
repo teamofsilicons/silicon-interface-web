@@ -126,9 +126,17 @@ pnpm build
 Build an unsigned local candidate on the current OS:
 
 ```bash
+# Windows x64
 pnpm desktop:dist:win
+# Windows ARM64 (uses a real ZIP-backed NSIS payload)
+pnpm desktop:dist:win:arm64
 pnpm desktop:dist:linux
 ```
+
+Windows ARM64 intentionally downloads a complete signed installer during an
+update. electron-builder's x86 NSIS 7z extractor cannot decode its ARM64
+executable transform, so ARM64 uses a real ZIP payload and has no installer
+blockmap. Windows x64 retains differential NSIS updates and its blockmap.
 
 On Apple Silicon, Electron fuse writes invalidate the vendor signature and
 macOS will terminate a truly unsigned bundle. Use the dedicated engineering
@@ -200,9 +208,10 @@ is tag-triggered only, matching the tag-only AWS OIDC trust policy, and it:
    the exact production web build;
 3. builds and launches x64 and arm64 packages on native macOS, Windows, and
    Linux runners rather than treating a cross-build as runtime proof;
-4. verifies every updater file name, size, and SHA-512 value plus all required
-   portable archives and block-map sidecars, rejecting missing or duplicate
-   update metadata;
+4. verifies every updater file name and SHA-512 value, verifies declared sizes,
+   and requires each architecture's portable archive; Windows x64 and macOS
+   additionally require their differential blockmaps, while Windows ARM64 uses
+   a complete signed installer by design;
 5. signs/notarizes macOS, signs Windows, verifies the notarization ticket inside
    the unpacked app, DMG, and ZIP, and launches the app extracted from the exact
    host-native macOS ZIP plus the installed Windows application;

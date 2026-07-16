@@ -158,3 +158,10 @@ export function updateFeedUrl(platform: NodeJS.Platform, arch: string): string |
   if (arch !== "x64" && arch !== "arm64") return null;
   return `${UPDATE_FEED_BASE}/${platform}/${arch}`;
 }
+
+/** Windows ARM64 installers intentionally have no differential blockmap: the
+ * safe NSIS payload is a real ZIP, so the updater should download the complete
+ * signed installer immediately instead of first requesting a missing sidecar. */
+export function disableDifferentialUpdate(platform: NodeJS.Platform, arch: string): boolean {
+  return platform === "win32" && arch === "arm64";
+}

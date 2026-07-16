@@ -5,6 +5,7 @@ const test = require("node:test");
 
 const {
   PRODUCTION_RENDERER_ORIGIN,
+  disableDifferentialUpdate,
   normalizeBadgeCount,
   permissionAllowed,
   resolveRendererUrl,
@@ -104,4 +105,11 @@ test("signed update feeds are fixed per supported OS and architecture", () => {
   );
   assert.equal(updateFeedUrl("linux", "x64"), null);
   assert.equal(updateFeedUrl("win32", "ia32"), null);
+});
+
+test("only Windows arm64 skips differential installer downloads", () => {
+  assert.equal(disableDifferentialUpdate("win32", "arm64"), true);
+  assert.equal(disableDifferentialUpdate("win32", "x64"), false);
+  assert.equal(disableDifferentialUpdate("darwin", "arm64"), false);
+  assert.equal(disableDifferentialUpdate("linux", "arm64"), false);
 });

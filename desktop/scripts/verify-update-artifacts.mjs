@@ -146,7 +146,15 @@ function requiredCompanionNames() {
   }
   if (platform === "win32") {
     const base = `${prefix}-win-${arch}`;
-    return [`${base}.zip`, `${base}.exe.blockmap`];
+    // Windows ARM64 intentionally uses a real ZIP-backed NSIS payload because
+    // the x86 NSIS 7z plug-in cannot decode electron-builder's ARM64 executable
+    // transform. electron-builder requires differentialPackage=false for that
+    // payload, so ARM64 updates safely fall back to downloading the complete
+    // signed installer and do not produce an EXE blockmap. x64 keeps delta
+    // updates and must retain its blockmap.
+    return arch === "arm64"
+      ? [`${base}.zip`]
+      : [`${base}.zip`, `${base}.exe.blockmap`];
   }
   return [];
 }
@@ -203,13 +211,18 @@ for (const file of metadata.files) {
   ) {
     fail(`unsafe artifact URL in ${metadataName}: ${file.url ?? "missing"}`);
   }
-  if (!file.sha512 || !/^\d+$/.test(file.size ?? "")) {
-    fail(`${file.url} is missing its size or SHA-512`);
+  if (!file.sha512) fail(`${file.url} is missing its SHA-512`);
+  const allowsMissingSize = platform === "win32" && arch === "arm64";
+  if (!allowsMissingSize && !/^\d+$/.test(file.size ?? "")) {
+    fail(`${file.url} is missing its size`);
+  }
+  if (file.size !== undefined && !/^\d+$/.test(file.size)) {
+    fail(`${file.url} has an invalid size`);
   }
 
   const absolute = path.join(outputRoot, file.url);
   const information = await requireRegularNonempty(file.url);
-  if (information.size !== Number(file.size)) {
+  if (file.size !== undefined && information.size !== Number(file.size)) {
     fail(`${file.url} is ${information.size} bytes; metadata says ${file.size}`);
   }
   const digest = await sha512(absolute);

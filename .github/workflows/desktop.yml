@@ -186,7 +186,7 @@ jobs:
         id: package
         run: |
           pnpm -C desktop build
-          pnpm -C desktop exec electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish never
+          pnpm -C desktop exec electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish never ${{ matrix.platform == 'win32' && matrix.arch == 'arm64' && '--config.nsis.useZip=true --config.nsis.differentialPackage=false' || '' }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.target == 'win' && 'true' || 'false' }}
       - name: Verify update artifacts

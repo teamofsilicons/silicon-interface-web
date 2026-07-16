@@ -55,11 +55,6 @@ nsis:
   # exact contract to discover the directory selected by Windows.
   guid: 4010082e-265c-5251-a3ae-34a383fe3e0e
   oneClick: true
-  # electron-builder's ARM64 7z executable transform is not decoded by the x86
-  # NSIS extraction plug-in used on Windows ARM: resources extract, while the
-  # native EXE/DLL entries are silently omitted. ZIP is an upstream-supported
-  # NSIS payload format and extracts identically on x64 and ARM64.
-  useZip: true
   deleteAppDataOnUninstall: false
 
 linux:

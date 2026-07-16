@@ -165,6 +165,14 @@ jobs:
             "--publish", "never",
             "--config.directories.output=dist-signing-preflight"
           )
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            # The x86 NSIS 7z plug-in cannot decode electron-builder's ARM64
+            # executable transform. A real ZIP payload avoids silently omitted
+            # EXE/DLL files; differential NSIS packaging must be disabled or
+            # electron-builder still emits 7z bytes under a .zip filename.
+            $arguments += "--config.nsis.useZip=true"
+            $arguments += "--config.nsis.differentialPackage=false"
+          }
           if ($env:WINDOWS_SIGNING_PROVIDER -eq "sslcom-esigner") {
             $arguments += "--config.win.signtoolOptions.sign=scripts/esigner-sign.cjs"
             $arguments += "--config.win.signtoolOptions.publisherName=$env:WINDOWS_PUBLISHER_NAME"

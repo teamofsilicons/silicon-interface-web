@@ -172,6 +172,30 @@ test("update artifact gate rejects a missing installer sidecar", () => {
   assert.match(result.stderr, /\.exe\.blockmap/);
 });
 
+test("Windows arm64 update gate accepts a full signed installer without a delta blockmap", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "silicon-update-arm64-"));
+  const installer = "Silicon Interface-0.1.0-win-arm64.exe";
+  const info = writeUpdateCandidate(root, installer);
+  writeUpdateCandidate(root, "Silicon Interface-0.1.0-win-arm64.zip", "portable zip");
+  writeFileSync(
+    path.join(root, "latest.yml"),
+    `version: 0.1.0\nfiles:\n  - url: ${installer}\n    sha512: ${info.sha512}\npath: ${installer}\nsha512: ${info.sha512}\n`,
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(__dirname, "..", "scripts", "verify-update-artifacts.mjs"),
+      root,
+      "win32",
+      "arm64",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /win32\/arm64 metadata matches 1 artifacts/);
+});
+
 test("Linux arm64 update gate follows electron-builder's architecture-scoped pointer", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "silicon-linux-arm64-update-"));
   const appImage = "Silicon Interface-0.1.0-linux-arm64.AppImage";

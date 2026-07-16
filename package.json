@@ -20,6 +20,7 @@
     "desktop:start": "pnpm -C desktop start",
     "desktop:test": "pnpm -C desktop test",
     "desktop:dist:win": "pnpm -C desktop dist:win",
+    "desktop:dist:win:arm64": "pnpm -C desktop dist:win:arm64",
     "desktop:dist:linux": "pnpm -C desktop dist:linux",
     "desktop:dist:mac": "pnpm -C desktop dist:mac"
   },

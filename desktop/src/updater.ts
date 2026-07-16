@@ -1,7 +1,7 @@
 import { dialog, type BrowserWindow } from "electron";
 import { autoUpdater } from "electron-updater";
 
-import { updateFeedUrl } from "./policy";
+import { disableDifferentialUpdate, updateFeedUrl } from "./policy";
 
 export interface DesktopUpdater {
   supported: boolean;
@@ -63,6 +63,10 @@ export function startDesktopUpdater(options: {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.allowPrerelease = false;
+    autoUpdater.disableDifferentialDownload = disableDifferentialUpdate(
+      process.platform,
+      process.arch,
+    );
 
     autoUpdater.on("update-not-available", () => {
       if (!manualCheck) return;

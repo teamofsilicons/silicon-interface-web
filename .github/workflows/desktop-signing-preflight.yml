@@ -121,6 +121,7 @@ jobs:
     timeout-minutes: 45
     env:
       WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER }}
+      WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_PUBLISHER_NAME }}
       WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
       WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
       SSL_ESIGNER_USERNAME: ${{ secrets.SSL_ESIGNER_USERNAME }}
@@ -158,6 +159,7 @@ jobs:
           )
           if ($env:WINDOWS_SIGNING_PROVIDER -eq "sslcom-esigner") {
             $arguments += "--config.win.signtoolOptions.sign=scripts/esigner-sign.cjs"
+            $arguments += "--config.win.signtoolOptions.publisherName=$env:WINDOWS_PUBLISHER_NAME"
           }
           pnpm -C desktop exec electron-builder @arguments
       - name: Verify update artifacts

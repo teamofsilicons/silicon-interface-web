@@ -268,6 +268,13 @@ export function verifyAuthenticodeSignature(executablePath) {
     "if ($null -eq $signature.TimeStamperCertificate) {",
     "  throw 'Authenticode signature has no trusted timestamp'",
     "}",
+    "$expectedPublisher = $env:WINDOWS_PUBLISHER_NAME",
+    "if (-not [string]::IsNullOrWhiteSpace($expectedPublisher)) {",
+    "  $actualPublisher = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)",
+    "  if ($actualPublisher -cne $expectedPublisher) {",
+    "    throw \"Authenticode publisher '$actualPublisher' does not exactly match '$expectedPublisher'\"",
+    "  }",
+    "}",
     "Write-Output \"$($signature.SignerCertificate.Thumbprint):$($signature.TimeStamperCertificate.Thumbprint)\"",
   ].join("\n");
   const encoded = Buffer.from(script, "utf16le").toString("base64");

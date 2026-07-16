@@ -15,12 +15,29 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke/signing tests | 52/52 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 53/53 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite | 249/249 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
+
+Commit `2a9bc8b` passed the complete native GitHub Actions Desktop workflow
+([run 29513081958](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29513081958)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87671253344` | passed | n/a |
+| macOS 14 arm64 package/runtime | `87671745782` | passed | `8381575462` |
+| Windows Server 2022 x64 package/runtime/install | `87671745750` | passed | `8381652242` |
+| Ubuntu 22.04 x64 package/runtime/install | `87671745781` | passed | `8381617628` |
+
+The exact cloud-signer updater identity path was additionally integration-built
+with a punctuation-bearing publisher name. Electron-builder serialized that
+name into the packaged `resources/app-update.yml`, and the verifier decoded the
+YAML scalar and required a byte-for-byte match. The release path also compares
+the certificate's Authenticode Simple Name against the same protected GitHub
+variable before any signed artifact can publish.
 
 Commit `dd5ba18` passed the complete native GitHub Actions Desktop workflow
 ([run 29510506523](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29510506523)):
@@ -274,9 +291,10 @@ These are not source defects and cannot be silently bypassed:
 1. Complete CA identity validation and provide the credentials for a trusted
    Windows signing identity. The SSL.com eSigner cloud-HSM adapter is integrated
    and locally passed its fail-closed unit/config-resolution gates; it pins and
-   verifies CodeSignTool v1.3.2, accepts only SHA-256, redacts credentials, and
-   is followed by native Authenticode verification. No certificate has yet been
-   issued for the desired Windows publisher.
+   verifies CodeSignTool v1.3.2, accepts only SHA-256, redacts credentials,
+   requires the exact CA-verified publisher in the updater configuration, and
+   is followed by native signer/timestamp/publisher verification. No certificate
+   has yet been issued for the desired Windows publisher.
 2. Complete the interactive acceptance slice in `desktop/README.md` on clean
    physical Windows, macOS, and Linux machines. CI now covers deterministic
    package/runtime readiness; it cannot click native dialogs, test IME/screen

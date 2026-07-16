@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,12 +31,15 @@ if (!new Set(["x64", "arm64"]).has(arch)) {
 
 function unquote(value) {
   const trimmed = value.trim();
-  if (
-    trimmed.length >= 2
-    && ((trimmed.startsWith("'") && trimmed.endsWith("'"))
-      || (trimmed.startsWith('"') && trimmed.endsWith('"')))
-  ) {
-    return trimmed.slice(1, -1);
+  if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1).replace(/''/g, "'");
+  }
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      fail(`invalid quoted YAML scalar: ${trimmed}`);
+    }
   }
   return trimmed;
 }
@@ -71,6 +74,46 @@ function parseMetadata(source) {
   }
 
   return { files, top };
+}
+
+function parsePublisherNames(source) {
+  const lines = source.split(/\r?\n/);
+  const index = lines.findIndex((line) => /^publisherName:\s*/.test(line));
+  if (index === -1) return [];
+  const inline = lines[index].replace(/^publisherName:\s*/, "");
+  if (inline) return [unquote(inline)];
+
+  const values = [];
+  for (const line of lines.slice(index + 1)) {
+    const match = line.match(/^\s{2}-\s+(.+)$/);
+    if (match) {
+      values.push(unquote(match[1]));
+      continue;
+    }
+    if (/^\S/.test(line)) break;
+  }
+  return values;
+}
+
+async function verifyWindowsPublisher(expectedPublisher) {
+  const entries = await readdir(outputRoot, { withFileTypes: true });
+  const unpacked = entries.filter(
+    (entry) => entry.isDirectory() && /^win(?:-[a-z0-9]+)?-unpacked$/.test(entry.name),
+  );
+  if (unpacked.length !== 1) {
+    fail(`expected exactly one unpacked Windows directory, found ${unpacked.length}`);
+  }
+  const filename = path.join(outputRoot, unpacked[0].name, "resources", "app-update.yml");
+  const information = await lstat(filename);
+  if (!information.isFile() || information.isSymbolicLink()) {
+    fail("app-update.yml must be a regular file");
+  }
+  const publishers = parsePublisherNames(await readFile(filename, "utf8"));
+  if (publishers.length !== 1 || publishers[0] !== expectedPublisher) {
+    fail(
+      `app-update.yml publishers [${publishers.join(", ")}] do not exactly match ${expectedPublisher}`,
+    );
+  }
 }
 
 function sha512(filename) {
@@ -155,6 +198,12 @@ const primary = metadata.files.find((file) => file.url === metadata.top.path);
 if (!primary) fail(`primary path ${metadata.top.path} is not present in files`);
 if (primary.sha512 !== metadata.top.sha512) {
   fail(`primary SHA-512 does not match the ${metadata.top.path} file entry`);
+}
+
+const expectedPublisher = process.env.WINDOWS_PUBLISHER_NAME?.trim();
+if (platform === "win32" && process.env.WINDOWS_SIGNING_PROVIDER === "sslcom-esigner") {
+  if (!expectedPublisher) fail("WINDOWS_PUBLISHER_NAME is required for SSL.com eSigner");
+  await verifyWindowsPublisher(expectedPublisher);
 }
 
 console.log(

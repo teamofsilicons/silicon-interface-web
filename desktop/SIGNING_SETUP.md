@@ -197,7 +197,10 @@ To activate that path after SSL.com finishes identity validation:
    `SSL_ESIGNER_PASSWORD`, `SSL_ESIGNER_CREDENTIAL_ID`, and
    `SSL_ESIGNER_TOTP_SECRET`.
 4. Add the Actions variable `WINDOWS_SIGNING_PROVIDER` with the exact value
-   `sslcom-esigner`.
+   `sslcom-esigner`. Add `WINDOWS_PUBLISHER_NAME` with the certificate's exact
+   verified Common Name—no brand alias, prefix, or spelling variation. The
+   build embeds this value into `app-update.yml`, and both packaging and native
+   Authenticode checks fail if it differs from the issued signer.
 5. Run **Desktop signing preflight** with `platform: windows`. It signs but does
    not publish, and must pass Authenticode signer/timestamp checks, packaged and
    installed-app launch, installer, uninstaller, and removal gates before the

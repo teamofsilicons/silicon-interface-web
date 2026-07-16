@@ -95,3 +95,49 @@ test("update artifact gate rejects duplicate metadata entries", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /duplicate artifact URLs/);
 });
+
+test("Windows update artifact gate requires the exact cloud-signing publisher", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "silicon-update-publisher-"));
+  const installer = "Silicon Interface-0.1.0-win-x64.exe";
+  const info = writeUpdateCandidate(root, installer);
+  writeFileSync(
+    path.join(root, "latest.yml"),
+    `version: 0.1.0\nfiles:\n  - url: ${installer}\n    sha512: ${info.sha512}\n    size: ${info.size}\npath: ${installer}\nsha512: ${info.sha512}\n`,
+  );
+  mkdirSync(path.join(root, "win-unpacked", "resources"), { recursive: true });
+  writeFileSync(
+    path.join(root, "win-unpacked", "resources", "app-update.yml"),
+    "provider: generic\npublisherName:\n  - \"O'Reilly: Labs\"\n",
+  );
+
+  const environment = {
+    ...process.env,
+    WINDOWS_SIGNING_PROVIDER: "sslcom-esigner",
+    WINDOWS_PUBLISHER_NAME: "O'Reilly: Labs",
+  };
+  const accepted = spawnSync(
+    process.execPath,
+    [
+      path.join(__dirname, "..", "scripts", "verify-update-artifacts.mjs"),
+      root,
+      "win32",
+      "x64",
+    ],
+    { encoding: "utf8", env: environment },
+  );
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  environment.WINDOWS_PUBLISHER_NAME = "Different Publisher";
+  const rejected = spawnSync(
+    process.execPath,
+    [
+      path.join(__dirname, "..", "scripts", "verify-update-artifacts.mjs"),
+      root,
+      "win32",
+      "x64",
+    ],
+    { encoding: "utf8", env: environment },
+  );
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /do not exactly match/);
+});

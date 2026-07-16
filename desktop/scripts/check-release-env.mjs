@@ -15,6 +15,7 @@ if (platform === "mac") {
       "SSL_ESIGNER_PASSWORD",
       "SSL_ESIGNER_CREDENTIAL_ID",
       "SSL_ESIGNER_TOTP_SECRET",
+      "WINDOWS_PUBLISHER_NAME",
     ];
   } else {
     console.error(`check-release-env: unsupported Windows signing provider ${provider}`);
@@ -30,5 +31,13 @@ const missing = required.filter((name) => !process.env[name]?.trim());
 if (missing.length > 0) {
   console.error(`check-release-env: missing ${missing.join(", ")}`);
   process.exit(1);
+}
+if (platform === "win" && provider === "sslcom-esigner") {
+  const rawPublisher = process.env.WINDOWS_PUBLISHER_NAME;
+  const publisher = rawPublisher.trim();
+  if (rawPublisher !== publisher || publisher.length > 128 || /[\0\r\n]/.test(publisher)) {
+    console.error("check-release-env: WINDOWS_PUBLISHER_NAME is invalid");
+    process.exit(1);
+  }
 }
 console.log(`check-release-env: ${platform}${provider ? `/${provider}` : ""} signing configuration is present`);

@@ -260,6 +260,7 @@ Add these Actions variables:
 | `AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID` | Optional CDN invalidation target |
 | `ENABLE_GITHUB_ATTESTATIONS` | Set `true` only when the repository plan supports them |
 | `WINDOWS_SIGNING_PROVIDER` | Set `sslcom-esigner` for the cloud-HSM adapter; leave unset for PFX |
+| `WINDOWS_PUBLISHER_NAME` | Exact CA-verified certificate common name; required for eSigner updater verification |
 
 The AWS role should trust only this repository and release workflow/ref. Its
 permissions should be limited to the bucket's `interface/stable/*` prefix plus

@@ -28,6 +28,7 @@ test("release environment supports SSL.com cloud-HSM signing", () => {
     SSL_ESIGNER_PASSWORD: "password",
     SSL_ESIGNER_CREDENTIAL_ID: "credential",
     SSL_ESIGNER_TOTP_SECRET: "totp",
+    WINDOWS_PUBLISHER_NAME: "Shubham Gupta",
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /win\/sslcom-esigner/);
@@ -41,4 +42,16 @@ test("release environment rejects unknown or incomplete Windows signers", () => 
   const incomplete = check("win", { WINDOWS_SIGNING_PROVIDER: "sslcom-esigner" });
   assert.notEqual(incomplete.status, 0);
   assert.match(incomplete.stderr, /SSL_CODE_SIGN_JAR/);
+
+  const invalidPublisher = check("win", {
+    WINDOWS_SIGNING_PROVIDER: "sslcom-esigner",
+    SSL_CODE_SIGN_JAR: "tool.jar",
+    SSL_ESIGNER_USERNAME: "username",
+    SSL_ESIGNER_PASSWORD: "password",
+    SSL_ESIGNER_CREDENTIAL_ID: "credential",
+    SSL_ESIGNER_TOTP_SECRET: "totp",
+    WINDOWS_PUBLISHER_NAME: "bad\npublisher",
+  });
+  assert.notEqual(invalidPublisher.status, 0);
+  assert.match(invalidPublisher.stderr, /WINDOWS_PUBLISHER_NAME is invalid/);
 });

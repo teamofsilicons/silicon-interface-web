@@ -292,13 +292,13 @@ jobs:
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: release/**/*
-      - name: Create immutable GitHub release assets
+      - name: Prepare verified GitHub draft assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
-            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Silicon Interface ${RELEASE_TAG#desktop-v}"
-          find release -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name 'SHA256SUMS.txt' -o -name 'release-manifest.json' -o -name '*.cdx.json' \) -print0 | \
-            xargs -0 gh release upload "$RELEASE_TAG" --clobber
+        run: node desktop/scripts/publish-github-release.mjs prepare release "$RELEASE_TAG"
       - name: Publish payloads, then atomically activate updater pointers
         run: node desktop/scripts/publish-release.mjs release
+      - name: Publish verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node desktop/scripts/publish-github-release.mjs finalize release "$RELEASE_TAG"

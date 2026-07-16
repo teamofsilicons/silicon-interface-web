@@ -207,11 +207,14 @@ runner. Before stable promotion, run this physical acceptance slice on every OS:
    `SHA256SUMS.txt`, and `release-manifest.json`;
 8. optionally emits GitHub/Sigstore provenance when the repository plan supports
    artifact attestations;
-9. creates GitHub release assets, uploads every versioned payload before its
-   mutable updater pointer, rejects any conflicting immutable S3 path, retains
-   older installers, and only then activates architecture-isolated feeds using
-   short-lived GitHub OIDC credentials;
-10. invalidates the downloads CDN when a distribution ID is configured.
+9. prepares a private GitHub draft and verifies every asset digest without
+   allowing same-name replacement;
+10. uploads every versioned payload before its mutable updater pointer, rejects
+   any conflicting immutable S3 path, retains older installers, and only then
+   activates architecture-isolated feeds using short-lived GitHub OIDC
+   credentials;
+11. publishes the already-verified GitHub draft last and invalidates only the
+   mutable downloads CDN paths.
 
 The updater paths are fixed in signed code and cannot be supplied by the page:
 

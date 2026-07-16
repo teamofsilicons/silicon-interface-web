@@ -200,6 +200,9 @@ retained when their stored byte count and SHA-256 metadata match, while a
 different body at an existing immutable key aborts the release. Old installers
 are never deleted by activation. Mutable pointers and shared summaries use
 no-cache headers, are activated last, and are the only CDN paths invalidated.
+GitHub assets are likewise staged in a private draft, verified by SHA-256 and
+size, and uploaded without overwrite. The draft becomes public only after the
+stable feed activates successfully.
 
 ## Production integration
 

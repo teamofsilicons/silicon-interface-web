@@ -62,6 +62,10 @@ linux:
 mac:
   category: public.app-category.social-networking
   minimumSystemVersion: "12.0"
+  # Fail closed instead of allowing another Apple identity in the imported
+  # archive/keychain (for example Apple Distribution) to sign a direct-download
+  # build that notarization will reject.
+  identity: "Developer ID Application: Shubham Gupta (LTBSK59BJ2)"
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist

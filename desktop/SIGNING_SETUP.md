@@ -67,6 +67,11 @@ history are known. Apple permits multiple active Developer ID certificates.
 4. Store the `.p12` and its password in the team's password manager. Do not
    place either in the repository, Downloads CDN, Drive link, email, or chat.
 
+Before leaving Keychain Access, verify that the selected/exported row is exactly
+`Developer ID Application: Shubham Gupta (LTBSK59BJ2)`. The build configuration
+pins that identity and intentionally rejects Apple Development or Apple
+Distribution archives.
+
 The release workflow consumes the base64 form of that `.p12` as
 `MACOS_CSC_LINK` and its export password as `MACOS_CSC_KEY_PASSWORD`.
 

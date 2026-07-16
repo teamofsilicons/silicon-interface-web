@@ -23,7 +23,15 @@ jobs:
   macos:
     name: macOS sign, notarize, and verify
     if: ${{ inputs.platform == 'macos' }}
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x64
+          - os: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
       CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
@@ -43,18 +51,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node desktop/scripts/check-release-env.mjs mac
       - run: pnpm -C desktop build
-      - name: Select native package architecture
-        run: |
-          case "$RUNNER_ARCH" in
-            X64) desktop_arch=x64 ;;
-            ARM64) desktop_arch=arm64 ;;
-            *) echo "Unsupported macOS runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
-          esac
-          echo "DESKTOP_ARCH=$desktop_arch" >> "$GITHUB_ENV"
       - name: Build, sign, and notarize
-        run: pnpm -C desktop exec electron-builder --mac "--$DESKTOP_ARCH" --publish never --config.directories.output=dist-signing-preflight
+        run: pnpm -C desktop exec electron-builder --mac --${{ matrix.arch }} --publish never --config.directories.output=dist-signing-preflight
       - name: Verify update artifacts
-        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight darwin "$DESKTOP_ARCH"
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight darwin ${{ matrix.arch }}
       - name: Verify packaged application and containers
         run: |
           output_dir="desktop/dist-signing-preflight"
@@ -105,7 +105,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: desktop-macos-signing-preflight
+          name: desktop-macos-signing-preflight-${{ matrix.arch }}
           path: |
             desktop/dist-signing-preflight/*.dmg
             desktop/dist-signing-preflight/*.zip
@@ -117,7 +117,15 @@ jobs:
   windows:
     name: Windows sign, install, launch, and verify
     if: ${{ inputs.platform == 'windows' }}
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: x64
+          - os: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
       WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER }}
@@ -153,7 +161,7 @@ jobs:
         shell: pwsh
         run: |
           $arguments = @(
-            "--win", "--x64",
+            "--win", "--${{ matrix.arch }}",
             "--publish", "never",
             "--config.directories.output=dist-signing-preflight"
           )
@@ -163,7 +171,7 @@ jobs:
           }
           pnpm -C desktop exec electron-builder @arguments
       - name: Verify update artifacts
-        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight win32 x64
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight win32 ${{ matrix.arch }}
       - name: Launch signed packaged application
         run: node desktop/scripts/smoke-windows-package.mjs desktop/dist-signing-preflight --require-signature
       - name: Install, launch, and uninstall signed package
@@ -171,7 +179,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: desktop-windows-signing-preflight
+          name: desktop-windows-signing-preflight-${{ matrix.arch }}
           path: |
             desktop/dist-signing-preflight/*.exe
             desktop/dist-signing-preflight/*.zip

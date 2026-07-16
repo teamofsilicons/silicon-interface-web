@@ -96,6 +96,10 @@ import {
 import { editableTextForEvent } from "@/lib/event-edit";
 import { clearAnnotationSession } from "@/lib/annotation-session";
 import {
+  MAX_COMPOSER_ATTACHMENTS,
+  planAttachmentBatch,
+} from "@/lib/attachment-batch";
+import {
   buildMentionLookup,
   mentionClassName,
   splitMentionText,
@@ -189,9 +193,9 @@ interface Props {
   onFail: (clientId: string, error: unknown) => void;
   /** Update a local pending bubble before the server has acked it. */
   onOptimisticUpdate?: (clientId: string, payload: OptimisticPayload) => void;
-  /** A file dropped onto the chat surface gets handed in here. */
-  droppedFile?: File | null;
-  onDroppedFileConsumed?: () => void;
+  /** Files dropped onto the chat surface get handed in here as one ordered batch. */
+  droppedFiles?: readonly File[] | null;
+  onDroppedFilesConsumed?: () => void;
   /** A flattened annotation set handed off from the studio, staged as a draft. */
   pendingAnnotationDraft?: AnnotationDraft | null;
   onAnnotationDraftConsumed?: () => void;
@@ -249,7 +253,6 @@ const SILICON_EMPTY_HOLD_MS = SILICON_TEXT_HOLD_MS;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 const EDIT_INACTIVITY_MS = 60_000;
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
-const MAX_ATTACHMENTS = 10;
 
 interface QueuedTextSend {
   clientId: string;
@@ -746,8 +749,8 @@ export function Composer({
   onAck,
   onFail,
   onOptimisticUpdate,
-  droppedFile,
-  onDroppedFileConsumed,
+  droppedFiles,
+  onDroppedFilesConsumed,
   pendingAnnotationDraft,
   onAnnotationDraftConsumed,
   replyTo,
@@ -1155,19 +1158,15 @@ export function Composer({
         toast.message("finish editing before adding attachments.");
         return;
       }
-      const incoming = list ? Array.from(list) : [];
-      if (incoming.length === 0) return;
-      const room = MAX_ATTACHMENTS - attachmentsRef.current.length;
-      if (room <= 0) {
-        toast.error(`up to ${MAX_ATTACHMENTS} attachments at a time.`);
+      const batch = planAttachmentBatch(list, attachmentsRef.current.length);
+      if (batch.accepted.length === 0) {
+        if (batch.rejected > 0) {
+          toast.error(`up to ${MAX_COMPOSER_ATTACHMENTS} attachments at a time.`);
+        }
         return;
       }
       const staged: StagedFile[] = [];
-      for (const file of incoming) {
-        if (staged.length >= room) {
-          toast.message(`only the first ${MAX_ATTACHMENTS} attachments were added.`);
-          break;
-        }
+      for (const file of batch.accepted) {
         staged.push({
           id: newClientId(),
           file,
@@ -1179,6 +1178,9 @@ export function Composer({
           mediaId: null,
           mime: file.type || "application/octet-stream",
         });
+      }
+      if (batch.rejected > 0) {
+        toast.message(`up to ${MAX_COMPOSER_ATTACHMENTS} attachments at a time.`);
       }
       if (staged.length === 0) return;
       setAttachments((prev) => [...prev, ...staged]);
@@ -1300,17 +1302,17 @@ export function Composer({
   }, []);
   const emojiLimit = emojiCols * 3;
 
-  // Pull dropped files in from RoomView. We only treat it as a hint — the
-  // parent clears its own state via `onDroppedFileConsumed` once we've taken
-  // ownership.
+  // Pull the complete ordered drop batch in from RoomView. We only treat it as
+  // a hint — the parent clears its own state once we've taken ownership.
   React.useEffect(() => {
-    if (droppedFile) {
+    if (droppedFiles?.length) {
+      const batch = Array.from(droppedFiles);
       queueMicrotask(() => {
-        attachFiles([droppedFile]);
-        onDroppedFileConsumed?.();
+        attachFiles(batch);
+        onDroppedFilesConsumed?.();
       });
     }
-  }, [droppedFile, onDroppedFileConsumed, attachFiles]);
+  }, [droppedFiles, onDroppedFilesConsumed, attachFiles]);
 
   // Stage a flattened annotation set as a ready "annotations" row. Removes any
   // earlier annotation row for the same source (re-attaching replaces rather
@@ -1362,7 +1364,7 @@ export function Composer({
   // hint pattern as the dropped-file effect above.
   React.useEffect(() => {
     if (pendingAnnotationDraft) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- consume-hint prop, mirrors the droppedFile effect above
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- consume-hint prop, mirrors the dropped-files effect above
       stageAnnotationDraft(pendingAnnotationDraft);
       onAnnotationDraftConsumed?.();
     }

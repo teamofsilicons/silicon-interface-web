@@ -989,7 +989,7 @@ export function RoomView({
   >({});
   const [cronOpen, setCronOpen] = React.useState(false);
   const [browserOpen, setBrowserOpen] = React.useState(false);
-  const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
+  const [droppedFiles, setDroppedFiles] = React.useState<File[]>([]);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
   // #5 — Per-handle activity state. Each entry expires after `until`.
   const [activities, setActivities] = React.useState<
@@ -3856,7 +3856,10 @@ export function RoomView({
     if (!e.dataTransfer.files.length) return;
     e.preventDefault();
     setIsDropTarget(false);
-    setDroppedFile(e.dataTransfer.files[0]);
+    // Preserve the complete native drop batch and its OS-provided order. The
+    // composer applies the shared attachment limit and stages every accepted
+    // file through the same durable upload path as picker/paste attachments.
+    setDroppedFiles(Array.from(e.dataTransfer.files));
   };
 
   // ----- Search filter -----
@@ -5036,8 +5039,8 @@ export function RoomView({
             onAck={onAck}
             onFail={onFail}
             onOptimisticUpdate={onOptimisticUpdate}
-            droppedFile={droppedFile}
-            onDroppedFileConsumed={() => setDroppedFile(null)}
+            droppedFiles={droppedFiles}
+            onDroppedFilesConsumed={() => setDroppedFiles([])}
             pendingAnnotationDraft={pendingAnnotationDraft}
             onAnnotationDraftConsumed={() => setPendingAnnotationDraft(null)}
             replyTo={replyTo}

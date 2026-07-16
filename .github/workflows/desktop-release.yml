@@ -37,6 +37,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: node desktop/scripts/verify-release-version.mjs "$RELEASE_TAG"
+      - run: pnpm test:deploy
+      - run: pnpm security:audit
       - run: pnpm desktop:test
       - run: pnpm exec tsc --noEmit
       - run: pnpm test:reliability

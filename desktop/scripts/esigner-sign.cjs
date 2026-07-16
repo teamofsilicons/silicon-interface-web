@@ -33,6 +33,19 @@ function redact(value, secrets) {
   return output;
 }
 
+function reportedToolFailure(result) {
+  const output = [result?.stdout, result?.stderr]
+    .filter((value) => typeof value === "string" && value.trim())
+    .join("\n")
+    .trim();
+  if (!output) return "";
+
+  const failed = output
+    .split(/\r?\n/u)
+    .some((line) => /^\s*(?:error|fatal|failure)(?:\s*:|\b)/iu.test(line));
+  return failed ? output : "";
+}
+
 async function sha256(file) {
   return createHash("sha256").update(await readFile(file)).digest("hex");
 }
@@ -104,7 +117,13 @@ async function signWith(configuration, run) {
   };
 
   try {
-    await run(java, scanArgs, runOptions);
+    const result = await run(java, scanArgs, runOptions);
+    const reportedFailure = reportedToolFailure(result);
+    if (reportedFailure) {
+      const error = new Error("signer reported failure");
+      error.stdout = reportedFailure;
+      throw error;
+    }
   } catch (error) {
     const details = redact(error?.stderr || error?.stdout || error?.message, secrets).trim();
     throw new Error(`eSigner malware scan failed${details ? `: ${details}` : ""}`);
@@ -113,7 +132,13 @@ async function signWith(configuration, run) {
     throw new Error("eSigner: input changed after malware scan and will not be signed");
   }
   try {
-    await run(java, signArgs, runOptions);
+    const result = await run(java, signArgs, runOptions);
+    const reportedFailure = reportedToolFailure(result);
+    if (reportedFailure) {
+      const error = new Error("signer reported failure");
+      error.stdout = reportedFailure;
+      throw error;
+    }
   } catch (error) {
     const details = redact(error?.stderr || error?.stdout || error?.message, secrets).trim();
     throw new Error(`eSigner signing failed${details ? `: ${details}` : ""}`);
@@ -131,4 +156,4 @@ async function sign(configuration) {
 }
 
 module.exports = sign;
-module.exports._private = { EXPECTED_JAR, redact, signWith };
+module.exports._private = { EXPECTED_JAR, redact, reportedToolFailure, signWith };

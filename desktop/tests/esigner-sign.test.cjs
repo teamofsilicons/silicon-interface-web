@@ -142,3 +142,36 @@ test("eSigner hook fails closed when the signer leaves bytes unchanged", async (
     );
   });
 });
+
+test("eSigner hook rejects a zero-exit scan that reports an error", async () => {
+  const { file, jar } = candidate();
+  await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
+    let calls = 0;
+    await assert.rejects(
+      _private.signWith({ path: file, hash: "sha256" }, async () => {
+        calls += 1;
+        return { stdout: "Error: malware scan service unavailable\n" };
+      }),
+      /malware scan failed: Error: malware scan service unavailable/,
+    );
+    assert.equal(calls, 1);
+  });
+});
+
+test("eSigner hook rejects a zero-exit sign command that reports an error", async () => {
+  const { file, jar } = candidate();
+  await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
+    let calls = 0;
+    await assert.rejects(
+      _private.signWith({ path: file, hash: "sha256" }, async (_java, args) => {
+        calls += 1;
+        if (args.includes("sign")) {
+          return { stderr: "warning only", stdout: "Error: The OTP is invalid\n" };
+        }
+        return { stdout: "Code scan completed successfully\n" };
+      }),
+      /signing failed: Error: The OTP is invalid/,
+    );
+    assert.equal(calls, 2);
+  });
+});

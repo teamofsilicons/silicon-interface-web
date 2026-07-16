@@ -204,6 +204,11 @@ before signing each Electron-builder EXE/DLL with SHA-256 only, and redacts all
 eSigner credentials from failures. The workflow then independently requires
 Windows to report a valid Authenticode signature on the unpacked app and NSIS
 installer.
+The adapter also treats line-leading `Error`, `Fatal`, and `Failure` output as a
+failed operation even if the vendor CLI exits with status zero, and requires the
+signed file bytes to change. GitHub-hosted runners normally maintain synchronized
+time; any self-hosted signer must be NTP-synchronized because automated TOTP
+authorization fails when its clock is outside SSL.com's accepted window.
 The command sequence follows SSL.com's current
 [CodeSignTool command guide](https://www.ssl.com/guide/esigner-codesigntool-command-guide/)
 for the pinned tool version.

@@ -17,7 +17,7 @@ The exact current tree passed:
 | --- | --- |
 | Deployment-contract tests | 15/15 passed |
 | Dependency advisory gate | passed; 847 locked packages, 0 advisories at the high threshold |
-| Desktop TypeScript + policy/release/smoke/signing tests | 63/63 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 65/65 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite in the committed desktop tree | 252/252 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
@@ -388,17 +388,46 @@ read-only, copied to an isolated Applications directory, and re-checked with
 exact production renderer and remained healthy for the ten-second native
 stability window. No system Gatekeeper bypass or user profile was used.
 
+The SSL.com cloud-signing hook was additionally exercised end to end against
+SSL.com's public eSigner sandbox on 2026-07-17, using only the vendor-published
+demo identity and a disposable copy of the x64 Windows application. The hook
+authenticated, resolved credential `8b072e22-7685-4771-b5c6-48e46614915f`,
+confirmed the sandbox EV subject `Esigner LLC`, ran the malware scan, and signed
+the candidate through the same `desktop/scripts/esigner-sign.cjs` adapter used
+by Electron-builder. The unsigned source remained SHA-256
+`009548e8849f9050cdc8ec228debbcf883c3330f80b6ac902ae60fdc0ca97add`;
+the signed disposable copy became
+`b7a5238e58fe322c4cfedcee941d7a321450cc79b912f76c61938fe92f7042a0`.
+Independent PE inspection changed the Security Directory from empty to offset
+`0x0dd81c00`, size `0x2068`; independent Authenticode parsing verified that the
+SHA-256 file digest matched the embedded signed digest, the signer was the
+expected sandbox subject, and the RFC 3161 timestamp was
+`2026-07-16 23:25:05Z`. The expected trust result is a development-root chain,
+not public trust; this rehearsal proves the adapter transaction and does not
+replace CA validation of the production publisher.
+
+The rehearsal also exposed a vendor CLI edge case: CodeSignTool can return exit
+status zero while printing a signing error. The adapter now rejects
+line-leading `Error`, `Fatal`, or `Failure` output from both scan and sign
+commands before considering byte mutation, and the two regression cases are in
+the 65-test desktop suite. The first sandbox attempt correctly failed because
+the local Mac clock was approximately 55 seconds behind trusted NTP and SSL.com
+rejected the generated TOTP. The successful rehearsal used a process-local
+time correction; no system clock or repository artifact was modified.
+
 ## External gates before a public stable release
 
 These are not source defects and cannot be silently bypassed:
 
 1. Complete CA identity validation and provide the credentials for a trusted
    Windows signing identity. The SSL.com eSigner cloud-HSM adapter is integrated
-   and locally passed its fail-closed unit/config-resolution gates; it pins and
-   verifies CodeSignTool v1.3.2, accepts only SHA-256, redacts credentials,
-   requires the exact CA-verified publisher in the updater configuration, and
-   is followed by native signer/timestamp/publisher verification. No certificate
-   has yet been issued for the desired Windows publisher.
+   and has passed both its fail-closed unit/config-resolution gates and the
+   vendor's public sandbox transaction; it pins and verifies CodeSignTool
+   v1.3.2, accepts only SHA-256, rejects zero-exit textual errors, redacts
+   credentials, requires the exact CA-verified publisher in the updater
+   configuration, and is followed by native signer/timestamp/publisher
+   verification. No certificate has yet been issued for the desired Windows
+   publisher.
 2. Complete the interactive acceptance slice in `desktop/README.md` on clean
    physical Windows, macOS, and Linux machines. CI now covers deterministic
    package/runtime readiness; it cannot click native dialogs, test IME/screen

@@ -38,6 +38,16 @@ test("Windows installer signature gate is explicit and rejects ambiguous argumen
   assert.throws(() => smoke.parseWindowsInstallerArguments(["--unsigned"], {}), /unknown option/);
 });
 
+test("Windows installer registry output resolves the registered install directory", () => {
+  assert.equal(
+    smoke.parseRegistryInstallLocation(
+      "HKEY_CURRENT_USER\\Software\\app\r\n    InstallLocation    REG_SZ    C:\\Users\\me\\Programs\\Silicon Interface\r\n",
+    ),
+    "C:\\Users\\me\\Programs\\Silicon Interface",
+  );
+  assert.equal(smoke.parseRegistryInstallLocation("ERROR: The system was unable to find the key"), null);
+});
+
 test("Windows installer resolver ignores unpacked executables and rejects ambiguity", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silicon-windows-installer-test-"));
   const expectedName = "Silicon Interface-0.1.0-win-x64.exe";

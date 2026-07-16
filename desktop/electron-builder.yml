@@ -50,6 +50,10 @@ win:
     - nsis
     - zip
 nsis:
+  # Keep the per-user install registry identity stable across app renames and
+  # electron-builder upgrades. The Windows installer smoke test also uses this
+  # exact contract to discover the directory selected by Windows.
+  guid: 4010082e-265c-5251-a3ae-34a383fe3e0e
   oneClick: true
   deleteAppDataOnUninstall: false
 

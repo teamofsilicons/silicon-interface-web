@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, open, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
-import os from "node:os";
+import { access, open, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,8 +13,9 @@ import {
 
 const DESKTOP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PRODUCT_EXECUTABLE = "Silicon Interface.exe";
+const INSTALL_REGISTRY_KEY = String.raw`HKCU\Software\4010082e-265c-5251-a3ae-34a383fe3e0e`;
 const COMMAND_TIMEOUT_MS = 180_000;
-const INSTALL_APPEAR_TIMEOUT_MS = 60_000;
+const INSTALL_APPEAR_TIMEOUT_MS = 120_000;
 const REMOVE_TIMEOUT_MS = 20_000;
 
 function fail(message) {
@@ -124,6 +124,42 @@ export async function waitForInstalledFiles(
   throw lastError ?? new Error(`NSIS install did not populate ${installDirectory}`);
 }
 
+export function parseRegistryInstallLocation(output) {
+  const match = /^\s*InstallLocation\s+REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/im.exec(output);
+  return match?.[1] || null;
+}
+
+function registeredInstallLocation() {
+  const result = spawnSync(
+    "reg.exe",
+    ["query", INSTALL_REGISTRY_KEY, "/v", "InstallLocation"],
+    { encoding: "utf8", timeout: 15_000, windowsHide: true },
+  );
+  if (result.error) fail(`reg.exe could not run: ${result.error.message}`);
+  if (result.status !== 0) return null;
+  return parseRegistryInstallLocation(result.stdout);
+}
+
+async function waitForRegisteredInstall(timeoutMs = INSTALL_APPEAR_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    const installDirectory = registeredInstallLocation();
+    if (installDirectory) {
+      try {
+        return {
+          installDirectory,
+          ...(await findInstalledFiles(installDirectory)),
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    await sleep(200);
+  }
+  throw lastError ?? new Error(`NSIS did not register ${INSTALL_REGISTRY_KEY}`);
+}
+
 function run(command, args) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
@@ -146,6 +182,15 @@ async function waitUntilRemoved(filename) {
     await sleep(200);
   }
   fail(`NSIS uninstall left ${filename}`);
+}
+
+async function waitUntilUnregistered() {
+  const deadline = Date.now() + REMOVE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!registeredInstallLocation()) return;
+    await sleep(200);
+  }
+  fail(`NSIS uninstall left ${INSTALL_REGISTRY_KEY}`);
 }
 
 export function parseWindowsInstallerArguments(argv, environment = process.env) {
@@ -177,19 +222,22 @@ export async function smokeWindowsInstaller(packagePath, options = {}) {
     console.log("windows-installer-smoke: installer has a valid Authenticode signature");
   }
 
-  const scratch = await mkdtemp(path.join(os.tmpdir(), "silicon-windows-install-smoke-"));
-  const installDirectory = path.join(scratch, "installed");
+  const existingInstall = registeredInstallLocation();
+  if (existingInstall) {
+    fail(`refusing to replace an existing Silicon Interface install at ${existingInstall}`);
+  }
   let installed = null;
   try {
-    // NSIS requires /D to be the final argument and accepts it without quotes
-    // when the process API passes the complete value as one argument.
-    run(installerPath, ["/S", `/D=${installDirectory}`]);
-    // On native Windows ARM64 the x64 NSIS bootstrapper can hand installation
-    // to a child process and return before Defender/filesystem finalization is
-    // visible. Require the complete app/resources/uninstaller set, but allow
-    // that bounded handoff instead of checking one path at one instant.
-    installed = await waitForInstalledFiles(installDirectory);
-    console.log(`windows-installer-smoke: installed ${version}/${architecture}`);
+    // Exercise the real one-click user flow. electron-builder owns the default
+    // per-user location and records the selected directory in this app's stable
+    // registry key. A forced /D path is an administrative override, and on the
+    // emulated x86 NSIS bootstrapper used by Windows ARM it is not equivalent to
+    // what an end user receives.
+    run(installerPath, ["/S"]);
+    installed = await waitForRegisteredInstall();
+    console.log(
+      `windows-installer-smoke: installed ${version}/${architecture} at ${installed.installDirectory}`,
+    );
 
     if (options.requireSignature) {
       verifyAuthenticodeSignature(installed.uninstallerPath);
@@ -205,6 +253,7 @@ export async function smokeWindowsInstaller(packagePath, options = {}) {
 
     run(installed.uninstallerPath, ["/S"]);
     await waitUntilRemoved(installed.appPath);
+    await waitUntilUnregistered();
     installed = null;
     console.log("windows-installer-smoke: uninstall removed the application");
   } finally {
@@ -215,7 +264,6 @@ export async function smokeWindowsInstaller(packagePath, options = {}) {
         console.error(`windows-installer-smoke: cleanup warning: ${error.message}`);
       }
     }
-    await rm(scratch, { recursive: true, force: true });
   }
 }
 

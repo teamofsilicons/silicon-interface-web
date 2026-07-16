@@ -123,6 +123,7 @@ jobs:
             throw "Signature gate failed for an unexpected reason"
           }
           Write-Host "windows-signature-smoke: unsigned candidate correctly rejected"
+          $global:LASTEXITCODE = 0
       - name: Install Linux runtime-smoke dependencies
         if: ${{ matrix.target == 'linux' }}
         run: |

@@ -179,10 +179,14 @@ credentials only in GitHub Actions secrets and the password manager.
 The repository includes a fail-closed SSL.com eSigner adapter for the globally
 available cloud-HSM path. It downloads the official platform-neutral
 CodeSignTool v1.3.2 archive, verifies its pinned SHA-256 digest before use, runs
-it under Temurin Java 21 without a shell, signs each Electron-builder EXE/DLL
-with SHA-256 only, blocks malware-detected files, and redacts all eSigner
-credentials from failures. The workflow then independently requires Windows to
-report a valid Authenticode signature on the unpacked app and NSIS installer.
+it under Temurin Java 21 without a shell, runs the documented `scan_code` gate
+before signing each Electron-builder EXE/DLL with SHA-256 only, and redacts all
+eSigner credentials from failures. The workflow then independently requires
+Windows to report a valid Authenticode signature on the unpacked app and NSIS
+installer.
+The command sequence follows SSL.com's current
+[CodeSignTool command guide](https://www.ssl.com/guide/esigner-codesigntool-command-guide/)
+for the pinned tool version.
 
 To activate that path after SSL.com finishes identity validation:
 

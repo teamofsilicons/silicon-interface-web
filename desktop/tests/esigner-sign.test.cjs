@@ -46,16 +46,22 @@ function candidate() {
 test("eSigner hook signs one SHA-256 executable in place without a shell", async () => {
   const { file, jar } = candidate();
   await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
+    const commands = [];
     await _private.signWith({ path: file, hash: "sha256" }, async (_java, args, options) => {
+      commands.push(args);
       assert.equal(options.windowsHide, true);
       assert.equal(options.env.CODE_SIGN_TOOL_PATH, path.dirname(path.dirname(jar)));
-      assert.equal(args.includes("-override=true"), true);
-      assert.equal(args.includes("-malware_block=true"), true);
       assert.equal(args.includes(`-input_file_path=${file}`), true);
       assert.equal(args.some((arg) => arg.startsWith("-password=")), true);
-      writeFileSync(file, "signed executable");
+      if (args.includes("sign")) writeFileSync(file, "signed executable");
       return { stdout: "signed" };
     });
+    assert.equal(commands.length, 2);
+    assert.equal(commands[0].includes("scan_code"), true);
+    assert.equal(commands[0].some((arg) => arg.startsWith("-totp_secret=")), false);
+    assert.equal(commands[1].includes("sign"), true);
+    assert.equal(commands[1].includes("-override=true"), true);
+    assert.equal(commands.flat().some((arg) => arg.startsWith("-malware_block=")), false);
   });
 });
 
@@ -87,6 +93,37 @@ test("eSigner hook redacts every cloud credential from failures", async () => {
       assert.equal(failure.message.includes(secret), false);
     }
     assert.match(failure.message, /\[redacted\]/);
+  });
+});
+
+test("eSigner hook fails closed when the malware scan rejects a file", async () => {
+  const { file, jar } = candidate();
+  await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
+    let calls = 0;
+    await assert.rejects(
+      _private.signWith({ path: file, hash: "sha256" }, async () => {
+        calls += 1;
+        throw new Error("malware scan rejected candidate");
+      }),
+      /malware scan failed/,
+    );
+    assert.equal(calls, 1);
+  });
+});
+
+test("eSigner hook refuses to sign bytes changed after malware scanning", async () => {
+  const { file, jar } = candidate();
+  await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
+    let calls = 0;
+    await assert.rejects(
+      _private.signWith({ path: file, hash: "sha256" }, async (_java, args) => {
+        calls += 1;
+        if (args.includes("scan_code")) writeFileSync(file, "different unscanned executable");
+        return { stdout: "scanned" };
+      }),
+      /changed after malware scan/,
+    );
+    assert.equal(calls, 1);
   });
 });
 

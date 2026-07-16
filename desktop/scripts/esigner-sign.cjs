@@ -74,31 +74,49 @@ async function signWith(configuration, run) {
       ? path.join(process.env.JAVA_HOME, "bin", process.platform === "win32" ? "java.exe" : "java")
       : "java");
   const before = await sha256(file);
-  const args = [
+  const authenticationArgs = [
+    `-username=${values.SSL_ESIGNER_USERNAME}`,
+    `-password=${values.SSL_ESIGNER_PASSWORD}`,
+    `-credential_id=${values.SSL_ESIGNER_CREDENTIAL_ID}`,
+  ];
+  const javaArgs = ["-Xmx1024m", "-jar", jar];
+  const scanArgs = [
+    ...javaArgs,
+    "scan_code",
+    ...authenticationArgs,
+    `-input_file_path=${file}`,
+  ];
+  const signArgs = [
     "-Xmx1024m",
     "-jar",
     jar,
     "sign",
-    `-username=${values.SSL_ESIGNER_USERNAME}`,
-    `-password=${values.SSL_ESIGNER_PASSWORD}`,
-    `-credential_id=${values.SSL_ESIGNER_CREDENTIAL_ID}`,
+    ...authenticationArgs,
     `-totp_secret=${values.SSL_ESIGNER_TOTP_SECRET}`,
-    "-program_name=Silicon Interface",
     `-input_file_path=${file}`,
     "-override=true",
-    "-malware_block=true",
   ];
+  const runOptions = {
+    windowsHide: true,
+    timeout: 10 * 60 * 1000,
+    maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, CODE_SIGN_TOOL_PATH: toolRoot },
+  };
 
   try {
-    await run(java, args, {
-      windowsHide: true,
-      timeout: 10 * 60 * 1000,
-      maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, CODE_SIGN_TOOL_PATH: toolRoot },
-    });
+    await run(java, scanArgs, runOptions);
   } catch (error) {
     const details = redact(error?.stderr || error?.stdout || error?.message, secrets).trim();
-    throw new Error(`eSigner failed${details ? `: ${details}` : ""}`);
+    throw new Error(`eSigner malware scan failed${details ? `: ${details}` : ""}`);
+  }
+  if (await sha256(file) !== before) {
+    throw new Error("eSigner: input changed after malware scan and will not be signed");
+  }
+  try {
+    await run(java, signArgs, runOptions);
+  } catch (error) {
+    const details = redact(error?.stderr || error?.stdout || error?.message, secrets).trim();
+    throw new Error(`eSigner signing failed${details ? `: ${details}` : ""}`);
   }
 
   const afterInfo = await lstat(file);

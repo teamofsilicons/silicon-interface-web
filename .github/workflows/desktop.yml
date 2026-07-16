@@ -169,7 +169,7 @@ jobs:
           foreach ($storeName in @('Root', 'TrustedPublisher')) {
             $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
               $storeName,
-              [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+              [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
             )
             try {
               $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
@@ -248,7 +248,7 @@ jobs:
             foreach ($storeName in @('Root', 'TrustedPublisher')) {
               $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
                 $storeName,
-                [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+                [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
               )
               try {
                 $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)

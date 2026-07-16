@@ -1,6 +1,6 @@
 # Desktop verification record
 
-Date: 2026-07-16
+Date: 2026-07-17
 
 Release candidate version: `0.1.0`
 
@@ -15,28 +15,28 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Deployment-contract tests | 12/12 passed |
+| Deployment-contract tests | 15/15 passed |
 | Dependency advisory gate | passed; 847 locked packages, 0 advisories at the high threshold |
-| Desktop TypeScript + policy/release/smoke/signing tests | 62/62 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 63/63 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite in the committed desktop tree | 252/252 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
 
-Commit `22fa08f` passed the complete six-architecture native GitHub Actions
+Commit `34e3323` passed the complete six-architecture native GitHub Actions
 Desktop workflow
-([run 29525903554](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29525903554)):
+([run 29527546566](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29527546566)):
 
 | Native job | Job ID | Result | Uploaded artifact ID |
 | --- | --- | --- | --- |
-| Shared Ubuntu test/build gate | `87714142999` | passed | n/a |
-| macOS 14 arm64 package/runtime | `87714585363` | passed | `8386727221` |
-| macOS 15 Intel x64 package/runtime | `87714585402` | passed | `8386790346` |
-| Windows 11 ARM arm64 package/runtime/install | `87714585334` | passed | `8386870150` |
-| Windows Server 2022 x64 package/runtime/install | `87714585367` | passed | `8386817955` |
-| Ubuntu 22.04 ARM arm64 package/runtime/install | `87714585371` | passed | `8386755215` |
-| Ubuntu 22.04 x64 package/runtime/install | `87714585391` | passed | `8386759151` |
+| Shared Ubuntu test/build gate | `87719621909` | passed | n/a |
+| macOS 14 arm64 package/runtime | `87720026507` | passed | `8387365739` |
+| macOS 15 Intel x64 package/runtime | `87720026498` | passed | `8387387423` |
+| Windows 11 ARM arm64 package/runtime/install | `87720026502` | passed | `8387523854` |
+| Windows Server 2022 x64 package/runtime/install | `87720026424` | passed | `8387460484` |
+| Ubuntu 22.04 ARM arm64 package/runtime/install | `87720026430` | passed | `8387400218` |
+| Ubuntu 22.04 x64 package/runtime/install | `87720026409` | passed | `8387397959` |
 
 The Windows ARM64 job used a timestamped, runner-local engineering
 Authenticode identity and independently proved that this identity is rejected
@@ -354,14 +354,16 @@ assessment in the app/DMG/ZIP, updater metadata verification, exact signed ZIP
 launch, and artifact upload (`8381150742`). This is the currently configured
 GitHub certificate archive, not a superseded local export.
 
-The final dual-architecture signing preflight at commit `dab249f`
-([run 29517673706](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29517673706))
+The exact-current dual-architecture signing preflight at commit `b626bf9`
+([run 29527264643](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29527264643))
 passed on both native Apple Silicon and native Intel runners. The arm64 job
-`87686674678` and x64 job `87686674680` each imported the same protected
+`87718687651` and x64 job `87718687599` each imported the same protected
 Developer ID archive, signed with hardened runtime and timestamp, notarized,
 verified the stapled app/DMG/ZIP plus Gatekeeper, launched the exact signed ZIP
 application against production, and uploaded architecture-scoped evidence
-artifacts `8383440794` and `8383547634`.
+artifacts `8387266251` and `8387331646`. The subsequent `34e3323` commit changes
+only release provenance enforcement, documentation, and its contract test; it
+does not change macOS package, signing, notarization, or preflight inputs.
 
 Artifact `8382689613` from the prior exact-certificate arm64 preflight was also
 downloaded to the local Apple Silicon Mac, its DMG checksum verified, mounted

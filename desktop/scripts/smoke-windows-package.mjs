@@ -219,18 +219,20 @@ async function readSmokeResult(resultPath) {
   fail(`could not read desktop smoke result: ${lastError?.message ?? String(lastError)}`);
 }
 
-function parseArguments(argv) {
-  let packagePath = process.env.SILICON_WINDOWS_SMOKE_PACKAGE || "dist";
+export function parseWindowsSmokeArguments(argv, environment = process.env) {
+  let packagePath = environment.SILICON_WINDOWS_SMOKE_PACKAGE || "dist";
+  let packagePathProvided = false;
   let timeoutMs = parsePositiveMilliseconds(
-    process.env.SILICON_WINDOWS_SMOKE_TIMEOUT_MS,
+    environment.SILICON_WINDOWS_SMOKE_TIMEOUT_MS,
     DEFAULT_TIMEOUT_MS,
     "SILICON_WINDOWS_SMOKE_TIMEOUT_MS",
   );
   let stabilityMs = parsePositiveMilliseconds(
-    process.env.SILICON_WINDOWS_SMOKE_STABILITY_MS,
+    environment.SILICON_WINDOWS_SMOKE_STABILITY_MS,
     DEFAULT_STABILITY_MS,
     "SILICON_WINDOWS_SMOKE_STABILITY_MS",
   );
+  let requireSignature = environment.SILICON_WINDOWS_SMOKE_REQUIRE_SIGNATURE === "1";
 
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -238,14 +240,48 @@ function parseArguments(argv) {
       timeoutMs = parsePositiveMilliseconds(argv[++index], undefined, "--timeout-ms");
     } else if (value === "--stability-ms") {
       stabilityMs = parsePositiveMilliseconds(argv[++index], undefined, "--stability-ms");
+    } else if (value === "--require-signature") {
+      requireSignature = true;
     } else if (value.startsWith("-")) {
       fail(`unknown option: ${value}`);
     } else {
+      if (packagePathProvided) fail("only one Windows package path may be supplied");
       packagePath = value;
+      packagePathProvided = true;
     }
   }
   if (stabilityMs >= timeoutMs) fail("stability time must be shorter than the total timeout");
-  return { packagePath, stabilityMs, timeoutMs };
+  return { packagePath, requireSignature, stabilityMs, timeoutMs };
+}
+
+export function verifyAuthenticodeSignature(executablePath) {
+  if (process.platform !== "win32") fail("Authenticode verification requires Windows");
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$signature = Get-AuthenticodeSignature -LiteralPath $env:SILICON_SIGNATURE_TARGET",
+    "if ($signature.Status -ne 'Valid') {",
+    "  throw \"Invalid Authenticode signature: $($signature.Status) - $($signature.StatusMessage)\"",
+    "}",
+    "Write-Output $signature.SignerCertificate.Thumbprint",
+  ].join("\n");
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const result = spawnSync(
+    "pwsh.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+    {
+      encoding: "utf8",
+      env: { ...process.env, SILICON_SIGNATURE_TARGET: executablePath },
+      timeout: TERMINATION_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  if (result.error) fail(`could not verify Authenticode signature: ${result.error.message}`);
+  if (result.signal) fail(`Authenticode verification was terminated by ${result.signal}`);
+  if (result.status !== 0) {
+    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    fail(`Authenticode verification failed${output ? `:\n${output}` : ""}`);
+  }
+  if (!result.stdout.trim()) fail("Authenticode verification returned no signer thumbprint");
 }
 
 async function verifyPortableExecutable(executablePath) {
@@ -280,6 +316,10 @@ export async function smokeWindowsExecutable(inputExecutablePath, options) {
   if (process.platform !== "win32") fail("Windows package smoke test requires Windows");
 
   const executablePath = await verifyRuntimeExecutable(inputExecutablePath);
+  if (options.requireSignature) {
+    verifyAuthenticodeSignature(executablePath);
+    console.log(`windows-smoke: valid Authenticode signature on ${path.basename(executablePath)}`);
+  }
   const desktopManifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -383,7 +423,7 @@ export async function smokeWindowsPackage(options) {
 }
 
 async function main() {
-  const options = parseArguments(process.argv.slice(2));
+  const options = parseWindowsSmokeArguments(process.argv.slice(2));
   console.log(`windows-smoke: inspecting ${path.resolve(options.packagePath)}`);
   await smokeWindowsPackage(options);
   console.log("windows-smoke: PASS");

@@ -7,7 +7,10 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { smokeWindowsExecutable } from "./smoke-windows-package.mjs";
+import {
+  smokeWindowsExecutable,
+  verifyAuthenticodeSignature,
+} from "./smoke-windows-package.mjs";
 
 const DESKTOP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PRODUCT_EXECUTABLE = "Silicon Interface.exe";
@@ -127,12 +130,34 @@ async function waitUntilRemoved(filename) {
   fail(`NSIS uninstall left ${filename}`);
 }
 
-export async function smokeWindowsInstaller(packagePath) {
+export function parseWindowsInstallerArguments(argv, environment = process.env) {
+  let packagePath = environment.SILICON_WINDOWS_SMOKE_PACKAGE || path.join(DESKTOP_ROOT, "dist");
+  let packagePathProvided = false;
+  let requireSignature = environment.SILICON_WINDOWS_SMOKE_REQUIRE_SIGNATURE === "1";
+  for (const value of argv) {
+    if (value === "--require-signature") {
+      requireSignature = true;
+    } else if (value.startsWith("-")) {
+      fail(`unknown option: ${value}`);
+    } else {
+      if (packagePathProvided) fail("only one Windows installer package path may be supplied");
+      packagePath = value;
+      packagePathProvided = true;
+    }
+  }
+  return { packagePath, requireSignature };
+}
+
+export async function smokeWindowsInstaller(packagePath, options = {}) {
   if (process.platform !== "win32") fail("Windows installer smoke test requires Windows");
   const version = await desktopVersion();
   const architecture = windowsArchitecture();
   const installerPath = await resolveWindowsInstaller(packagePath, version, architecture);
   await assertPortableExecutable(installerPath);
+  if (options.requireSignature) {
+    verifyAuthenticodeSignature(installerPath);
+    console.log("windows-installer-smoke: installer has a valid Authenticode signature");
+  }
 
   const scratch = await mkdtemp(path.join(os.tmpdir(), "silicon-windows-install-smoke-"));
   const installDirectory = path.join(scratch, "installed");
@@ -144,7 +169,13 @@ export async function smokeWindowsInstaller(packagePath) {
     installed = await findInstalledFiles(installDirectory);
     console.log(`windows-installer-smoke: installed ${version}/${architecture}`);
 
+    if (options.requireSignature) {
+      verifyAuthenticodeSignature(installed.uninstallerPath);
+      console.log("windows-installer-smoke: uninstaller has a valid Authenticode signature");
+    }
+
     await smokeWindowsExecutable(installed.appPath, {
+      requireSignature: options.requireSignature,
       stabilityMs: 10_000,
       timeoutMs: 75_000,
     });
@@ -167,9 +198,9 @@ export async function smokeWindowsInstaller(packagePath) {
 }
 
 async function main() {
-  const packagePath = process.argv[2] ?? path.join(DESKTOP_ROOT, "dist");
-  console.log(`windows-installer-smoke: inspecting ${path.resolve(packagePath)}`);
-  await smokeWindowsInstaller(packagePath);
+  const options = parseWindowsInstallerArguments(process.argv.slice(2));
+  console.log(`windows-installer-smoke: inspecting ${path.resolve(options.packagePath)}`);
+  await smokeWindowsInstaller(options.packagePath, options);
   console.log("windows-installer-smoke: PASS");
 }
 

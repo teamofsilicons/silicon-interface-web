@@ -35,6 +35,21 @@ test("Windows smoke parses only positive integer durations", () => {
   assert.throws(() => smoke.parsePositiveMilliseconds("oops", 100, "value"), /positive integer/);
 });
 
+test("Windows smoke requires signatures only when explicitly configured", () => {
+  assert.deepEqual(smoke.parseWindowsSmokeArguments(["candidate", "--require-signature"], {}), {
+    packagePath: "candidate",
+    requireSignature: true,
+    stabilityMs: 10_000,
+    timeoutMs: 75_000,
+  });
+  assert.equal(
+    smoke.parseWindowsSmokeArguments([], { SILICON_WINDOWS_SMOKE_REQUIRE_SIGNATURE: "1" }).requireSignature,
+    true,
+  );
+  assert.equal(smoke.parseWindowsSmokeArguments([], {}).requireSignature, false);
+  assert.throws(() => smoke.parseWindowsSmokeArguments(["--unsigned"], {}), /unknown option/);
+});
+
 test("Windows smoke validates an authenticated readiness record", () => {
   const launchedAt = Date.now() - 1_000;
   const record = {

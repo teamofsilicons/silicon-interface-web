@@ -167,23 +167,26 @@ jobs:
         run: pnpm -C desktop exec electron-builder --win --${{ matrix.arch }} --publish never --config.directories.output=dist-${{ matrix.arch }}
       - name: Verify update artifacts
         run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-${{ matrix.arch }} win32 ${{ matrix.arch }}
-      - name: Verify installer signature
+      - name: Verify Windows distributable signatures
         shell: pwsh
         run: |
           $installers = Get-ChildItem "desktop/dist-${{ matrix.arch }}" -Filter *.exe
-          if ($installers.Count -eq 0) { throw "No Windows installer found" }
-          foreach ($installer in $installers) {
-            $signature = Get-AuthenticodeSignature $installer.FullName
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer, found $($installers.Count)" }
+          $applications = Get-ChildItem "desktop/dist-${{ matrix.arch }}" -Recurse -File -Filter "Silicon Interface.exe" |
+            Where-Object { $_.Directory.Name -match '^win(?:-[a-z0-9]+)?-unpacked$' }
+          if ($applications.Count -ne 1) { throw "Expected exactly one unpacked application, found $($applications.Count)" }
+          foreach ($candidate in @($installers) + @($applications)) {
+            $signature = Get-AuthenticodeSignature $candidate.FullName
             if ($signature.Status -ne "Valid") {
-              throw "Invalid signature on $($installer.Name): $($signature.Status)"
+              throw "Invalid signature on $($candidate.FullName): $($signature.Status)"
             }
           }
       - name: Launch signed Windows application
         if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
-        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist-${{ matrix.arch }}
+        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist-${{ matrix.arch }} --require-signature
       - name: Install and uninstall signed Windows package
         if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
-        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist-${{ matrix.arch }}
+        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist-${{ matrix.arch }} --require-signature
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-win-${{ matrix.arch }}

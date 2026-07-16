@@ -24,6 +24,20 @@ test("Windows installer name is versioned and architecture scoped", () => {
   assert.throws(() => smoke.expectedWindowsInstallerName("0.1.0", "ia32"), /x64 or arm64/);
 });
 
+test("Windows installer signature gate is explicit and rejects ambiguous arguments", () => {
+  assert.deepEqual(smoke.parseWindowsInstallerArguments(["candidate", "--require-signature"], {}), {
+    packagePath: "candidate",
+    requireSignature: true,
+  });
+  assert.equal(
+    smoke.parseWindowsInstallerArguments([], { SILICON_WINDOWS_SMOKE_REQUIRE_SIGNATURE: "1" }).requireSignature,
+    true,
+  );
+  assert.equal(smoke.parseWindowsInstallerArguments([], {}).requireSignature, false);
+  assert.throws(() => smoke.parseWindowsInstallerArguments(["first", "second"], {}), /only one/);
+  assert.throws(() => smoke.parseWindowsInstallerArguments(["--unsigned"], {}), /unknown option/);
+});
+
 test("Windows installer resolver ignores unpacked executables and rejects ambiguity", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silicon-windows-installer-test-"));
   const expectedName = "Silicon Interface-0.1.0-win-x64.exe";

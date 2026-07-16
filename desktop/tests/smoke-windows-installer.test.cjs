@@ -62,3 +62,23 @@ test("Windows installer resolver ignores unpacked executables and rejects ambigu
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Windows installer smoke waits for an asynchronous NSIS handoff", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "silicon-windows-installer-handoff-"));
+  try {
+    const pending = smoke.waitForInstalledFiles(root, 2_000);
+    setTimeout(() => {
+      void (async () => {
+        await mkdir(path.join(root, "resources"), { recursive: true });
+        await writeFile(path.join(root, "Silicon Interface.exe"), "MZ");
+        await writeFile(path.join(root, "resources", "app.asar"), "asar");
+        await writeFile(path.join(root, "Uninstall Silicon Interface.exe"), "MZ");
+      })();
+    }, 50);
+    const installed = await pending;
+    assert.equal(path.basename(installed.appPath), "Silicon Interface.exe");
+    assert.equal(path.basename(installed.uninstallerPath), "Uninstall Silicon Interface.exe");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -15,6 +15,7 @@ import {
 const DESKTOP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PRODUCT_EXECUTABLE = "Silicon Interface.exe";
 const COMMAND_TIMEOUT_MS = 180_000;
+const INSTALL_APPEAR_TIMEOUT_MS = 60_000;
 const REMOVE_TIMEOUT_MS = 20_000;
 
 function fail(message) {
@@ -106,6 +107,23 @@ async function findInstalledFiles(installDirectory) {
   return { appPath, uninstallerPath: uninstallers[0] };
 }
 
+export async function waitForInstalledFiles(
+  installDirectory,
+  timeoutMs = INSTALL_APPEAR_TIMEOUT_MS,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return await findInstalledFiles(installDirectory);
+    } catch (error) {
+      lastError = error;
+      await sleep(200);
+    }
+  }
+  throw lastError ?? new Error(`NSIS install did not populate ${installDirectory}`);
+}
+
 function run(command, args) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
@@ -166,7 +184,11 @@ export async function smokeWindowsInstaller(packagePath, options = {}) {
     // NSIS requires /D to be the final argument and accepts it without quotes
     // when the process API passes the complete value as one argument.
     run(installerPath, ["/S", `/D=${installDirectory}`]);
-    installed = await findInstalledFiles(installDirectory);
+    // On native Windows ARM64 the x64 NSIS bootstrapper can hand installation
+    // to a child process and return before Defender/filesystem finalization is
+    // visible. Require the complete app/resources/uninstaller set, but allow
+    // that bounded handoff instead of checking one path at one instant.
+    installed = await waitForInstalledFiles(installDirectory);
     console.log(`windows-installer-smoke: installed ${version}/${architecture}`);
 
     if (options.requireSignature) {

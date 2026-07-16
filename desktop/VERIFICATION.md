@@ -15,12 +15,35 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke tests | 35/35 passed |
+| Desktop TypeScript + policy/release/smoke tests | 37/37 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite | 249/249 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
+
+Commit `9d30221` passed the complete native GitHub Actions Desktop workflow
+([run 29496175052](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29496175052)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87613532957` | passed in 1m38s | n/a |
+| macOS 14 arm64 package/runtime | `87613862755` | passed in 1m48s | `8374539145` |
+| Windows Server 2022 x64 package/runtime/install | `87613862744` | passed in 4m49s | `8374612091` |
+| Ubuntu 22.04 x64 package/runtime/install | `87613862770` | passed in 3m07s | `8374571697` |
+
+The Windows runner proved that the release Authenticode gate rejects the
+unsigned engineering executable as `NotSigned`, then completed the normal
+packaged launch and isolated NSIS install/runtime/uninstall checks. The tagged
+release workflow additionally requires valid Authenticode signatures on the
+installer, unpacked application, installed application, and generated
+uninstaller; a valid outer installer alone is insufficient.
+
+This run also closed a macOS cleanup race observed only after a successful
+production load and health window: an escalated process group is now sent one
+SIGKILL, not a duplicate signal after teardown. The corrected native run loaded
+production, remained healthy for 10 seconds, and reported `PASS`. Both exact
+Linux AppImage and DEB runtime/install paths also reported `PASS` again.
 
 Commit `421159a` passed the complete native GitHub Actions Desktop workflow
 ([run 29494688591](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29494688591)):

@@ -1,40 +1,49 @@
 # electron-builder config for the Silicon Interface desktop app.
-# Run from desktop/ after the root `desktop:build` script has produced
-# ../.next/standalone (with public/ and .next/static assembled inside).
+# The signed shell loads the exact production HTTPS Interface origin. Only the
+# compiled, sandboxed Electron shell and its static recovery assets ship here;
+# there is no localhost server or bundled request proxy.
 appId: ai.45d.silicon-interface
 productName: Silicon Interface
+copyright: Copyright © 2026 Team of Silicons
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 directories:
   output: dist
   buildResources: build
 
-# Only the tiny Electron shell goes in the asar; the Next standalone server
-# (with its bundled node_modules) ships as plain files under resources/ so
-# utilityProcess can fork it directly.
+# Keep the package allow-list narrow. electron-updater and its required runtime
+# dependencies are collected from package.json automatically.
 files:
-  - main.js
+  - compiled/**/*
+  - resources/**/*
   - build/icon.png
   - package.json
-extraResources:
-  - from: ../.next/standalone-desktop
-    to: standalone
-    filter:
-      - "**/*"
-  # electron-builder hard-skips a fileset's root node_modules (fileMatcher
-  # createFilter), so the flattened modules ship as their own fileset.
-  - from: ../.next/standalone-desktop/node_modules
-    to: standalone/node_modules
-    filter:
-      - "**/*"
 
 npmRebuild: false
+asar: true
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+
+publish:
+  - provider: generic
+    url: https://downloads.teamofsilicons.com/interface/stable
+
+protocols:
+  - name: Silicon Interface
+    schemes:
+      - silicon
 
 win:
   icon: build/icon.png
+  requestedExecutionLevel: asInvoker
   target:
-    - target: nsis
-      arch: [x64]
-    - target: zip
-      arch: [x64]
+    - nsis
+    - zip
 nsis:
   oneClick: true
   deleteAppDataOnUninstall: false
@@ -42,17 +51,24 @@ nsis:
 linux:
   icon: build/icon.png
   category: Network
+  executableName: silicon-interface
+  syncDesktopName: true
   maintainer: team@45d.ai
   synopsis: Desktop client for Silicon Interface
   target:
-    - target: AppImage
-      arch: [x64, arm64]
-    - target: deb
-      arch: [x64, arm64]
+    - AppImage
+    - deb
 
-# dir-only, unsigned — local smoke-testing, not distribution.
 mac:
-  identity: null
+  category: public.app-category.social-networking
+  minimumSystemVersion: "12.0"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Silicon Interface uses the microphone only when you record a voice message or join a call.
+    NSCameraUsageDescription: Silicon Interface uses the camera only when you choose to share video.
   target:
-    - target: dir
-      arch: [arm64]
+    - dmg
+    - zip

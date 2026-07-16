@@ -38,10 +38,16 @@ function JoinPageInner() {
   const token = params.token;
   const queryCode = useSearchParams().get("code") ?? "";
 
-  // Checked after mount (localStorage is client-only) to avoid a hydration mismatch.
-  const [authed, setAuthed] = React.useState(false);
+  // The refresh credential is HttpOnly. Resolve it before choosing between the
+  // accept flow and login/signup so a reload never misclassifies a valid user.
+  const [authed, setAuthed] = React.useState<boolean | null>(null);
   React.useEffect(() => {
-    setAuthed(Boolean(authStore.getAccess()));
+    let alive = true;
+    void (async () => {
+      const restored = Boolean(authStore.getAccess()) || await api.restoreWebSession();
+      if (alive) setAuthed(restored);
+    })();
+    return () => { alive = false; };
   }, []);
   const [info, setInfo] = React.useState<InviteInfo | null>(null);
   const [error, setError] = React.useState("");
@@ -190,7 +196,11 @@ function JoinPageInner() {
 
         {/* The action card. */}
         <div className="space-y-4 border bg-card p-6 shadow-sm">
-          {authed && info.already_member ? (
+          {authed === null ? (
+            <div className="flex items-center justify-center gap-2 py-3 text-sm text-muted-foreground" role="status">
+              <CircleNotch className="animate-spin" aria-hidden="true" /> restoring session…
+            </div>
+          ) : authed && info.already_member ? (
             <>
               <p className="text-center text-sm text-muted-foreground">
                 You&rsquo;re already part of{" "}

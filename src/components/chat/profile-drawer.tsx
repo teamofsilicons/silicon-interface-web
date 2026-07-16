@@ -20,6 +20,7 @@ import { api } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import type { Contact, CarbonPublic, Event, Room, SiliconPublic } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { albumMediaItems } from "@/lib/albums";
 import { Button } from "@/components/ui/button";
 
 import {
@@ -77,7 +78,7 @@ export function ProfileDrawer({
   onMessage,
 }: Props) {
   // Sender priority: explicit focus → first non-me sender → first room peer.
-  const counterpart: SenderRef | null = React.useMemo(() => {
+  const counterpart: SenderRef | null = (() => {
     if (focusSender) return focusSender;
     for (const e of events) {
       if (
@@ -92,7 +93,7 @@ export function ProfileDrawer({
       return { kind: room.peers[0].kind, handle: room.peers[0].handle };
     }
     return null;
-  }, [focusSender, events, currentUsername, room.peers]);
+  })();
 
   const [profile, setProfile] = React.useState<CarbonPublic | SiliconPublic | null>(null);
   const [profileLoading, setProfileLoading] = React.useState(false);
@@ -108,21 +109,27 @@ export function ProfileDrawer({
     counterpart?.kind === "silicon" ? (profile as SiliconPublic | null) : null;
   const canInviteToSilicon = !!siliconProfile?.owner_team_slug && !!siliconProfile?.silicon_id;
 
+  const counterpartKind = counterpart?.kind;
+  const counterpartHandle = counterpart?.handle;
+
   React.useEffect(() => {
-    if (!open || !counterpart) return;
+    if (!open || !counterpartKind || !counterpartHandle) return;
     let alive = true;
     // Drop the previous profile up front: keeping it while the new fetch is in
     // flight flashed the *last viewed* person's photo, and rendering the
     // seed-glyph placeholder flashed a wrong-looking mark before the real
     // photo arrived. Show an explicit loading state instead of either.
-    setProfile(null);
-    setProfileLoading(true);
+    queueMicrotask(() => {
+      if (!alive) return;
+      setProfile(null);
+      setProfileLoading(true);
+    });
     (async () => {
       try {
         const p =
-          counterpart.kind === "carbon"
-            ? await api.carbonByHandle(counterpart.handle)
-            : await api.siliconByHandle(counterpart.handle);
+          counterpartKind === "carbon"
+            ? await api.carbonByHandle(counterpartHandle)
+            : await api.siliconByHandle(counterpartHandle);
         if (alive) setProfile(p);
       } catch {
         /* ignore — drawer falls back to handle-only display */
@@ -133,7 +140,7 @@ export function ProfileDrawer({
     return () => {
       alive = false;
     };
-  }, [open, counterpart]);
+  }, [open, counterpartHandle, counterpartKind]);
 
   // A mention can point outside the room currently on screen. In that case,
   // load media/links from the target's direct conversation instead of leaking
@@ -185,7 +192,15 @@ export function ProfileDrawer({
   // Reset to "all" each time the drawer is freshly opened so users land on
   // the most informative tab by default.
   React.useEffect(() => {
-    if (open) setTab("all");
+    let alive = true;
+    if (open) {
+      queueMicrotask(() => {
+        if (alive) setTab("all");
+      });
+    }
+    return () => {
+      alive = false;
+    };
   }, [open]);
 
   const contentEvents = focusSender
@@ -193,13 +208,43 @@ export function ProfileDrawer({
       ? events
       : focusedEvents
     : events;
-  const images = React.useMemo(
-    () => contentEvents.filter((e) => e.type === "m.image" && e.content.media_id),
+  const albumEvents = React.useMemo(
+    () => contentEvents.flatMap((event) =>
+      event.type === "m.album"
+        ? albumMediaItems(event).map((item) => ({
+            ...event,
+            event_id: `${event.event_id}:${item.position}`,
+            type: (item.kind === "image" || item.mime?.startsWith("image/")
+              ? "m.image"
+              : "m.file") as Event["type"],
+            content: {
+              media_id: item.media_id,
+              mime: item.mime ?? "",
+              filename: item.filename,
+            },
+            media_meta: {
+              width: item.width ?? null,
+              height: item.height ?? null,
+              duration_ms: item.duration_ms ?? null,
+              kind: item.kind ?? "file",
+              mime: item.mime ?? "",
+            },
+          }))
+        : [],
+    ),
     [contentEvents],
   );
+  const images = React.useMemo(
+    () => [...contentEvents, ...albumEvents].filter(
+      (e) => e.type === "m.image" && e.content.media_id,
+    ),
+    [albumEvents, contentEvents],
+  );
   const files = React.useMemo(
-    () => contentEvents.filter((e) => e.type === "m.file" && e.content.media_id),
-    [contentEvents],
+    () => [...contentEvents, ...albumEvents].filter(
+      (e) => e.type === "m.file" && e.content.media_id,
+    ),
+    [albumEvents, contentEvents],
   );
   const voice = React.useMemo(
     () => contentEvents.filter((e) => e.type === "m.voice" && e.content.media_id),

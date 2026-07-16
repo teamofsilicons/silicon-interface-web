@@ -2,6 +2,22 @@
 // (/api/v1/push/*); the service worker in /public/sw.js renders the banners.
 
 import { api } from "./api";
+import { isDesktopShell } from "./desktop-bridge";
+
+export type PushPreviewMode = "full" | "sender" | "none";
+const PREVIEW_KEY = "silicon-interface:push-preview";
+
+export function getPushPreviewMode(): PushPreviewMode {
+  if (typeof window === "undefined") return "full";
+  const value = window.localStorage.getItem(PREVIEW_KEY);
+  return value === "sender" || value === "none" ? value : "full";
+}
+
+export async function setPushPreviewMode(mode: PushPreviewMode): Promise<void> {
+  window.localStorage.setItem(PREVIEW_KEY, mode);
+  const sub = await currentSubscription();
+  if (sub) await api.pushSubscribe({ ...sub.toJSON(), preview_mode: mode });
+}
 
 function base64UrlToUint8(b64: string): Uint8Array {
   const pad = "=".repeat((4 - (b64.length % 4)) % 4);
@@ -11,15 +27,19 @@ function base64UrlToUint8(b64: string): Uint8Array {
 
 export function pushSupported(): boolean {
   return (
-    typeof window !== "undefined" &&
-    "serviceWorker" in navigator &&
+    workerSupported() &&
+    !isDesktopShell() &&
     "PushManager" in window &&
     "Notification" in window
   );
 }
 
+function workerSupported(): boolean {
+  return typeof window !== "undefined" && "serviceWorker" in navigator;
+}
+
 export async function registerPushWorker(): Promise<ServiceWorkerRegistration | null> {
-  if (!pushSupported()) return null;
+  if (!workerSupported()) return null;
   try {
     return await navigator.serviceWorker.register("/sw.js", {
       scope: "/",
@@ -53,7 +73,7 @@ export async function enablePush(): Promise<EnablePushResult> {
       userVisibleOnly: true,
       applicationServerKey: base64UrlToUint8(public_key) as BufferSource,
     }));
-  await api.pushSubscribe(sub.toJSON());
+  await api.pushSubscribe({ ...sub.toJSON(), preview_mode: getPushPreviewMode() });
   return "enabled";
 }
 

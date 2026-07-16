@@ -7,6 +7,7 @@ import { CaretLeft, CaretRight } from "@phosphor-icons/react/dist/ssr";
 import { api } from "@/lib/api";
 import { isTeamHead, useTeams } from "@/lib/use-teams";
 import type { PaymentStatus } from "@/lib/types";
+import { resolveTeamLogo } from "@/lib/team-logo";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -135,7 +136,7 @@ type Tier = "info" | "warn" | "urgent" | "critical";
  */
 export function PaymentBanner() {
   const router = useRouter();
-  const { teams } = useTeams();
+  const { teams, loading: teamsLoading } = useTeams();
   // Seed from cache so the banner shows instantly on reload (dropping any stale
   // $0 rows so they don't flash before the re-fetch).
   const [rows, setRows] = React.useState<TeamPayment[]>(readCache);
@@ -153,6 +154,9 @@ export function PaymentBanner() {
 
   // Poll billing for each headed team (hourly + on team-set change).
   React.useEffect(() => {
+    // Never let the initial empty useTeams frame erase the cached banner or
+    // replace its logo before the authoritative team list has hydrated.
+    if (teamsLoading) return;
     let alive = true;
     const check = async () => {
       const out = await Promise.all(
@@ -179,7 +183,7 @@ export function PaymentBanner() {
       alive = false;
       clearInterval(id);
     };
-  }, [headKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [headKey, teamsLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Flip the local day at midnight so the countdown ticks down.
   React.useEffect(() => {
@@ -195,6 +199,8 @@ export function PaymentBanner() {
   if (!rows.length) return null;
   const i = Math.min(index, rows.length - 1);
   const r = rows[i];
+  const identity = resolveTeamLogo(r, headTeams, teamsLoading);
+  if (!identity) return null;
   const pay = r.payment;
   const due = pay.due_date;
   const d = due ? daysUntil(due) : pay.days_left;
@@ -214,7 +220,7 @@ export function PaymentBanner() {
             ? "warn"
             : "info";
 
-  const { title, line } = copy(r.name, d, daysToPause, amount, paused);
+  const { title, line } = copy(identity.name, d, daysToPause, amount, paused);
   const multiple = rows.length > 1;
 
   return (
@@ -229,13 +235,20 @@ export function PaymentBanner() {
         tier === "info" && "bg-secondary text-foreground",
       )}
     >
-      <IdAvatar
-        seed={`team:${r.slug}`}
-        src={r.logo_url}
-        size={36}
-        family="team"
-        className={cn("mt-0.5 h-9 w-9 shrink-0 border-0", tier === "critical" ? "bg-white/15" : "bg-muted")}
-      />
+      {identity.ready ? (
+        <IdAvatar
+          seed={`team:${identity.slug}`}
+          src={identity.logo_url}
+          size={36}
+          family="team"
+          className={cn("mt-0.5 h-9 w-9 shrink-0 border-0", tier === "critical" ? "bg-white/15" : "bg-muted")}
+        />
+      ) : (
+        <span
+          aria-hidden
+          className={cn("mt-0.5 h-9 w-9 shrink-0 animate-pulse", tier === "critical" ? "bg-white/15" : "bg-muted")}
+        />
+      )}
       <div className="min-w-0 flex-1">
         <div className={cn("truncate text-sm", tier === "info" ? "font-medium" : "font-semibold")}>
           {title}

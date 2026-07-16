@@ -2,6 +2,16 @@
 
 import { env } from "./env";
 import { authStore } from "./auth";
+import { outboxTraceparent } from "./outbox";
+import { newTraceparent, validTraceparent } from "./trace-context";
+import {
+  classifySessionRestoreFailure,
+  type WebSessionRestoreState,
+} from "./session-bootstrap";
+import {
+  challengeFromErrorBody,
+  rememberAbuseChallenge,
+} from "./abuse-challenge-store";
 import type {
   Announcement,
   AuthSession,
@@ -11,6 +21,7 @@ import type {
   Carbon,
   CarbonPublic,
   Contact,
+  ClientOperationStatus,
   Cron,
   CronWriteResult,
   DevOtpResponse,
@@ -18,8 +29,12 @@ import type {
   DraftsListResponse,
   DraftWritePayload,
   Event,
+  EventVectorRange,
+  HistoryPage,
+  AccountSyncUpdate,
   HeldSend,
   HeldSendsListResponse,
+  InitialSyncResponse,
   Invite,
   InviteInfo,
   Invitee,
@@ -33,6 +48,9 @@ import type {
   Team,
   TeamMembership,
   TeamRole,
+  ThreadPage,
+  ThreadReadResult,
+  SyncPageRange,
 } from "./types";
 
 export type ReactivityBucket = "hour" | "day" | "month";
@@ -55,10 +73,55 @@ export interface ReactivitySeries {
   total: number;
 }
 
+export interface ModerationRestriction {
+  restriction_id: string;
+  state: string;
+  rate_cost: number;
+  starts_at: string;
+  expires_at: string;
+  appealed: boolean;
+}
+
+export interface ModerationAppeal {
+  appeal_id: string;
+  restriction_id: string;
+  status: string;
+  created_at: string;
+  resolved_at: string | null;
+}
+
 class ApiError extends Error {
-  constructor(public status: number, public body: unknown, message: string) {
+  constructor(
+    public status: number,
+    public body: unknown,
+    message: string,
+    public retryAfterMs: number | null = null,
+  ) {
     super(message);
   }
+}
+
+function retryAfterMs(resp: Response, body: unknown): number | null {
+  const header = resp.headers.get("retry-after");
+  const failure =
+    body && typeof body === "object" && "failure" in body &&
+    (body as { failure?: unknown }).failure &&
+    typeof (body as { failure: unknown }).failure === "object"
+      ? (body as { failure: { retry_after_seconds?: unknown } }).failure
+      : null;
+  const bodySeconds =
+    body && typeof body === "object" && "retry_after_seconds" in body
+      ? Number((body as { retry_after_seconds?: unknown }).retry_after_seconds)
+      : failure
+        ? Number(failure.retry_after_seconds)
+      : NaN;
+  const seconds = header != null ? Number(header) : bodySeconds;
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  if (header) {
+    const date = Date.parse(header);
+    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  }
+  return null;
 }
 
 // Transparent refresh: when an authed call returns 401 and we have a refresh
@@ -68,42 +131,64 @@ class ApiError extends Error {
 // user stays "signed in" client-side; the next attempt will simply try again.
 // Concurrent 401s share a single in-flight refresh so we don't stampede the
 // endpoint.
-let refreshInflight: Promise<boolean> | null = null;
-async function tryRefresh(): Promise<boolean> {
+let refreshInflight: Promise<WebSessionRestoreState> | null = null;
+async function tryRefresh(): Promise<WebSessionRestoreState> {
   if (refreshInflight) return refreshInflight;
-  const refreshTok = authStore.getRefresh();
-  if (!refreshTok) return false;
-  refreshInflight = (async () => {
+  const refreshOnce = async () => {
+    const refreshTok = authStore.getRefresh();
     try {
       const r = await call<{ access: string; refresh?: string }>(
         "POST",
         "/api/v1/auth/refresh",
-        { refresh: refreshTok },
+        refreshTok ? { refresh: refreshTok } : {},
         { auth: false },
       );
       authStore.setTokens(
         r.access,
-        r.refresh ?? refreshTok,
+        r.refresh ?? null,
         authStore.getCarbon() ?? undefined,
       );
-      return true;
-    } catch {
-      return false;
-    } finally {
-      refreshInflight = null;
+      return "restored" as const;
+    } catch (error) {
+      return classifySessionRestoreFailure(error instanceof ApiError ? error.status : null);
     }
-  })();
-  return refreshInflight;
+  };
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  // The HttpOnly refresh cookie is shared across tabs and rotates on use.
+  // Serialize refreshes across tabs so one reload cannot invalidate the cookie
+  // another reload is about to submit.
+  const coordinated: Promise<WebSessionRestoreState> = locks?.request
+    ? (async () => await locks.request(
+        "silicon-interface:web-session-refresh",
+        { mode: "exclusive" },
+        async () => await refreshOnce(),
+      ))()
+    : refreshOnce();
+  const inflight = coordinated.finally(() => {
+    refreshInflight = null;
+  });
+  refreshInflight = inflight;
+  return inflight;
 }
 
 async function call<T>(
   method: string,
   path: string,
   body?: unknown,
-  opts: { auth?: boolean; _retried?: boolean } = {},
+  opts: {
+    auth?: boolean;
+    _retried?: boolean;
+    signal?: AbortSignal;
+    traceparent?: string;
+    includeDeviceId?: boolean;
+  } = {},
 ): Promise<T> {
+  const traceparent = validTraceparent(opts.traceparent) || newTraceparent();
   const headers: Record<string, string> = {
     Accept: "application/json",
+    "X-Chat-Protocol": "1",
+    "X-Silicon-Web-Session": "1",
+    traceparent,
   };
   if (body !== undefined && !(body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
@@ -113,6 +198,8 @@ async function call<T>(
     if (tok) headers["Authorization"] = `Bearer ${tok}`;
     const silKey = authStore.getSiliconKey();
     if (silKey) headers["X-Silicon-Key"] = silKey;
+    const boundDeviceId = opts.includeDeviceId === false ? null : authStore.getBoundDeviceId();
+    if (boundDeviceId) headers["X-Device-ID"] = boundDeviceId;
   }
   const url = `${env.apiBase}${path}`;
   const resp = await fetch(url, {
@@ -124,51 +211,130 @@ async function call<T>(
         : body !== undefined
           ? JSON.stringify(body)
           : undefined,
+    signal: opts.signal,
+    credentials: "include",
   });
   if (
     resp.status === 401 &&
     opts.auth !== false &&
     !opts._retried &&
-    authStore.getAccess() // skip refresh dance for silicon-key-only callers
+    !authStore.getSiliconKey()
   ) {
-    const ok = await tryRefresh();
-    if (ok) return call<T>(method, path, body, { ...opts, _retried: true });
+    const refreshState = await tryRefresh();
+    if (refreshState === "restored") {
+      return call<T>(method, path, body, { ...opts, _retried: true, traceparent });
+    }
   }
   const ct = resp.headers.get("content-type") || "";
   const parsed: unknown = ct.includes("application/json")
     ? await resp.json().catch(() => null)
     : await resp.text().catch(() => null);
   if (!resp.ok) {
+    const abuseChallenge = challengeFromErrorBody(parsed);
+    const carbonId = authStore.getCarbon()?.carbon_id;
+    if (abuseChallenge && carbonId) {
+      await rememberAbuseChallenge(carbonId, abuseChallenge).catch(() => undefined);
+    }
     const msg =
       (parsed && typeof parsed === "object" && "detail" in parsed
         ? (parsed as { detail: string }).detail
         : null) ?? `${method} ${path} → ${resp.status}`;
-    throw new ApiError(resp.status, parsed, msg);
+    throw new ApiError(resp.status, parsed, msg, retryAfterMs(resp, parsed));
   }
   return parsed as T;
 }
 
 async function callBlob(path: string, retried = false): Promise<Blob> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    "X-Chat-Protocol": "1",
+    "X-Silicon-Web-Session": "1",
+  };
   const tok = authStore.getAccess();
   if (tok) headers.Authorization = `Bearer ${tok}`;
   const silKey = authStore.getSiliconKey();
   if (silKey) headers["X-Silicon-Key"] = silKey;
-  const resp = await fetch(`${env.apiBase}${path}`, { headers });
-  if (resp.status === 401 && !retried && tok && (await tryRefresh())) {
-    return callBlob(path, true);
+  const boundDeviceId = authStore.getBoundDeviceId();
+  if (boundDeviceId) headers["X-Device-ID"] = boundDeviceId;
+  const resp = await fetch(`${env.apiBase}${path}`, { headers, credentials: "include" });
+  if (resp.status === 401 && !retried && tok) {
+    const refreshState = await tryRefresh();
+    if (refreshState === "restored") return callBlob(path, true);
   }
   if (!resp.ok) {
     const parsed = await resp.json().catch(() => null) as { detail?: string } | null;
-    throw new ApiError(resp.status, parsed, parsed?.detail ?? `GET ${path} → ${resp.status}`);
+    throw new ApiError(
+      resp.status,
+      parsed,
+      parsed?.detail ?? `GET ${path} → ${resp.status}`,
+      retryAfterMs(resp, parsed),
+    );
   }
   return resp.blob();
 }
 
+export type GlobalNotificationPreferences = {
+  enabled: boolean;
+  paused_until: string;
+  quiet_hours: {
+    enabled: boolean;
+    timezone: string;
+    start: string;
+    end: string;
+    weekdays: number[];
+    allow_mentions: boolean;
+    allow_keywords: boolean;
+  };
+  keywords: string[];
+};
+
+export type ChatPreferences = {
+  read_receipts_enabled: boolean;
+  notifications: GlobalNotificationPreferences;
+  presence_visibility: "everyone" | "contacts" | "nobody";
+};
+
+export type GlobalNotificationPreferencesPatch = Partial<
+  Omit<GlobalNotificationPreferences, "quiet_hours">
+> & {
+  quiet_hours?: Partial<GlobalNotificationPreferences["quiet_hours"]>;
+};
+
 export const api = {
+  // -------- registered installation --------
+  registerDevice: (payload: {
+    device_id: string;
+    platform?: string;
+    name?: string;
+    app_version?: string;
+    capabilities?: Record<string, unknown>;
+  }) =>
+    call<{
+      device: { device_id: string };
+      access: string;
+      refresh?: string;
+    }>("POST", "/api/v1/devices", payload),
+  chatPreferences: () =>
+    call<ChatPreferences>("GET", "/api/v1/chat/preferences"),
+  updateChatPreferences: (payload: {
+    read_receipts_enabled?: boolean;
+    notifications?: GlobalNotificationPreferencesPatch;
+    presence_visibility?: "everyone" | "contacts" | "nobody";
+  }) => call<ChatPreferences>("PATCH", "/api/v1/chat/preferences", payload),
+  requestAbuseChallengePush: (token: string) =>
+    call<{ queued: boolean; solved?: boolean; expires_at?: string }>(
+      "POST",
+      "/api/v1/challenges/push",
+      { token },
+    ),
+  answerAbuseChallenge: (payload: {
+    token: string;
+    type: "push" | "captcha";
+    answer: string;
+  }) => call<{ solved: true }>("PUT", "/api/v1/challenges", payload),
+
   // -------- web push --------
   pushVapidKey: () => call<{ public_key: string }>("GET", "/api/v1/push/vapid-key"),
-  pushSubscribe: (sub: PushSubscriptionJSON) =>
+  pushSubscribe: (sub: PushSubscriptionJSON & { preview_mode?: "full" | "sender" | "none" }) =>
     call<{ subscribed: boolean }>("POST", "/api/v1/push/subscribe", sub),
   pushUnsubscribe: (endpoint: string) =>
     call<{ ok: boolean }>("POST", "/api/v1/push/unsubscribe", { endpoint }),
@@ -181,7 +347,11 @@ export const api = {
   // -------- health / dev --------
   healthz: () => call<{ status: string }>("GET", "/healthz", undefined, { auth: false }),
   readyz: () => call<{ ready: boolean; checks: Record<string, string> }>("GET", "/readyz", undefined, { auth: false }),
-  version: () => call<{ version: string; commit: string }>("GET", "/api/v1/version", undefined, { auth: false }),
+  version: () => call<{
+    version: string;
+    commit: string;
+    protocol: { current: number; minimum: number; maximum: number; sync_schema: number };
+  }>("GET", "/api/v1/version", undefined, { auth: false }),
   devLastOtp: (target: string) =>
     call<DevOtpResponse>(
       "GET",
@@ -221,8 +391,17 @@ export const api = {
     ),
   loginVerify: (challenge_id: string, code: string) =>
     call<JwtPair>("POST", "/api/v1/auth/login/verify", { challenge_id, code }, { auth: false }),
-  refresh: (refresh: string) =>
-    call<{ access: string; refresh?: string }>("POST", "/api/v1/auth/refresh", { refresh }, { auth: false }),
+  refresh: (refresh?: string) =>
+    call<{ access: string; refresh?: string }>(
+      "POST", "/api/v1/auth/refresh", refresh ? { refresh } : {}, { auth: false },
+    ),
+  restoreWebSessionState: () => tryRefresh(),
+  // Compatibility for non-guard entry points. Known owners retain offline and
+  // transient-failure access; only an authoritative anonymous result is false.
+  restoreWebSession: async () => {
+    const state = await tryRefresh();
+    return state === "restored" || (state === "unavailable" && Boolean(authStore.getCarbon()));
+  },
 
   // -------- profile --------
   me: () => call<Carbon>("GET", "/api/v1/carbons/me"),
@@ -230,6 +409,15 @@ export const api = {
   patchMe: (patch: Partial<Carbon>) => call<Carbon>("PATCH", "/api/v1/carbons/me", patch),
   carbonByHandle: (handle: string) => call<CarbonPublic>("GET", `/api/v1/handle/carbon/${encodeURIComponent(handle)}`),
   siliconByHandle: (handle: string) => call<SiliconPublic>("GET", `/api/v1/handle/silicon/${encodeURIComponent(handle)}`),
+
+  // Open (or join) a silicon's cloud browser session on demand. Reuses the
+  // silicon's live session when one exists, else launches a new one in its
+  // browser profile + team region. Returns the Silicon Browser viewer URL.
+  openSiliconBrowser: (siliconId: string) =>
+    call<{ session_id: string; viewer_url: string; reused: boolean; region?: string; live?: boolean }>(
+      "POST",
+      `/api/v1/silicons/${encodeURIComponent(siliconId)}/browser-session`,
+    ),
 
   takeBackPolicy: () => call<TakeBackPolicy>("GET", "/api/v1/carbons/me/take-back-policy"),
   setTakeBackPolicy: (p: Partial<TakeBackPolicy>) =>
@@ -337,11 +525,20 @@ export const api = {
     ),
 
   // -------- chat --------
-  rooms: () => call<Room[]>("GET", "/api/v1/rooms/"),
+  rooms: (signal?: AbortSignal) =>
+    call<Room[]>("GET", "/api/v1/rooms/", undefined, { signal }),
   createRoom: (name: string, topic = "") => call<Room>("POST", "/api/v1/rooms/", { name, topic }),
   directRoom: (target_kind: "carbon" | "silicon", target_id: string) =>
     call<Room>("POST", "/api/v1/rooms/direct", { target_kind, target_id }),
   roomDetail: (room_id: string) => call<Room>("GET", `/api/v1/rooms/${room_id}/`),
+  updateRoomListPreferences: (
+    room_id: string,
+    preferences: Partial<{ pinned: boolean; archived: boolean }>,
+  ) => call<{ preferences: { pinned: boolean; archived: boolean } }>(
+    "PATCH",
+    `/api/v1/rooms/${room_id}/list-preferences`,
+    preferences,
+  ),
 
   roomMembers: (room_id: string) => call<unknown[]>("GET", `/api/v1/rooms/${room_id}/members`),
   addRoomMember: (room_id: string, member_kind: "carbon" | "silicon", member_id: number, role = "member") =>
@@ -352,7 +549,40 @@ export const api = {
     if (before) q.set("before", before);
     return call<Event[]>("GET", `/api/v1/rooms/${room_id}/events?${q.toString()}`);
   },
-  sendEvent: (
+  historyPage: (
+    room_id: string,
+    cursor = "",
+    limit = 50,
+    direction: "backward" | "forward" = "backward",
+    anchor?: string,
+  ) => {
+    const q = new URLSearchParams({
+      cursor,
+      limit: String(limit),
+      direction,
+    });
+    if (anchor) q.set("anchor", anchor);
+    return call<HistoryPage>(
+      "GET",
+      `/api/v1/rooms/${room_id}/events?${q.toString()}`,
+    );
+  },
+  threadPage: (event_id: string, cursor = "", limit = 50) => {
+    const q = cursor
+      ? new URLSearchParams({ cursor })
+      : new URLSearchParams({ limit: String(limit) });
+    return call<ThreadPage>(
+      "GET",
+      `/api/v1/events/${encodeURIComponent(event_id)}/thread?${q.toString()}`,
+    );
+  },
+  markThreadRead: (event_id: string, through_event_id: string) =>
+    call<ThreadReadResult>(
+      "POST",
+      `/api/v1/events/${encodeURIComponent(event_id)}/thread/read`,
+      { event_id: through_event_id },
+    ),
+  sendEvent: async (
     room_id: string,
     payload: {
       type: string;
@@ -360,16 +590,30 @@ export const api = {
       reply_to_event_id?: string;
       is_final?: boolean;
     },
-    // §2.3 — stamp the optimistic client id into the stored content. The backend
-    // echoes content verbatim, so both the POST response and the WS broadcast
-    // carry it back, letting the client match the echo to its optimistic row by
-    // id (robust to server-side content enrichment) instead of by content equality.
+    // The backend uses content.client_id as the device-scoped idempotency key.
+    // It is never trusted for timeline reconciliation: Glass separately emits
+    // top-level transaction_id only to the exact authoring X-Device-ID.
     client_id?: string,
-  ) =>
-    call<Event>("POST", `/api/v1/rooms/${room_id}/events`, {
+  ) => {
+    const ownerId = authStore.getCarbon()?.carbon_id ?? "";
+    const traceparent = client_id && ownerId
+      ? await outboxTraceparent(ownerId, client_id).catch(() => "")
+      : "";
+    return call<Event>("POST", `/api/v1/rooms/${room_id}/events`, {
       ...payload,
       content: client_id ? { ...(payload.content ?? {}), client_id } : payload.content,
-    }),
+    }, { traceparent });
+  },
+
+  clientOperation: (
+    room_id: string,
+    kind: "event_send" | "held_send",
+    client_id: string,
+  ) =>
+    call<ClientOperationStatus>(
+      "GET",
+      `/api/v1/rooms/${encodeURIComponent(room_id)}/operations/${kind}/${encodeURIComponent(client_id)}?include=result`,
+    ),
 
   forwardEvents: (
     target_room_id: string,
@@ -394,6 +638,19 @@ export const api = {
     call<DraftState>("PUT", `/api/v1/rooms/${room_id}/draft`, payload),
   deleteDraft: (room_id: string, payload: { base_version?: number; origin_device?: string }) =>
     call<DraftState>("DELETE", `/api/v1/rooms/${room_id}/draft`, payload),
+  recordClientDurableCommits: (payload: {
+    schema: 1;
+    platform: "web";
+    counters: {
+      draft: { attempted: number; succeeded: number; failed: number };
+      send: { attempted: number; succeeded: number; failed: number };
+    };
+  }) => call<void>(
+    "POST",
+    "/api/v1/telemetry/client-durable-commits",
+    payload,
+    { includeDeviceId: false },
+  ),
 
   heldSends: (room_id: string) =>
     call<HeldSendsListResponse>("GET", `/api/v1/rooms/${room_id}/held-sends`),
@@ -413,7 +670,14 @@ export const api = {
   updateHeldSend: (
     room_id: string,
     held_send_id: string,
-    payload: { base_version: number; hold_seconds: number },
+    payload: {
+      base_version: number;
+      hold_seconds?: number;
+      delay_seconds?: number;
+      content?: Record<string, unknown>;
+      client_id?: string;
+      reply_to_event_id?: string;
+    },
   ) => call<HeldSend>("PATCH", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}`, payload),
   sendHeldNow: (room_id: string, held_send_id: string) =>
     call<HeldSend>("POST", `/api/v1/rooms/${room_id}/held-sends/${held_send_id}/send-now`, {}),
@@ -422,8 +686,21 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),
   finalizeEvent: (event_id: string) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/final`, {}),
-  editEvent: (event_id: string, body: string) =>
-    call<Event>("POST", `/api/v1/events/${event_id}/edit`, { body }),
+  editEvent: (event_id: string, body: string, baseVersion: number) =>
+    call<Event>("POST", `/api/v1/events/${event_id}/edit`, {
+      body,
+      base_version: baseVersion,
+    }),
+  setReaction: (
+    event_id: string,
+    emoji: string,
+    active: boolean,
+    client_id?: string,
+  ) => call<{ active: boolean; event: Event | null }>(
+    "PUT",
+    `/api/v1/events/${event_id}/reaction`,
+    { emoji, active, ...(client_id ? { client_id } : {}) },
+  ),
 
   /** Global ULID-cursor backfill across all visible rooms — replays events
    *  created after `after` as WS-shaped frames, for reconnect resync. */
@@ -435,6 +712,81 @@ export const api = {
     }>(
       "GET",
       `/api/v1/events/sync?after=${encodeURIComponent(after)}&limit=${limit}`,
+    ),
+
+  initialSync: (cursor = "", limit = 50, timelineLimit = 20, signal?: AbortSignal) => {
+    const query = new URLSearchParams({
+      limit: String(limit),
+      timeline_limit: String(timelineLimit),
+    });
+    if (cursor) query.set("cursor", cursor);
+    return call<InitialSyncResponse>(
+      "GET",
+      `/api/v1/sync/initial?${query.toString()}`,
+      undefined,
+      { signal },
+    );
+  },
+  eventsSyncCursor: (cursor: string, through = "", limit = 200, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ cursor, limit: String(limit) });
+    if (through) query.set("through", through);
+    return call<{
+      frames: { type: "event"; room_id: string; event: Event }[];
+      cursor: string;
+      through: string;
+      has_more: boolean;
+      range: SyncPageRange | null;
+      vector_range?: EventVectorRange;
+    }>("GET", `/api/v1/events/sync?${query.toString()}`, undefined, { signal });
+  },
+  accountSync: (cursor: string, through = "", limit = 200, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ cursor, limit: String(limit) });
+    if (through) query.set("through", through);
+    return call<{
+      updates: AccountSyncUpdate[];
+      cursor: string;
+      through: string;
+      has_more: boolean;
+      range: SyncPageRange;
+    }>("GET", `/api/v1/sync/account?${query.toString()}`, undefined, { signal });
+  },
+  syncPoll: (
+    eventCursor: string,
+    accountCursor: string,
+    timeout = 25_000,
+    limit = 200,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      event_cursor: eventCursor,
+      account_cursor: accountCursor,
+      timeout: String(timeout),
+      limit: String(limit),
+    });
+    return call<{
+      events: {
+        frames: { type: "event"; room_id: string; event: Event }[];
+        cursor: string;
+        through: string;
+        has_more: boolean;
+        range: SyncPageRange | null;
+        vector_range?: EventVectorRange;
+      };
+      account: {
+        updates: AccountSyncUpdate[];
+        cursor: string;
+        through: string;
+        has_more: boolean;
+        range: SyncPageRange;
+      };
+    }>("GET", `/api/v1/sync/poll?${query.toString()}`, undefined, { signal });
+  },
+  acknowledgeDelivered: (event_ids: string[], traceparent = "") =>
+    call<{ acknowledged: number; device_id: string }>(
+      "POST",
+      "/api/v1/events/delivered",
+      { event_ids },
+      { traceparent },
     ),
 
   read: (room_id: string, event_id: string) =>
@@ -482,6 +834,30 @@ export const api = {
       {},
     ),
 
+  // -------- safety / moderation --------
+  reportMessage: (data: {
+    target_kind: "carbon" | "silicon";
+    target_id: string;
+    reason: "spam" | "harassment" | "inappropriate" | "other";
+    details: string;
+    client_id: string;
+    event_id: string;
+  }) => call<{ id: number; report_id: string; status: string }>(
+    "POST",
+    "/api/v1/moderation/reports",
+    data,
+  ),
+  moderationRestrictions: () => call<{ restrictions: ModerationRestriction[] }>(
+    "GET",
+    "/api/v1/moderation/restrictions",
+  ),
+  moderationAppeals: () => call<{ appeals: ModerationAppeal[] }>(
+    "GET",
+    "/api/v1/moderation/appeals",
+  ),
+  submitModerationAppeal: (data: { restriction_id: string; reason: string }) =>
+    call<ModerationAppeal>("POST", "/api/v1/moderation/appeals", data),
+
   // -------- sessions --------
   sessionNew: (room_id: string, summary = "") =>
     call<{ session_id: string; started_at: string }>(
@@ -498,21 +874,30 @@ export const api = {
   sessions: () => call<unknown[]>("GET", "/api/v1/silicons/me/sessions"),
 
   // -------- search --------
-  // Block/interval paging: block 0 = first `interval` hits, block 1 = next, …
+  // A continuation is opaque and principal-bound. Once present it is the only
+  // allowed parameter, preserving Glass's fixed boundary and filters.
   search: (params: {
-    q: string;
+    q?: string;
     room?: string;
     sender_kind?: string;
     since?: string;
     until?: string;
-    block?: number;
-    interval?: number;
+    cursor?: string;
+    limit?: number;
   }) => {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== "") qs.set(k, String(v));
     }
-    return call<{ results: Event[]; block: number; interval: number; total: number; has_more: boolean }>(
+    return call<{
+      results: Event[];
+      cursor: string | null;
+      limit: number;
+      total: number;
+      has_more: boolean;
+      block?: number;
+      interval?: number;
+    }>(
       "GET",
       `/api/v1/events/search?${qs.toString()}`,
     );
@@ -525,6 +910,35 @@ export const api = {
       "/api/v1/media/upload-url",
       data,
     ),
+  createMultipartUpload: (data: {
+    client_id: string;
+    mime: string;
+    size: number;
+    kind: "image" | "file" | "voice";
+    filename?: string;
+    room_id?: string;
+    sha256?: string;
+  }) => call<MultipartUploadState>("POST", "/api/v1/media/uploads", data),
+  multipartUpload: (sessionId: string) =>
+    call<MultipartUploadState>("GET", `/api/v1/media/uploads/${encodeURIComponent(sessionId)}`),
+  signMultipartParts: (
+    sessionId: string,
+    parts: Array<{ part_number: number; checksum_sha256: string }>,
+  ) => call<{
+    session_id: string;
+    parts: Array<{ part_number: number; checksum_sha256: string; url: string; method: "PUT" }>;
+  }>("POST", `/api/v1/media/uploads/${encodeURIComponent(sessionId)}/parts`, { parts }),
+  completeMultipartUpload: (
+    sessionId: string,
+    data: {
+      sha256: string;
+      parts: Array<{ part_number: number; etag: string; checksum_sha256: string }>;
+    },
+  ) => call<MultipartUploadState>(
+    "POST", `/api/v1/media/uploads/${encodeURIComponent(sessionId)}/complete`, data,
+  ),
+  cancelMultipartUpload: (sessionId: string) =>
+    call<MultipartUploadState>("DELETE", `/api/v1/media/uploads/${encodeURIComponent(sessionId)}`),
   mediaDetail: (media_id: string) =>
     call<{
       media: MediaObject;
@@ -606,5 +1020,22 @@ export const api = {
     call<{ rows: unknown[]; grand_total_cents: number }>("GET", "/api/v1/cost/summary"),
   costRecent: () => call<unknown[]>("GET", "/api/v1/cost/recent"),
 };
+
+export interface MultipartUploadState {
+  session_id: string;
+  client_id: string;
+  state: "creating" | "uploading" | "completed" | "cancelled" | "expired" | "failed";
+  part_size: number;
+  part_count: number;
+  expires_at: string;
+  media: MediaObject;
+  dev_mode: boolean;
+  uploaded_parts?: Array<{
+    part_number: number;
+    etag: string;
+    size: number;
+    checksum_sha256: string;
+  }>;
+}
 
 export { ApiError };

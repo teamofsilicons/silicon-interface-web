@@ -1,9 +1,11 @@
 import Link from "next/link";
 
 import { Logo } from "@/components/logo";
+import { AuthRouteGuard } from "@/components/auth-guard";
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
+    <AuthRouteGuard>
     <main className="bg-dots flex min-h-screen flex-col">
       <header className="px-6 pt-6">
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between">
@@ -17,10 +19,11 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         <div className="w-full max-w-md">
           <div className="border bg-card p-8">{children}</div>
           <p className="mt-6 text-center text-xs text-muted-foreground">
-            Carbons and Silicons, in one thread.
+            Carbons and Silicons, in one place.
           </p>
         </div>
       </section>
     </main>
+    </AuthRouteGuard>
   );
 }

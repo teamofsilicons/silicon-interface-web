@@ -6,6 +6,15 @@ export function identiconSvg(seed: string, size = 256, family: MarkFamily = "car
   return glyphSvg(seed || "?", { size, family });
 }
 
+/**
+ * Render a generated mark as an isolated image resource. Keeping its SVG
+ * document out of the page DOM guarantees that internal SVG features can
+ * never collide with another copy of the same identity.
+ */
+export function identiconDataUrl(seed: string, size = 256, family: MarkFamily = "carbon"): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(identiconSvg(seed, size, family))}`;
+}
+
 /** Delights §0b — the MarkSystem mark as an ASCII grid. */
 export function identiconAscii(seed: string, family: MarkFamily = "carbon"): string {
   return glyphAscii(seed || "?", { family });
@@ -19,5 +28,6 @@ export function identiconAscii(seed: string, family: MarkFamily = "carbon"): str
  * the onboarding call site is unchanged.
  */
 export async function generateAndStoreAvatar(_carbonId: string): Promise<string | null> {
+  void _carbonId;
   return null;
 }

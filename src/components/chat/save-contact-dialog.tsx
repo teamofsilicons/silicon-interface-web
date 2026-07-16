@@ -45,11 +45,18 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
   // Seed the form whenever it opens.
   React.useEffect(() => {
     if (!open) return;
-    setName(existing?.name ?? peer.name ?? peer.id);
-    setNote(existing?.note ?? "");
-    setPhotoKey("");
-    setPhotoUrl(existing?.photo_url ?? peer.profile_photo_url ?? null);
-    setConfirmRemove(false);
+    let alive = true;
+    queueMicrotask(() => {
+      if (!alive) return;
+      setName(existing?.name ?? peer.name ?? peer.id);
+      setNote(existing?.note ?? "");
+      setPhotoKey("");
+      setPhotoUrl(existing?.photo_url ?? peer.profile_photo_url ?? null);
+      setConfirmRemove(false);
+    });
+    return () => {
+      alive = false;
+    };
   }, [open, existing, peer]);
 
   const customPhoto = photoKey !== "" || (existing?.custom_photo ?? false);

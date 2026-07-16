@@ -7,10 +7,12 @@ export function ResendRow({
   resend,
   onResend,
   loading,
+  providerWaitSeconds = 0,
 }: {
   resend: ReturnType<typeof useResendCooldown>;
   onResend: () => void;
   loading: boolean;
+  providerWaitSeconds?: number;
 }) {
   if (resend.lockedOut) {
     return (
@@ -24,10 +26,14 @@ export function ResendRow({
       <button
         type="button"
         onClick={onResend}
-        disabled={resend.active || loading}
+        disabled={resend.active || providerWaitSeconds > 0 || loading}
         className="text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {resend.active ? `resend code in ${resend.remaining}s` : "resend code"}
+        {providerWaitSeconds > 0
+          ? `provider retry in ${providerWaitSeconds}s`
+          : resend.active
+            ? `resend code in ${resend.remaining}s`
+            : "resend code"}
       </button>
     </div>
   );

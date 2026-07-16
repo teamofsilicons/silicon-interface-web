@@ -1,0 +1,150 @@
+{
+  "version": 5,
+  "failure_contract": {
+    "domain": "chat.operation",
+    "max_retry_after_seconds": 86400,
+    "client_fallback_codes": ["network_unavailable", "unknown_failure"],
+    "allowed_correction_actions": ["copy_to_composer", "discard_local", "edit_message", "remove_reply", "repair_device", "repair_session", "replace_attachment", "request_access", "restart_upload", "resume_upload", "retry_transcription", "review_input", "show_details", "solve_challenge", "try_later", "upgrade_client"],
+    "policies": {
+      "invalid_request": {"retryable": false, "automatic": false, "correction_actions": ["review_input", "discard_local"]},
+      "invalid_client_id": {"retryable": false, "automatic": false, "correction_actions": ["copy_to_composer", "discard_local"]},
+      "client_id_mismatch": {"retryable": false, "automatic": false, "correction_actions": ["copy_to_composer", "discard_local"]},
+      "invalid_device_id": {"retryable": false, "automatic": false, "correction_actions": ["repair_device", "copy_to_composer"]},
+      "idempotency_conflict": {"retryable": false, "automatic": false, "correction_actions": ["show_details", "copy_to_composer", "discard_local"]},
+      "invalid_payload": {"retryable": false, "automatic": false, "correction_actions": ["edit_message", "discard_local"]},
+      "payload_too_large": {"retryable": false, "automatic": false, "correction_actions": ["edit_message", "replace_attachment", "discard_local"]},
+      "invalid_reply": {"retryable": false, "automatic": false, "correction_actions": ["remove_reply", "edit_message", "discard_local"]},
+      "access_revoked": {"retryable": false, "automatic": false, "correction_actions": ["request_access", "copy_to_composer", "discard_local"]},
+      "peer_unavailable": {"retryable": true, "automatic": false, "correction_actions": ["try_later", "copy_to_composer", "discard_local"]},
+      "e2ee_client_required": {"retryable": false, "automatic": false, "correction_actions": ["upgrade_client", "copy_to_composer", "discard_local"]},
+      "media_missing": {"retryable": false, "automatic": false, "correction_actions": ["replace_attachment", "discard_local"]},
+      "media_mismatch": {"retryable": false, "automatic": false, "correction_actions": ["replace_attachment", "discard_local"]},
+      "media_not_ready": {"retryable": true, "automatic": true, "correction_actions": []},
+      "transcription_pending": {"retryable": true, "automatic": true, "correction_actions": []},
+      "transcription_failed": {"retryable": true, "automatic": false, "correction_actions": ["retry_transcription", "replace_attachment", "discard_local"]},
+      "upload_expired": {"retryable": true, "automatic": false, "correction_actions": ["restart_upload", "discard_local"]},
+      "upload_incomplete": {"retryable": true, "automatic": true, "correction_actions": ["resume_upload"]},
+      "upload_checksum_mismatch": {"retryable": false, "automatic": false, "correction_actions": ["restart_upload", "replace_attachment", "discard_local"]},
+      "upload_identity_conflict": {"retryable": false, "automatic": false, "correction_actions": ["restart_upload", "replace_attachment", "discard_local"]},
+      "session_expired": {"retryable": true, "automatic": false, "correction_actions": ["repair_session"]},
+      "request_timeout": {"retryable": true, "automatic": true, "correction_actions": []},
+      "too_early": {"retryable": true, "automatic": true, "correction_actions": []},
+      "rate_limited": {"retryable": true, "automatic": true, "correction_actions": []},
+      "capacity_unavailable": {"retryable": true, "automatic": true, "correction_actions": []},
+      "server_unavailable": {"retryable": true, "automatic": true, "correction_actions": []},
+      "challenge_required": {"retryable": true, "automatic": false, "correction_actions": ["solve_challenge"]},
+      "challenge_failed": {"retryable": true, "automatic": false, "correction_actions": ["solve_challenge", "show_details"]},
+      "challenge_locked": {"retryable": true, "automatic": true, "correction_actions": []},
+      "challenge_unavailable": {"retryable": true, "automatic": true, "correction_actions": []},
+      "state_conflict": {"retryable": false, "automatic": false, "correction_actions": ["show_details", "discard_local"]},
+      "resource_unavailable": {"retryable": false, "automatic": false, "correction_actions": ["show_details", "discard_local"]}
+    }
+  },
+  "retry_cases": [
+    {"id": "network-first", "http_status": 0, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "expected_state": "queued", "expected_next_ms": 102000},
+    {"id": "server-third", "http_status": 503, "attempts": 3, "now_ms": 100000, "jitter": 1.0, "expected_state": "queued", "expected_next_ms": 108000},
+    {"id": "rate-limit-jitter-low", "http_status": 429, "attempts": 2, "now_ms": 100000, "jitter": 0.5, "expected_state": "queued", "expected_next_ms": 102000},
+    {"id": "timeout-retry", "http_status": 408, "attempts": 1, "now_ms": 100000, "jitter": 1.5, "expected_state": "queued", "expected_next_ms": 103000},
+    {"id": "too-early-retry", "http_status": 425, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "expected_state": "queued", "expected_next_ms": 102000},
+    {"id": "auth-recovery-pauses", "http_status": 401, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "expected_state": "blocked", "expected_next_ms": 0},
+    {"id": "forbidden-block", "http_status": 403, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "expected_state": "blocked", "expected_next_ms": 0},
+    {"id": "validation-block", "http_status": 422, "attempts": 4, "now_ms": 100000, "jitter": 1.0, "expected_state": "blocked", "expected_next_ms": 0},
+    {"id": "backoff-cap", "http_status": 500, "attempts": 20, "now_ms": 100000, "jitter": 1.0, "expected_state": "queued", "expected_next_ms": 160000}
+  ],
+  "failure_policy_cases": [
+    {"id": "legacy-network-backoff", "http_status": 0, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": null, "expected_state": "queued", "expected_phase": "retry_wait", "expected_next_ms": 102000, "expected_code": "network_unavailable", "expected_actions": []},
+    {"id": "legacy-auth-pauses", "http_status": 401, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": null, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "session_expired", "expected_actions": ["repair_session"]},
+    {"id": "automatic-media-wait-overrides-conflict", "http_status": 409, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "media_not_ready", "retryable": true, "automatic": true, "correction_actions": [], "retry_after_seconds": 7}, "expected_state": "queued", "expected_phase": "retry_wait", "expected_next_ms": 107000, "expected_code": "media_not_ready", "expected_actions": []},
+    {"id": "manual-transcription-repair-overrides-server-error", "http_status": 503, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "transcription_failed", "retryable": true, "automatic": false, "correction_actions": ["retry_transcription", "replace_attachment", "discard_local"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "transcription_failed", "expected_actions": ["retry_transcription", "replace_attachment", "discard_local"]},
+    {"id": "automatic-contract-overrides-terminal-http", "http_status": 422, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "server_unavailable", "retryable": true, "automatic": true, "correction_actions": []}, "expected_state": "queued", "expected_phase": "retry_wait", "expected_next_ms": 102000, "expected_code": "server_unavailable", "expected_actions": []},
+    {"id": "terminal-contract-overrides-retryable-http", "http_status": 503, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "invalid_payload", "retryable": false, "automatic": false, "correction_actions": ["edit_message", "discard_local"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "invalid_payload", "expected_actions": ["edit_message", "discard_local"]},
+    {"id": "session-repair-never-auto-loops", "http_status": 401, "attempts": 2, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "session_expired", "retryable": true, "automatic": false, "correction_actions": ["repair_session"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "session_expired", "expected_actions": ["repair_session"]},
+    {"id": "challenge-remains-challenge", "http_status": 428, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "challenge_required", "retryable": true, "automatic": false, "correction_actions": ["solve_challenge"]}, "expected_state": "challenge", "expected_phase": "challenge", "expected_next_ms": 0, "expected_code": "challenge_required", "expected_actions": ["solve_challenge"]},
+    {"id": "unknown-domain-uses-http-fallback", "http_status": 503, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "provider.internal", "code": "media_not_ready", "retryable": true, "automatic": true, "correction_actions": ["discard_local"]}, "expected_state": "queued", "expected_phase": "retry_wait", "expected_next_ms": 102000, "expected_code": "server_unavailable", "expected_actions": []},
+    {"id": "unknown-code-fails-closed", "http_status": 503, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "future_provider_detail", "retryable": true, "automatic": true, "correction_actions": ["discard_local"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "unknown_failure", "expected_actions": []},
+    {"id": "unknown-actions-are-filtered", "http_status": 422, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "invalid_payload", "retryable": false, "automatic": false, "correction_actions": ["edit_message", "raw_provider_dump", "discard_local"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "invalid_payload", "expected_actions": ["edit_message", "discard_local"]},
+    {"id": "invalid-automatic-combination-fails-closed", "http_status": 503, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "server_unavailable", "retryable": false, "automatic": true, "correction_actions": []}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "unknown_failure", "expected_actions": []},
+    {"id": "known-code-policy-flags-mismatch-fails-closed", "http_status": 503, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "invalid_payload", "retryable": true, "automatic": true, "correction_actions": ["edit_message", "discard_local"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "unknown_failure", "expected_actions": []},
+    {"id": "known-code-policy-actions-mismatch-fails-closed", "http_status": 422, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "invalid_payload", "retryable": false, "automatic": false, "correction_actions": ["discard_local"]}, "expected_state": "blocked", "expected_phase": "blocked", "expected_next_ms": 0, "expected_code": "unknown_failure", "expected_actions": []},
+    {"id": "negative-retry-after-is-clamped", "http_status": 429, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "rate_limited", "retryable": true, "automatic": true, "correction_actions": [], "retry_after_seconds": -10}, "expected_state": "queued", "expected_phase": "retry_wait", "expected_next_ms": 102000, "expected_code": "rate_limited", "expected_actions": []},
+    {"id": "retry-after-is-bounded", "http_status": 429, "attempts": 1, "now_ms": 100000, "jitter": 1.0, "failure": {"domain": "chat.operation", "code": "rate_limited", "retryable": true, "automatic": true, "correction_actions": [], "retry_after_seconds": 999999}, "expected_state": "queued", "expected_phase": "retry_wait", "expected_next_ms": 86500000, "expected_code": "rate_limited", "expected_actions": []}
+  ],
+  "delivery_summary_cases": [
+    {"id": "no-recipients", "recipient_count": 0, "delivered_count": 0, "read_count": 0, "expected_state": "sent", "expected_recipient_count": 0, "expected_delivered_count": 0, "expected_read_count": 0},
+    {"id": "sent", "recipient_count": 2, "delivered_count": 0, "read_count": 0, "expected_state": "sent", "expected_recipient_count": 2, "expected_delivered_count": 0, "expected_read_count": 0},
+    {"id": "partial-delivery", "recipient_count": 2, "delivered_count": 1, "read_count": 0, "expected_state": "partially_delivered", "expected_recipient_count": 2, "expected_delivered_count": 1, "expected_read_count": 0},
+    {"id": "full-delivery", "recipient_count": 2, "delivered_count": 2, "read_count": 0, "expected_state": "delivered", "expected_recipient_count": 2, "expected_delivered_count": 2, "expected_read_count": 0},
+    {"id": "read-implies-delivery", "recipient_count": 2, "delivered_count": 0, "read_count": 1, "expected_state": "partially_read", "expected_recipient_count": 2, "expected_delivered_count": 1, "expected_read_count": 1},
+    {"id": "full-read", "recipient_count": 2, "delivered_count": 1, "read_count": 2, "expected_state": "read", "expected_recipient_count": 2, "expected_delivered_count": 2, "expected_read_count": 2},
+    {"id": "clamp-corrupt-counts", "recipient_count": 2, "delivered_count": 7, "read_count": 5, "expected_state": "read", "expected_recipient_count": 2, "expected_delivered_count": 2, "expected_read_count": 2},
+    {"id": "clamp-negative-counts", "recipient_count": -1, "delivered_count": -2, "read_count": -3, "expected_state": "sent", "expected_recipient_count": 0, "expected_delivered_count": 0, "expected_read_count": 0}
+  ],
+  "room_security_cases": [
+    {"id": "managed-room", "mode": "server_managed", "private_e2ee_available": false, "expected_plaintext_send": true, "expected_silicon_member": true},
+    {"id": "private-room-fails-closed", "mode": "private_e2ee", "private_e2ee_available": false, "expected_plaintext_send": false, "expected_silicon_member": false},
+    {"id": "unknown-room-fails-closed", "mode": "future_mode", "private_e2ee_available": false, "expected_plaintext_send": false, "expected_silicon_member": false}
+  ],
+  "barrier_cases": [
+    {"id": "ordered-release", "capacity": 3, "operations": ["start", "offer:a", "offer:b", "release"], "expected_release": ["a", "b"], "expected_overflow": false},
+    {"id": "control-not-buffered", "capacity": 3, "operations": ["start", "control:pong", "offer:a", "release"], "expected_release": ["a"], "expected_overflow": false},
+    {"id": "failed-sync-discards", "capacity": 3, "operations": ["start", "offer:stale", "reset", "start", "offer:fresh", "release"], "expected_release": ["fresh"], "expected_overflow": false},
+    {"id": "overflow-is-terminal", "capacity": 2, "operations": ["start", "offer:a", "offer:b", "offer:c", "release"], "expected_release": ["a", "b"], "expected_overflow": true},
+    {"id": "frames-pass-when-idle", "capacity": 2, "operations": ["offer:live", "start", "offer:buffered", "release"], "expected_release": ["buffered"], "expected_overflow": false, "expected_passthrough": ["live"]}
+  ],
+  "backpressure_close_cases": [
+    {"id": "server-frame-too-large-repairs", "code": 1009, "network_available": true, "wanted": true, "expected": "reconnect_and_sync"},
+    {"id": "server-slow-consumer-repairs", "code": 1013, "network_available": true, "wanted": true, "expected": "reconnect_and_sync"},
+    {"id": "abnormal-drop-repairs", "code": 1006, "network_available": true, "wanted": true, "expected": "reconnect_and_sync"},
+    {"id": "offline-waits", "code": 1001, "network_available": false, "wanted": true, "expected": "wait_for_network"},
+    {"id": "intentional-stop-does-not-redial", "code": 1000, "network_available": true, "wanted": false, "expected": "stop"}
+  ],
+  "media_resume_cases": [
+    {"id": "fresh-upload", "part_count": 4, "uploaded_parts": [], "expected_missing": [1, 2, 3, 4]},
+    {"id": "interrupted-upload", "part_count": 4, "uploaded_parts": [1, 3], "expected_missing": [2, 4]},
+    {"id": "provider-duplicates-and-range-noise", "part_count": 4, "uploaded_parts": [1, 1, 2, 9, 0, -1], "expected_missing": [3, 4]},
+    {"id": "provider-reordered-complete", "part_count": 4, "uploaded_parts": [4, 3, 2, 1], "expected_missing": []},
+    {"id": "empty-session-defensive", "part_count": 0, "uploaded_parts": [1], "expected_missing": []}
+  ],
+  "draft_conflict_cases": [
+    {"id": "keep-newer-local", "local_text": "local edit", "local_version": 7, "remote_text": "remote edit", "remote_version": 8, "choice": "local", "expected_text": "local edit", "expected_version": 8, "expected_needs_sync": true},
+    {"id": "adopt-remote", "local_text": "local edit", "local_version": 7, "remote_text": "remote edit", "remote_version": 8, "choice": "remote", "expected_text": "remote edit", "expected_version": 8, "expected_needs_sync": false},
+    {"id": "adopt-remote-clear", "local_text": "keep until choice", "local_version": 9, "remote_text": "", "remote_version": 10, "choice": "remote", "expected_text": "", "expected_version": 10, "expected_needs_sync": false},
+    {"id": "never-downgrade-version", "local_text": "new local", "local_version": 12, "remote_text": "stale remote", "remote_version": 11, "choice": "local", "expected_text": "new local", "expected_version": 12, "expected_needs_sync": true}
+  ],
+  "heartbeat_policy_cases": [
+    {"id": "server-default", "interval_ms": 25000, "timeout_ms": 62500, "expected_interval_ms": 25000, "expected_timeout_ms": 62500},
+    {"id": "invalid-uses-safe-defaults", "interval_ms": -1, "timeout_ms": -1, "expected_interval_ms": 25000, "expected_timeout_ms": 62500},
+    {"id": "clamp-too-fast", "interval_ms": 1000, "timeout_ms": 2000, "expected_interval_ms": 10000, "expected_timeout_ms": 20000},
+    {"id": "timeout-at-least-two-intervals", "interval_ms": 25000, "timeout_ms": 26000, "expected_interval_ms": 25000, "expected_timeout_ms": 50000},
+    {"id": "clamp-too-slow", "interval_ms": 120000, "timeout_ms": 300000, "expected_interval_ms": 60000, "expected_timeout_ms": 180000},
+    {"id": "clamp-excessive-timeout", "interval_ms": 25000, "timeout_ms": 500000, "expected_interval_ms": 25000, "expected_timeout_ms": 180000}
+  ],
+  "heartbeat_action_cases": [
+    {"id": "offline-waits", "network_available": false, "socket_open": true, "waking": false, "elapsed_ms": 70000, "interval_ms": 25000, "timeout_ms": 62500, "expected": "wait"},
+    {"id": "closed-reconnects", "network_available": true, "socket_open": false, "waking": false, "elapsed_ms": 0, "interval_ms": 25000, "timeout_ms": 62500, "expected": "reconnect"},
+    {"id": "healthy-pings", "network_available": true, "socket_open": true, "waking": false, "elapsed_ms": 24999, "interval_ms": 25000, "timeout_ms": 62500, "expected": "ping"},
+    {"id": "timeout-reconnects", "network_available": true, "socket_open": true, "waking": false, "elapsed_ms": 62500, "interval_ms": 25000, "timeout_ms": 62500, "expected": "reconnect"},
+    {"id": "fresh-wake-keeps-socket", "network_available": true, "socket_open": true, "waking": true, "elapsed_ms": 24999, "interval_ms": 25000, "timeout_ms": 62500, "expected": "ping"},
+    {"id": "idle-wake-reconnects", "network_available": true, "socket_open": true, "waking": true, "elapsed_ms": 25000, "interval_ms": 25000, "timeout_ms": 62500, "expected": "reconnect"}
+  ],
+  "operation_recovery_cases": [
+    {"id": "network-loss-bound-success", "http_status": 0, "operation_state": "succeeded", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": true},
+    {"id": "timeout-bound-success", "http_status": 408, "operation_state": "succeeded", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": true},
+    {"id": "server-error-bound-success", "http_status": 503, "operation_state": "succeeded", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": true},
+    {"id": "rate-limit-pending", "http_status": 429, "operation_state": "pending", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": false},
+    {"id": "conflict-is-not-ambiguous", "http_status": 409, "operation_state": "succeeded", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": false, "expected_accept": true},
+    {"id": "mismatched-resource-fails-closed", "http_status": 0, "operation_state": "succeeded", "resource_id": "event-other", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": false},
+    {"id": "mismatched-client-fails-closed", "http_status": 0, "operation_state": "succeeded", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-other", "expected_ambiguous": true, "expected_accept": false},
+    {"id": "failed-operation-never-acks", "http_status": 503, "operation_state": "failed", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": false},
+    {"id": "mismatched-room-fails-closed", "http_status": 0, "operation_state": "succeeded", "operation_room_id": "room-other", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": false},
+    {"id": "mismatched-device-fails-closed", "http_status": 0, "operation_state": "succeeded", "operation_device_id": "device-other", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": false},
+    {"id": "missing-device-fails-closed", "http_status": 0, "operation_state": "succeeded", "operation_device_id": "", "resource_id": "event-1", "result_event_id": "event-1", "event_id": "event-1", "event_client_id": "client-1", "expected_ambiguous": true, "expected_accept": false}
+  ],
+  "protocol_window_cases": [
+    {"id": "exact-version", "client_version": 1, "server_min": 1, "server_max": 1, "expected": "compatible"},
+    {"id": "rolling-expand", "client_version": 1, "server_min": 1, "server_max": 2, "expected": "compatible"},
+    {"id": "client-must-upgrade", "client_version": 1, "server_min": 2, "server_max": 3, "expected": "client_upgrade_required"},
+    {"id": "server-older-than-client", "client_version": 3, "server_min": 1, "server_max": 2, "expected": "server_upgrade_required"},
+    {"id": "invalid-server-window", "client_version": 1, "server_min": 3, "server_max": 2, "expected": "invalid_window"}
+  ]
+}

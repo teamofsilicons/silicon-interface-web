@@ -3,13 +3,24 @@
 import * as React from "react";
 
 import { vibrate } from "@/lib/sounds";
+import {
+  hasActiveVoiceRecording as recordingActivityActive,
+  setVoiceRecordingActive,
+} from "@/lib/composer-activity";
+import {
+  appendLiveVoiceChunk,
+  beginLiveVoiceDraft,
+  clearLiveVoiceDraft,
+} from "@/lib/voice-drafts";
 
-export type VoiceRecordingPhase = "idle" | "requesting" | "recording" | "stopping";
+export type VoiceRecordingPhase = "idle" | "requesting" | "recording" | "paused" | "stopping";
 
 export interface VoiceRecordingSnapshot {
   phase: VoiceRecordingPhase;
   roomId: string | null;
   startedAt: number | null;
+  pausedAt: number | null;
+  pausedDurationMs: number;
 }
 
 export interface VoiceRecordingResult {
@@ -26,6 +37,8 @@ const IDLE_SNAPSHOT: VoiceRecordingSnapshot = {
   phase: "idle",
   roomId: null,
   startedAt: null,
+  pausedAt: null,
+  pausedDurationMs: 0,
 };
 
 const EMPTY_WAVEFORM: readonly number[] = [];
@@ -50,6 +63,12 @@ function abortError(): DOMException {
   return new DOMException("Voice recording was cancelled", "AbortError");
 }
 
+function recordingId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 /**
  * One browser-tab-wide recorder. RoomView is intentionally keyed by room and
  * unmounts on navigation, so MediaRecorder cannot live in a chat component if
@@ -69,6 +88,10 @@ class VoiceRecordingSession {
   private chunks: BlobPart[] = [];
   private mime = "audio/webm";
   private startedAt = 0;
+  private pausedAt = 0;
+  private pausedDurationMs = 0;
+  private clientId = "";
+  private chunkSequence = 0;
   private stopIntent: "send" | "cancel" = "cancel";
   private stopPromise: Promise<VoiceRecordingResult | null> | null = null;
   private resolveStop: ((result: VoiceRecordingResult | null) => void) | null = null;
@@ -101,7 +124,13 @@ class VoiceRecordingSession {
     const generation = ++this.generation;
     this.handlers = handlers;
     this.setWaveform(EMPTY_WAVEFORM);
-    this.setSnapshot({ phase: "requesting", roomId, startedAt: null });
+    this.setSnapshot({
+      phase: "requesting",
+      roomId,
+      startedAt: null,
+      pausedAt: null,
+      pausedDurationMs: 0,
+    });
 
     let stream: MediaStream;
     try {
@@ -135,19 +164,41 @@ class VoiceRecordingSession {
       this.recorder = recorder;
       this.mime = recorder.mimeType || requestedMime || "audio/webm";
       this.chunks = [];
+      this.clientId = recordingId();
+      this.chunkSequence = 0;
+      this.pausedAt = 0;
+      this.pausedDurationMs = 0;
       this.stopIntent = "cancel";
 
       recorder.ondataavailable = (event) => {
-        if (event.data?.size) this.chunks.push(event.data);
+        if (!event.data?.size) return;
+        this.chunks.push(event.data);
+        const sequence = this.chunkSequence++;
+        void appendLiveVoiceChunk({
+          roomId,
+          clientId: this.clientId,
+          sequence,
+          startedAt: this.startedAt,
+          durationMs: this.durationMs(),
+          mime: this.mime,
+          blob: event.data,
+        });
       };
       recorder.onstop = () => this.handleStopped(recorder);
       recorder.onerror = () => this.handleRecorderError(new Error("Voice recorder failed"));
 
       this.startedAt = Date.now();
+      await beginLiveVoiceDraft(roomId);
       recorder.start(200);
       this.startAnalyser(stream);
       this.startWaveformSampling();
-      this.setSnapshot({ phase: "recording", roomId, startedAt: this.startedAt });
+      this.setSnapshot({
+        phase: "recording",
+        roomId,
+        startedAt: this.startedAt,
+        pausedAt: null,
+        pausedDurationMs: 0,
+      });
       vibrate(8);
     } catch (error) {
       this.releaseMedia();
@@ -158,7 +209,7 @@ class VoiceRecordingSession {
 
   /** Finalize once and deliver to the callbacks captured by the origin room. */
   async submit(): Promise<void> {
-    if (this.snapshot.phase !== "recording") {
+    if (this.snapshot.phase !== "recording" && this.snapshot.phase !== "paused") {
       throw new Error("Voice recording is not ready to send");
     }
     const handlers = this.handlers;
@@ -175,6 +226,8 @@ class VoiceRecordingSession {
   async cancel(): Promise<void> {
     if (this.snapshot.phase === "idle") return;
     const onCancel = this.handlers?.onCancel;
+    const roomId = this.snapshot.roomId;
+    const clientId = this.clientId;
 
     if (this.snapshot.phase === "requesting") {
       // Invalidate the pending getUserMedia request. If it resolves later,
@@ -192,8 +245,47 @@ class VoiceRecordingSession {
       }
       await this.stop("cancel");
     } finally {
+      if (roomId) void clearLiveVoiceDraft(roomId, clientId || undefined);
       onCancel?.();
     }
+  }
+
+  pause(): void {
+    const recorder = this.recorder;
+    if (this.snapshot.phase !== "recording" || !recorder || recorder.state !== "recording") return;
+    recorder.requestData();
+    recorder.pause();
+    this.pausedAt = Date.now();
+    if (this.waveformTimer) clearInterval(this.waveformTimer);
+    this.waveformTimer = null;
+    this.setSnapshot({
+      ...this.snapshot,
+      phase: "paused",
+      pausedAt: this.pausedAt,
+      pausedDurationMs: this.pausedDurationMs,
+    });
+  }
+
+  resume(): void {
+    const recorder = this.recorder;
+    if (this.snapshot.phase !== "paused" || !recorder || recorder.state !== "paused") return;
+    const now = Date.now();
+    if (this.pausedAt) this.pausedDurationMs += now - this.pausedAt;
+    this.pausedAt = 0;
+    recorder.resume();
+    this.startWaveformSampling();
+    this.setSnapshot({
+      ...this.snapshot,
+      phase: "recording",
+      pausedAt: null,
+      pausedDurationMs: this.pausedDurationMs,
+    });
+  }
+
+  durationMs(now = Date.now()): number {
+    if (!this.startedAt) return 0;
+    const activePause = this.pausedAt ? Math.max(0, now - this.pausedAt) : 0;
+    return Math.max(0, now - this.startedAt - this.pausedDurationMs - activePause);
   }
 
   /** Current normalized microphone amplitude. */
@@ -238,7 +330,7 @@ class VoiceRecordingSession {
     const intent = this.stopIntent;
     const result: VoiceRecordingResult = {
       blob: new Blob(this.chunks, { type: this.mime || "audio/webm" }),
-      durationMs: Math.max(0, Date.now() - this.startedAt),
+      durationMs: this.durationMs(),
     };
     const resolve = this.resolveStop;
     this.releaseMedia();
@@ -301,6 +393,10 @@ class VoiceRecordingSession {
     this.chunks = [];
     this.mime = "audio/webm";
     this.startedAt = 0;
+    this.pausedAt = 0;
+    this.pausedDurationMs = 0;
+    this.clientId = "";
+    this.chunkSequence = 0;
   }
 
   private resetState(): void {
@@ -314,6 +410,7 @@ class VoiceRecordingSession {
 
   private setSnapshot(snapshot: VoiceRecordingSnapshot): void {
     this.snapshot = snapshot;
+    setVoiceRecordingActive(snapshot.phase !== "idle");
     for (const listener of this.listeners) listener();
   }
 
@@ -331,6 +428,10 @@ const sessionGlobal = globalThis as VoiceSessionGlobal;
 export const voiceRecordingSession =
   sessionGlobal.__siliconVoiceRecordingSession ?? new VoiceRecordingSession();
 sessionGlobal.__siliconVoiceRecordingSession = voiceRecordingSession;
+
+export function hasActiveVoiceRecording(): boolean {
+  return recordingActivityActive();
+}
 
 export function useVoiceRecordingSession(): VoiceRecordingSnapshot {
   return React.useSyncExternalStore(

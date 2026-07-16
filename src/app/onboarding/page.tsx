@@ -21,6 +21,8 @@ const FLOW_KEY = "silicon-interface:onboarding-flow";
 const EMAIL_KEY = "silicon-interface:onboarding-email";
 const CARBON_ID_RE = /^[a-z0-9_.-]{3,32}$/;
 const TYPE_DELAY_MS = 28;
+const MARK_RING_STEPS = [0, 22, 40, 58, 76, 100] as const;
+const MARK_STEP_MS = 70;
 
 interface Screen {
   text: (ctx: { carbonId: string; name: string }) => string;
@@ -61,39 +63,43 @@ const SCREENS: Screen[] = [
  *  `> deriving your mark from carbon_id…` line, then snaps into place. Honors
  *  prefers-reduced-motion by showing the final mark immediately. */
 function MarkReveal({ seed, size }: { seed: string; size: number }) {
-  // Discrete radial steps (% of the half-diagonal) so the reveal reads as
-  // distinct rings compiling outward rather than a smooth wipe.
-  const RING_STEPS = [0, 22, 40, 58, 76, 100];
-  const STEP_MS = 70;
-
   const [revealPct, setRevealPct] = React.useState(0);
   const [done, setDone] = React.useState(false);
   const [reduced, setReduced] = React.useState(false);
 
   React.useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    if (mq.matches) {
-      setReduced(true);
-      setRevealPct(100);
-      setDone(true);
-      return;
-    }
-    setReduced(false);
-    setRevealPct(0);
-    setDone(false);
-    let i = 0;
-    const id = window.setInterval(() => {
-      i += 1;
-      if (i >= RING_STEPS.length) {
-        window.clearInterval(id);
+    let cancelled = false;
+    let timer: number | null = null;
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      if (mq.matches) {
+        setReduced(true);
+        setRevealPct(100);
         setDone(true);
         return;
       }
-      setRevealPct(RING_STEPS[i]);
-    }, STEP_MS);
-    return () => window.clearInterval(id);
-    // RING_STEPS/STEP_MS are module-stable; re-run only when the seed changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      setReduced(false);
+      setRevealPct(0);
+      setDone(false);
+      let i = 0;
+      timer = window.setInterval(() => {
+        i += 1;
+        if (i >= MARK_RING_STEPS.length) {
+          if (timer !== null) window.clearInterval(timer);
+          timer = null;
+          setDone(true);
+          return;
+        }
+        setRevealPct(MARK_RING_STEPS[i]);
+      }, MARK_STEP_MS);
+    });
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearInterval(timer);
+    };
   }, [seed]);
 
   const compiling = !reduced && !done;
@@ -164,18 +170,26 @@ function OnboardingInner() {
   // Pull flowId + the email hint once on mount. If flowId is missing, kick
   // back to register; if email is present, pre-seed carbon ID + name.
   React.useEffect(() => {
-    const f = safeSession.get(FLOW_KEY);
-    if (!f) {
-      router.replace("/auth/register");
-      return;
-    }
-    setFlowId(f);
-    const e = safeSession.get(EMAIL_KEY) ?? "";
-    setEmailHint(e);
-    if (e) {
-      const suggested = suggestCarbonId(e);
-      setCarbonId(suggested);
-    }
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      const f = safeSession.get(FLOW_KEY);
+      if (!f) {
+        router.replace("/auth/register");
+        return;
+      }
+      setFlowId(f);
+      const e = safeSession.get(EMAIL_KEY) ?? "";
+      setEmailHint(e);
+      if (e) {
+        const suggested = suggestCarbonId(e);
+        setCarbonId(suggested);
+        setName(nameFromCarbonId(suggested));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   const screen = SCREENS[step];
@@ -185,23 +199,28 @@ function OnboardingInner() {
   );
 
   React.useEffect(() => {
-    setRevealed("");
-    setTypingDone(false);
-    let i = 0;
-    const id = window.setInterval(() => {
-      i++;
-      setRevealed(target.slice(0, i));
-      if (i >= target.length) {
-        window.clearInterval(id);
-        setTypingDone(true);
-      }
-    }, TYPE_DELAY_MS);
-    return () => window.clearInterval(id);
+    let cancelled = false;
+    let timer: number | null = null;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setRevealed("");
+      setTypingDone(false);
+      let i = 0;
+      timer = window.setInterval(() => {
+        i += 1;
+        setRevealed(target.slice(0, i));
+        if (i >= target.length) {
+          if (timer !== null) window.clearInterval(timer);
+          timer = null;
+          setTypingDone(true);
+        }
+      }, TYPE_DELAY_MS);
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearInterval(timer);
+    };
   }, [target]);
-
-  React.useEffect(() => {
-    if (!nameDirty) setName(nameFromCarbonId(carbonId));
-  }, [carbonId, nameDirty]);
 
   const cid = carbonId.trim().toLowerCase();
   const formatValid = CARBON_ID_RE.test(cid);
@@ -372,7 +391,11 @@ function OnboardingInner() {
                 <input
                   autoFocus
                   value={carbonId}
-                  onChange={(e) => setCarbonId(e.target.value.toLowerCase())}
+                  onChange={(e) => {
+                    const nextCarbonId = e.target.value.toLowerCase();
+                    setCarbonId(nextCarbonId);
+                    if (!nameDirty) setName(nameFromCarbonId(nextCarbonId));
+                  }}
                   onKeyDown={(e) => {
                     // The global Enter handler now exempts inputs (so Enter in
                     // name/bio doesn't finalize the flow), so the Carbon-ID

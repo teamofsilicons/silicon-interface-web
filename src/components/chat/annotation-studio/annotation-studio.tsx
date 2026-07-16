@@ -10,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 import {
   annotationLabel,
   clearAnnotationSession,
@@ -316,6 +316,7 @@ export function AnnotationStudio({
 
   // --- attach to chat -------------------------------------------------------
   const [attaching, setAttaching] = React.useState(false);
+  const uploadIdentityRef = React.useRef<{ signature: string; clientId: string } | null>(null);
   const attach = React.useCallback(async () => {
     if (annotations.length === 0 || attaching) return;
     setAttaching(true);
@@ -340,7 +341,18 @@ export function AnnotationStudio({
         : await generateAnnotatedImage({ url: exportUrl, annotations });
       const annotatedMime = isPdfSource ? "application/pdf" : "image/png";
       const annotatedName = `${baseName}_annotated.${isPdfSource ? "pdf" : "png"}`;
+      // Retrying the same annotation snapshot must resume the same upload
+      // operation. A fresh client id after a lost completion response can
+      // create an orphaned duplicate and surface as a generic attach failure.
+      const signature = JSON.stringify({ sourceMediaId, annotations });
+      if (uploadIdentityRef.current?.signature !== signature) {
+        uploadIdentityRef.current = {
+          signature,
+          clientId: window.crypto.randomUUID(),
+        };
+      }
       const annotatedMediaId = await uploadMediaBlob({
+        clientId: uploadIdentityRef.current.clientId,
         file: blob,
         filename: annotatedName,
         mime: annotatedMime,
@@ -402,7 +414,7 @@ export function AnnotationStudio({
       onOpenChange(false);
       toast.success("annotations attached to chat");
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "couldn't attach annotations");
+      toast.error(e instanceof Error ? e.message : "couldn't attach annotations");
     } finally {
       if (sourceObjectUrl) URL.revokeObjectURL(sourceObjectUrl);
       setAttaching(false);

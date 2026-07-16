@@ -20,7 +20,6 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
   const [q, setQ] = React.useState("");
   // Keyboard-highlighted row (arrow keys move it, Enter selects).
   const [active, setActive] = React.useState(0);
-  React.useEffect(() => setActive(0), [q]);
 
   const selected = findCountry(value) ?? COUNTRY_CODES.find((c) => c.iso2 === "US")!;
 
@@ -41,7 +40,10 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
       open={open}
       onOpenChange={(o) => {
         setOpen(o);
-        if (!o) setQ("");
+        if (!o) {
+          setQ("");
+          setActive(0);
+        }
       }}
     >
       <PopoverTrigger
@@ -71,7 +73,10 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
             aria-activedescendant={
               filtered[active] ? `country-opt-${filtered[active].iso2}` : undefined
             }
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setActive(0);
+            }}
             onKeyDown={(e) => {
               if (e.key === "ArrowDown") {
                 e.preventDefault();
@@ -92,6 +97,7 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
                   onChange(c);
                   setOpen(false);
                   setQ("");
+                  setActive(0);
                 }
               }
             }}
@@ -126,6 +132,7 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
                   onChange(c);
                   setOpen(false);
                   setQ("");
+                  setActive(0);
                 }}
                 className={cn(
                   "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors",

@@ -1,7 +1,7 @@
 {
   "name": "@teamofsilicons/silicon-interface-cli",
-  "version": "0.1.4",
-  "description": "Backend-first CLI for Silicon Interface conversations.",
+  "version": "2.0.0",
+  "description": "Glass-native CLI for complete, durable Silicon Interface conversations.",
   "type": "module",
   "bin": {
     "silicon-interface": "bin/silicon-interface",
@@ -21,6 +21,6 @@
   "scripts": {
     "lint": "eslint bin/silicon-interface.mjs",
     "start": "node ./bin/silicon-interface.mjs",
-    "test": "node --check ./bin/silicon-interface.mjs"
+    "test": "node --check ./bin/silicon-interface.mjs && node --test test/*.test.mjs"
   }
 }

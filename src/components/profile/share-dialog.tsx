@@ -50,7 +50,13 @@ export function ShareDialog({
   // hydration mismatch on `link`.
   const [link, setLink] = React.useState(`/c/${carbonId}`);
   React.useEffect(() => {
-    setLink(`${window.location.origin}/c/${carbonId}`);
+    let alive = true;
+    queueMicrotask(() => {
+      if (alive) setLink(`${window.location.origin}/c/${carbonId}`);
+    });
+    return () => {
+      alive = false;
+    };
   }, [carbonId]);
 
   // Single canvas — the displayed QR also feeds the downloaded share card.

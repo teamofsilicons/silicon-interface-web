@@ -37,13 +37,16 @@ export function useTeams() {
   React.useEffect(() => {
     let alive = true;
     const cached = ownerId ? loadCachedTeams(ownerId) : null;
-    if (cached) {
-      setTeams(cached);
-      setLoading(false);
-    } else {
-      setTeams([]);
-      setLoading(true);
-    }
+    queueMicrotask(() => {
+      if (!alive) return;
+      if (cached) {
+        setTeams(cached);
+        setLoading(false);
+      } else {
+        setTeams([]);
+        setLoading(true);
+      }
+    });
     (async () => {
       try {
         const next = normalizeTeams(await api.teams());

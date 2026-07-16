@@ -20,6 +20,10 @@ import {
 } from "@/lib/country-codes";
 import { isValidEmail, looksLikeWorkEmail } from "@/lib/email";
 import { safeSession } from "@/lib/safe-storage";
+import {
+  verificationDeliveryFailure,
+  type VerificationDeliveryFailure,
+} from "@/lib/verification-delivery";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -58,11 +62,16 @@ function RegisterPageInner() {
   const initialPhone = parseE164(search.get("phone") ?? "");
   const noticeNew = search.get("notice") === "new";
 
-  // Checked after mount (localStorage is client-only) to avoid a hydration
-  // mismatch — server and first client render both treat the user as not-yet-known.
-  const [authed, setAuthed] = React.useState(false);
+  // Resolve the HttpOnly refresh cookie before exposing account creation. This
+  // prevents a reload from starting a duplicate registration for a valid user.
+  const [authed, setAuthed] = React.useState<boolean | null>(null);
   React.useEffect(() => {
-    setAuthed(Boolean(authStore.getAccess()));
+    let alive = true;
+    void (async () => {
+      const restored = Boolean(authStore.getAccess()) || await api.restoreWebSession();
+      if (alive) setAuthed(restored);
+    })();
+    return () => { alive = false; };
   }, []);
   // Banner is dismissed the moment the user commits to step 1 — no need to keep
   // shouting "no account" once they're actively creating one.
@@ -85,8 +94,32 @@ function RegisterPageInner() {
   const [phoneVerified, setPhoneVerified] = React.useState(false);
   const [phoneDialog, setPhoneDialog] = React.useState(false);
   const phoneResend = useResendCooldown({ persistKey: "silicon-interface:resend:register-phone" });
+  const [deliveryFailure, setDeliveryFailure] =
+    React.useState<VerificationDeliveryFailure | null>(null);
+  const [providerRetryAt, setProviderRetryAt] = React.useState(0);
+  const [clock, setClock] = React.useState(() => Date.now());
 
   const phoneE164 = number ? `+${country.dial}${number.replace(/\D/g, "")}` : "";
+  const providerWaitSeconds = Math.max(
+    0,
+    Math.ceil((providerRetryAt - clock) / 1000),
+  );
+
+  React.useEffect(() => {
+    if (providerRetryAt <= Date.now()) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [providerRetryAt]);
+
+  const retainDeliveryFailure = React.useCallback((error: unknown) => {
+    const failure = verificationDeliveryFailure(error);
+    if (!failure) return null;
+    setFlowId(failure.intentId);
+    setDeliveryFailure(failure);
+    setClock(Date.now());
+    setProviderRetryAt(Date.now() + (failure.retryAfterMs ?? 0));
+    return failure;
+  }, []);
 
   const goLogin = (id: string) =>
     router.push(
@@ -128,7 +161,17 @@ function RegisterPageInner() {
       // opens while the nudge is still animating out, and the OTP content
       // ends up trapped behind the leaving overlay + focus-lock. The user
       // sees only the dim and has to click again to dismiss the ghost.
-      const r = await api.registerEmailStart(email.trim(), flowId || undefined);
+      let r;
+      try {
+        r = await api.registerEmailStart(email.trim(), flowId || undefined);
+      } catch (error) {
+        const failure = retainDeliveryFailure(error);
+        if (!failure) throw error;
+        setNudge(false);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        setEmailDialog(true);
+        return;
+      }
       if (r.existing) {
         setNudge(false);
         toast.message("You already have an account - taking you to log in.");
@@ -136,6 +179,8 @@ function RegisterPageInner() {
         return;
       }
       if (r.flow_id) setFlowId(r.flow_id);
+      setDeliveryFailure(null);
+      setProviderRetryAt(0);
       // Close the nudge, then let one frame pass before mounting the OTP
       // dialog. One render is enough for Radix to flip the nudge to
       // data-state="closed" and release its body locks; the next render
@@ -148,7 +193,13 @@ function RegisterPageInner() {
 
   const verifyEmail = (code: string) =>
     wrap(async () => {
-      const r = await api.registerEmailVerify(flowId, email.trim(), code);
+      let r;
+      try {
+        r = await api.registerEmailVerify(flowId, email.trim(), code);
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
+      }
       if (r.verified) {
         setEmailVerified(true);
         setEmailDialog(false);
@@ -159,7 +210,15 @@ function RegisterPageInner() {
 
   const resendEmail = () =>
     wrap(async () => {
-      await api.registerEmailStart(email.trim(), flowId || undefined);
+      if (providerWaitSeconds > 0) return;
+      try {
+        await api.registerEmailStart(email.trim(), flowId || undefined);
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
+      }
+      setDeliveryFailure(null);
+      setProviderRetryAt(0);
       emailResend.send();
       toast.success("code resent");
     });
@@ -167,20 +226,35 @@ function RegisterPageInner() {
   // ---- phone ----
   const submitPhone = () =>
     wrap(async () => {
-      const r = await api.registerPhoneStart(phoneE164, flowId || undefined);
+      let r;
+      try {
+        r = await api.registerPhoneStart(phoneE164, flowId || undefined);
+      } catch (error) {
+        if (!retainDeliveryFailure(error)) throw error;
+        setPhoneDialog(true);
+        return;
+      }
       if (r.existing) {
         toast.message("You already have an account - taking you to log in.");
         goLogin(phoneE164);
         return;
       }
       if (r.flow_id) setFlowId(r.flow_id);
+      setDeliveryFailure(null);
+      setProviderRetryAt(0);
       setPhoneDialog(true);
       phoneResend.send();
     });
 
   const verifyPhone = (code: string) =>
     wrap(async () => {
-      const r = await api.registerPhoneVerify(flowId, phoneE164, code);
+      let r;
+      try {
+        r = await api.registerPhoneVerify(flowId, phoneE164, code);
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
+      }
       if (r.verified) {
         setPhoneVerified(true);
         setPhoneDialog(false);
@@ -200,10 +274,26 @@ function RegisterPageInner() {
 
   const resendPhone = () =>
     wrap(async () => {
-      await api.registerPhoneStart(phoneE164, flowId || undefined);
+      if (providerWaitSeconds > 0) return;
+      try {
+        await api.registerPhoneStart(phoneE164, flowId || undefined);
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
+      }
+      setDeliveryFailure(null);
+      setProviderRetryAt(0);
       phoneResend.send();
       toast.success("code resent");
     });
+
+  if (authed === null) {
+    return (
+      <div className="flex min-h-52 items-center justify-center gap-2 text-sm text-muted-foreground" role="status">
+        <Spinner className="h-4 w-4" /> restoring session…
+      </div>
+    );
+  }
 
   if (authed) {
     return (
@@ -214,14 +304,11 @@ function RegisterPageInner() {
         <header className="space-y-1.5">
           <h1 className="text-2xl font-semibold tracking-tight">you&apos;re already set up</h1>
           <p className="text-sm text-muted-foreground">
-            You seem to have already created an account. Log in to continue.
+            Your session is still active. Continue without signing in again.
           </p>
         </header>
         <div className="space-y-4">
           <Button asChild className="w-full">
-            <Link href="/auth/login">log in to continue</Link>
-          </Button>
-          <Button asChild variant="ghost" className="w-full">
             <Link href="/chat">continue to your chats</Link>
           </Button>
         </div>
@@ -361,6 +448,10 @@ function RegisterPageInner() {
         resend={emailResend}
         onResend={resendEmail}
         loading={loading}
+        deliveryFailure={deliveryFailure?.channel === "email" ? deliveryFailure : null}
+        providerWaitSeconds={
+          deliveryFailure?.channel === "email" ? providerWaitSeconds : 0
+        }
       />
 
       {/* Phone OTP */}
@@ -374,6 +465,10 @@ function RegisterPageInner() {
         resend={phoneResend}
         onResend={resendPhone}
         loading={loading}
+        deliveryFailure={deliveryFailure?.channel === "sms" ? deliveryFailure : null}
+        providerWaitSeconds={
+          deliveryFailure?.channel === "sms" ? providerWaitSeconds : 0
+        }
       />
     </div>
   );

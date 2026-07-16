@@ -9,6 +9,7 @@ import {
   Copy,
   DotsThree,
   DownloadSimple,
+  Flag,
   ImageSquare,
   ListChecks,
   MusicNote,
@@ -23,6 +24,7 @@ import { toast } from "sonner";
 
 import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
+import { isGifMedia } from "@/lib/media-meta";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import { languageForFile } from "@/lib/programmatic-files";
@@ -30,9 +32,19 @@ import type { AnnotationDraft, Event, EventType, ProgressState } from "@/lib/typ
 import { editableTextForEvent, eventShowsEdited } from "@/lib/event-edit";
 import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { emojiOnly } from "@/lib/emoji";
+import {
+  messageReceiptPresentation,
+  type MessageReceiptStatus,
+} from "@/lib/message-receipt";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import type { MentionTarget } from "@/lib/mentions";
+import {
+  correctionActionLabel,
+  sendFailureMessage,
+  type CorrectionAction,
+  type SendFailureRecord,
+} from "@/lib/send-failure";
 
 import { downloadAsset, MediaPreviewer, type AnnotationOpenRequest } from "./media-previewer";
 
@@ -44,6 +56,7 @@ import { fileGlyph, isPreviewable } from "@/components/chat/file-icon";
 import { LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
 import { RemoteBrowserCard } from "@/components/chat/remote-browser-card";
+import { albumMediaItems } from "@/lib/albums";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -69,6 +82,7 @@ const SELECTABLE_FORWARD_TYPES = new Set<EventType>([
   "m.text",
   "m.image",
   "m.file",
+  "m.album",
   "m.voice",
   "m.tts",
 ]);
@@ -201,12 +215,7 @@ function AttachmentPin({
   );
 }
 
-export type MessageStatus =
-  | "pending" // optimistic local insert — POST not acked yet
-  | "sent" // server acked POST → at server, awaiting broadcast
-  | "delivered" // WS broadcast echoed back to us → on its way to peers
-  | "read" // peer issued a read_receipt at or past this event
-  | "failed"; // POST errored — show retry affordance
+export type MessageStatus = MessageReceiptStatus;
 
 interface Props {
   event: Event;
@@ -253,6 +262,8 @@ interface Props {
   onReact?: (event: Event, emoji: string) => void;
   /** Open a forward picker (a no-op stub today). */
   onForward?: (event: Event) => void;
+  /** Open the safety report flow for a received authoritative event. */
+  onReport?: (event: Event) => void;
   /** Enter multi-select mode with this message pre-selected (options menu). */
   onSelect?: (event: Event) => void;
   /** True while the room is in multi-select mode. */
@@ -266,6 +277,10 @@ interface Props {
   /** Re-send a failed message (same client id — the server dedupes). When set,
    *  the failed receipt becomes a tap-to-retry affordance. */
   onRetry?: (event: Event) => void;
+  /** Persisted structured failure details. */
+  failure?: SendFailureRecord;
+  failureMessage?: string;
+  onCorrection?: (event: Event, action: CorrectionAction) => void;
   /** Load this message back into the composer for editing. */
   onEdit?: (event: Event) => void;
   /** Attachment events sent alongside this text message — rendered as tilted
@@ -302,9 +317,13 @@ export function MessageBubble({
   onReply,
   onReact,
   onForward,
+  onReport,
   onSelect,
   onDelete,
   onRetry,
+  failure,
+  failureMessage,
+  onCorrection,
   onEdit,
   selectMode = false,
   selected = false,
@@ -391,7 +410,13 @@ export function MessageBubble({
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
   const hasActions =
     !redacted &&
-    !!(onReply || onReact || onEdit || (onForward && canForward) || onDelete || (onSelect && canForward));
+      !!(onReply ||
+      onReact ||
+      onEdit ||
+      (onForward && canForward) ||
+      onDelete ||
+      (onSelect && canForward) ||
+      (failure?.correctionActions.length && onCorrection));
   // Multi-select eligibility mirrors the forward gate: a real, settled,
   // non-deleted bubble whose type the backend forward endpoint supports.
   // Streaming/optimistic (`is_final === false`) and deleted messages are never
@@ -399,9 +424,9 @@ export function MessageBubble({
   const selectable = !!onToggleSelect && canForward;
   const inSelect = selectMode && selectable;
 
-  // §125 (Saket feedback) — a message that is EXACTLY one emoji renders large
-  // and WITHOUT a message bubble (no filled/ink background). Replies, forwards,
-  // link previews, and 2+ emoji keep the normal bubble behavior.
+  // Emoji-only messages render large and WITHOUT a filled bubble. Replies,
+  // forwards, link previews, and any emoji mixed with text retain the normal
+  // message treatment.
   const emojiBody =
     event.type === "m.text" ? String(event.content.body ?? "").replace(/^\s+|\s+$/g, "") : "";
   const emojiMeta = emojiOnly(emojiBody);
@@ -416,12 +441,11 @@ export function MessageBubble({
     // ANY forward_from object keeps the normal bubble — including a forward
     // whose sender_handle is missing/empty.
     !(event.content as { forward_from?: unknown }).forward_from &&
-    emojiMeta.ok &&
-    emojiMeta.count === 1;
+    emojiMeta.ok;
   const bareGif =
     event.type === "m.image" &&
     !redacted &&
-    String(event.content.mime ?? "").toLowerCase() === "image/gif";
+    isGifMedia(event.content.mime, event.content.filename);
   const holdReleaseAt =
     typeof event.content.hold_release_at === "string"
       ? event.content.hold_release_at
@@ -593,14 +617,17 @@ export function MessageBubble({
               myReactions={myReactionEmojis}
               moreOpen={moreOpen}
               onMoreOpenChange={setMoreOpen}
-              onReply={onReply}
-              onReact={onReact}
-              onForward={onForward}
-              onSelect={selectable ? onSelect : undefined}
-              onEdit={onEdit}
-              onDelete={onDelete}
+              onReply={redacted ? undefined : onReply}
+              onReact={redacted ? undefined : onReact}
+              onForward={redacted ? undefined : onForward}
+              onReport={redacted ? undefined : onReport}
+              onSelect={!redacted && selectable ? onSelect : undefined}
+              onEdit={redacted ? undefined : onEdit}
+              onDelete={redacted ? undefined : onDelete}
               onTakeBack={onTakeBack}
               onCopied={triggerCopyFlash}
+              failure={failure}
+              onCorrection={onCorrection}
             />
           )}
         </div>
@@ -638,11 +665,15 @@ export function MessageBubble({
           showHeldCountdown ||
           showPausedHoldClock ||
           status === "failed" ||
+          status === "resolving" ||
+          status === "retry_wait" ||
+          status === "retrying" ||
+          status === "challenge" ||
           mightStream ||
           eventShowsEdited(event)) && (
           // Reserve only vertical space in normal flow. The status itself is
           // absolutely anchored to the message edge, so labels such as
-          // "sending in 10" cannot widen a short bubble or make it pulse as
+          // "sending in 5" cannot widen a short bubble or make it pulse as
           // the countdown text changes.
           <div className="relative h-4">
             <div
@@ -657,9 +688,25 @@ export function MessageBubble({
                 showTime && !showPausedHoldClock && <HoverTime iso={event.created_at} />
               )}
               {eventShowsEdited(event) && <span>edited</span>}
-              {(showTime || showPausedHoldClock || status === "failed") &&
+              {(showTime ||
+                showPausedHoldClock ||
+                status === "failed" ||
+                status === "resolving" ||
+                status === "retry_wait" ||
+                status === "retrying" ||
+                status === "challenge") &&
                 isMine && status && !showHeldCountdown && (
-                status === "failed" && onRetry ? (
+                status === "failed" && failure?.correctionActions.length && onCorrection ? (
+                  <button
+                    type="button"
+                    onClick={() => onCorrection(event, failure.correctionActions[0])}
+                    title={failureMessage ?? sendFailureMessage(failure)}
+                    className="inline-flex items-center gap-1 text-destructive transition-colors hover:underline"
+                  >
+                    <Receipt status={status} />
+                    <span>{correctionActionLabel(failure.correctionActions[0])}</span>
+                  </button>
+                ) : status === "failed" && onRetry && !failure ? (
                   // Failed → the receipt becomes tap-to-retry (same clientId,
                   // so server-side idempotency guarantees no duplicate).
                   <button
@@ -671,6 +718,50 @@ export function MessageBubble({
                     <Receipt status={status} />
                     <span>retry</span>
                   </button>
+                ) : status === "failed" && failure ? (
+                  <span
+                    className="inline-flex items-center gap-1 text-destructive"
+                    role="status"
+                    aria-live="polite"
+                    title={failureMessage ?? sendFailureMessage(failure)}
+                  >
+                    <Receipt status={status} />
+                    <span>needs attention</span>
+                  </span>
+                ) : status === "resolving" ? (
+                  <span className="inline-flex items-center gap-1" role="status" aria-live="polite">
+                    <Receipt status={status} />
+                    <span>waiting</span>
+                  </span>
+                ) : status === "retry_wait" ? (
+                  <span className="inline-flex items-center gap-1" role="status" aria-live="polite">
+                    <Receipt status={status} />
+                    <span>waiting</span>
+                  </span>
+                ) : status === "retrying" ? (
+                  <span className="inline-flex items-center gap-1" role="status" aria-live="polite">
+                    <Receipt status={status} />
+                    <span>waiting</span>
+                  </span>
+                ) : status === "challenge" && failure?.correctionActions[0] && onCorrection ? (
+                  <button
+                    type="button"
+                    onClick={() => onCorrection(event, failure.correctionActions[0])}
+                    title={failureMessage ?? sendFailureMessage(failure)}
+                    className="inline-flex items-center gap-1 text-destructive transition-colors hover:underline"
+                  >
+                    <Receipt status={status} />
+                    <span>{failureMessage ?? correctionActionLabel(failure.correctionActions[0])}</span>
+                  </button>
+                ) : status === "challenge" ? (
+                  <span
+                    className="inline-flex items-center gap-1 text-destructive"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <Receipt status={status} />
+                    <span>{failureMessage ?? "verification required"}</span>
+                  </span>
                 ) : (
                   <Receipt status={status} />
                 )
@@ -704,11 +795,14 @@ function BubbleActions({
   onReply,
   onReact,
   onForward,
+  onReport,
   onSelect,
   onEdit,
   onDelete,
   onTakeBack,
   onCopied,
+  failure,
+  onCorrection,
 }: {
   event: Event;
   isMine: boolean;
@@ -721,11 +815,14 @@ function BubbleActions({
   onReply?: (event: Event) => void;
   onReact?: (event: Event, emoji: string) => void;
   onForward?: (event: Event) => void;
+  onReport?: (event: Event) => void;
   onSelect?: (event: Event) => void;
   onEdit?: (event: Event) => void;
   onDelete?: (event: Event) => void;
   onTakeBack?: (eventId: string, force?: boolean) => void;
   onCopied?: () => void;
+  failure?: SendFailureRecord;
+  onCorrection?: (event: Event, action: CorrectionAction) => void;
 }) {
   const canDelete = isMine && !!onDelete;
   const canTakeBack = isMine && isOwnSilicon;
@@ -742,7 +839,14 @@ function BubbleActions({
   };
   // Media messages (voice/file/image/…) expose download here in the options
   // menu rather than inline next to the player.
-  const hasMedia = Boolean((event.content as { media_id?: unknown }).media_id);
+  const mediaContent = event.content as {
+    media_id?: unknown;
+    mime?: unknown;
+    filename?: unknown;
+  };
+  const hasMedia = Boolean(mediaContent.media_id);
+  const hasDownloadableMedia =
+    hasMedia && !(event.type === "m.image" && isGifMedia(mediaContent.mime, mediaContent.filename));
   const handleDownload = async () => {
     try {
       const mediaId = String((event.content as { media_id?: unknown }).media_id);
@@ -780,8 +884,13 @@ function BubbleActions({
         // Float beside the bubble (vertically centered) instead of on top:
         // received → just right of the bubble, sent → just left of it (mirrored
         // so it never runs off the right edge).
-        "absolute top-1/2 z-10 -translate-y-1/2 gap-0.5 border bg-card p-0.5 transition-opacity",
-        menuOpen ? "flex" : "hidden group-hover:flex",
+        "message-actions absolute top-1/2 z-10 flex -translate-y-1/2 gap-0.5 border bg-card p-0.5 transition-opacity",
+        // Keep actions in the keyboard accessibility tree. Tabbing to the
+        // first action reveals the bar through :focus-within; pointer users
+        // still get the same hover behavior.
+        menuOpen
+          ? "opacity-100"
+          : "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
         isMine ? "right-full mr-2" : "left-full ml-2",
       )}
       // Stop propagation so an action click doesn't double-fire onDoubleClick
@@ -867,11 +976,38 @@ function BubbleActions({
               select
             </DropdownMenuItem>
           )}
-          {hasMedia && (
+          {hasDownloadableMedia && (
             <DropdownMenuItem onClick={handleDownload}>
               <DownloadSimple className="mr-2 h-3.5 w-3.5" />
               download
             </DropdownMenuItem>
+          )}
+          {!isMine && onReport && (event.sender_kind === "carbon" || event.sender_kind === "silicon") && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => onReport(event)}
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive"
+              >
+                <Flag className="mr-2 h-3.5 w-3.5" />
+                report message
+              </DropdownMenuItem>
+            </>
+          )}
+          {failure && onCorrection && failure.correctionActions.length > 0 && (
+            <>
+              <DropdownMenuSeparator />
+              {failure.correctionActions.map((action) => (
+                <DropdownMenuItem
+                  key={action}
+                  onClick={() => onCorrection(event, action)}
+                  className={action === "discard_local" ? "text-destructive" : undefined}
+                >
+                  <WarningCircle className="mr-2 h-3.5 w-3.5" />
+                  {correctionActionLabel(action)}
+                </DropdownMenuItem>
+              ))}
+            </>
           )}
           {(canDelete || canTakeBack) && <DropdownMenuSeparator />}
           {canDelete && onDelete && (
@@ -1011,36 +1147,23 @@ function HeldSendCountdown({ releaseAt }: { releaseAt: string }) {
   return (
     <span className="inline-flex items-center gap-1 tabular-nums">
       <Clock className="h-3 w-3 opacity-60" aria-hidden="true" />
-      {seconds > 0 ? `sending in ${seconds}` : "sending…"}
+      {seconds > 0 ? `waiting · ${seconds}s` : "waiting…"}
     </span>
   );
 }
 
 function Receipt({ status }: { status: MessageStatus }) {
-  const title =
-    status === "pending"
-      ? "sending"
-      : status === "sent"
-        ? "sent"
-        : status === "delivered"
-          ? "delivered"
-          : status === "read"
-            ? "read"
-            : "failed";
-  if (status === "failed")
-    return <WarningCircle className="h-3 w-3 text-destructive" aria-label={title} />;
-  // Pending: show a clock until the server actually accepts the message — a
-  // tick would imply it's already sent.
-  if (status === "pending")
-    return <Clock className="h-3 w-3 opacity-60" aria-label={title} />;
-  // Double tick = READ ONLY (matches the sidebar). Use the brand success
-  // colour, full opacity — the confident "they saw it" beat every messenger
-  // gets right.
-  if (status === "read")
-    return <Checks className="receipt-fill h-3 w-3 text-[var(--success)]" aria-label={title} weight="bold" />;
-  // "sent" and "delivered" both render the single tick — delivered survives as
-  // an internal status (STATUS_RANK precedence) but is visually the same beat.
-  return <Check className="h-3 w-3" aria-label={title} />;
+  const presentation = messageReceiptPresentation(status);
+  if (presentation.visual === "attention") {
+    return <WarningCircle className="h-3 w-3 text-destructive" aria-label={presentation.label} />;
+  }
+  if (presentation.visual === "waiting") {
+    return <Clock className="h-3 w-3 opacity-60" aria-label={presentation.label} />;
+  }
+  if (presentation.visual === "read") {
+    return <Checks className="receipt-fill h-3 w-3 text-[#1A1A1A]" aria-label={presentation.label} weight="bold" />;
+  }
+  return <Check className="h-3 w-3 opacity-70" aria-label={presentation.label} weight="bold" />;
 }
 
 /** One-line preview of a quoted (replied-to) message. */
@@ -1050,10 +1173,15 @@ function replyPreview(ev: Event): string {
   switch (ev.type) {
     case "m.text":
       return String(c.body ?? "");
-    case "m.image":
-      return c.caption ? String(c.caption) : "photo";
+    case "m.image": {
+      const caption = c.caption ? String(c.caption) : "";
+      if (isGifMedia(c.mime, c.filename)) return caption ? `GIF · ${caption}` : "GIF";
+      return caption || "photo";
+    }
     case "m.file":
       return c.filename ? String(c.filename) : c.caption ? String(c.caption) : "attachment";
+    case "m.album":
+      return c.caption ? String(c.caption) : "attachments";
     case "m.voice":
       return c.transcript ? String(c.transcript) : "voice note";
     case "m.remote_browser":
@@ -1271,11 +1399,9 @@ function BodyContent({
       if (blank && event.is_final) {
         return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
       }
-      // §125 (Saket feedback) — a message that is EXACTLY one emoji renders
-      // large; the bubble wrapper drops its background for this case (decided in
-      // MessageBubble as `soloEmoji`, which also excludes replies/forwards/link
-      // previews). Multiple emoji and emoji+text fall through to the normal
-      // renderer and keep the standard bubble.
+      // The bubble wrapper drops its background for an emoji-only message
+      // (decided in MessageBubble, which also excludes replies, forwards, and
+      // link previews). Emoji mixed with text keeps the standard renderer.
       if (soloEmoji) {
         return <div className="text-5xl leading-none">{body}</div>;
       }
@@ -1364,6 +1490,47 @@ function BodyContent({
       ) : (
         <span className="text-xs text-muted-foreground">{String(c.caption ?? "attachment")}</span>
       );
+    case "m.album": {
+      const items = albumMediaItems(event);
+      return (
+        <div className="space-y-1.5">
+          <div
+            className="grid max-w-[36rem] grid-cols-2 gap-1 overflow-hidden"
+            role="group"
+            aria-label={`${items.length} attachments`}
+          >
+            {items.map((item) => (
+              <div
+                key={`${item.position}:${item.media_id}`}
+                className={cn(
+                  "min-w-0 overflow-hidden bg-card",
+                  items.length % 2 === 1 && item.position === items.length - 1 && "col-span-2",
+                )}
+              >
+                <MediaAttachment
+                  mediaId={item.media_id}
+                  mime={item.mime}
+                  filename={item.filename || undefined}
+                  showCaption={false}
+                  width={item.width}
+                  height={item.height}
+                  replyToEventId={event.event_id}
+                  roomId={roomId}
+                  eventId={event.event_id}
+                  onAttachAnnotations={onAttachAnnotations}
+                  onOpenAnnotation={onOpenAnnotation}
+                />
+              </div>
+            ))}
+          </div>
+          {c.caption ? (
+            <div className="whitespace-pre-wrap break-words text-sm">
+              {renderMarkdown(String(c.caption), mentionOptions)}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
     case "m.voice": {
       const localPeaks = Array.isArray(c.peaks)
         ? c.peaks.filter((v): v is number => typeof v === "number")

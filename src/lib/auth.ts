@@ -3,39 +3,107 @@
 import * as React from "react";
 
 import { identifyCarbon, resetAnalytics } from "./analytics";
+import { env } from "./env";
 import type { AuthSession, Carbon } from "./types";
 
-const ACCESS_KEY = "silicon-interface:access";
-const REFRESH_KEY = "silicon-interface:refresh";
 const CARBON_KEY = "silicon-interface:carbon";
-const SILICON_KEY = "silicon-interface:silicon-key";
+let accessToken: string | null = null;
+let refreshToken: string | null = null;
+let siliconKey: string | null = null;
+let explicitlyLoggedOut = false;
+// The full Carbon profile is intentionally memory-only. In particular,
+// profile_photo_url is a short-lived bearer grant and must not be written to
+// localStorage, but live subscribers still need the complete object returned by
+// Glass after a profile edit.
+let currentCarbon: Carbon | null = null;
 
-// One-time migration off the legacy "silicon-chat:" prefix so existing
-// sessions survive the rebrand. Runs once at module load.
-function migrateLegacyKeys() {
+type PersistedCarbonIdentity = Pick<
+  Carbon,
+  "carbon_id" | "username" | "name" | "tagline" | "timezone" | "is_staff"
+>;
+
+function persistedCarbonIdentity(carbon: Carbon): PersistedCarbonIdentity {
+  return {
+    carbon_id: carbon.carbon_id,
+    username: carbon.username,
+    name: carbon.name,
+    tagline: carbon.tagline,
+    timezone: carbon.timezone,
+    is_staff: carbon.is_staff,
+  };
+}
+
+function hydratePersistedCarbon(value: unknown): Carbon | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Partial<PersistedCarbonIdentity>;
+  if (typeof row.carbon_id !== "string" || !row.carbon_id) return null;
+  const username =
+    typeof row.username === "string" && row.username ? row.username : row.carbon_id;
+  return {
+    carbon_id: row.carbon_id,
+    username,
+    name: typeof row.name === "string" ? row.name : "",
+    tagline: typeof row.tagline === "string" ? row.tagline : "",
+    timezone: typeof row.timezone === "string" ? row.timezone : "",
+    is_staff: row.is_staff === true,
+    email: "",
+    phone: "",
+    profile_photo_key: "",
+    profile_photo_url: null,
+    profile_ascii_url: null,
+    email_verified_at: null,
+    phone_verified_at: null,
+    created_at: "",
+  };
+}
+
+// Tokens/API keys previously lived in localStorage. Remove every old copy at
+// module load; the HttpOnly refresh cookie restores carbon sessions, while a
+// silicon-key session deliberately ends on reload rather than leaving a
+// long-lived credential readable to injected JavaScript.
+export function purgeStoredCredentials() {
   if (typeof window === "undefined") return;
   // localStorage access can throw in private mode / when storage is disabled.
   // This runs at module load, so an unguarded throw here would brick the whole
   // app (every page imports the auth store). Swallow it.
   try {
-    const moves: [string, string][] = [
-      ["silicon-chat:access", ACCESS_KEY],
-      ["silicon-chat:refresh", REFRESH_KEY],
-      ["silicon-chat:carbon", CARBON_KEY],
-      ["silicon-chat:silicon-key", SILICON_KEY],
+    const migrationRefresh =
+      window.localStorage.getItem("silicon-interface:refresh")
+      ?? window.localStorage.getItem("silicon-chat:refresh");
+    if (!refreshToken && migrationRefresh) refreshToken = migrationRefresh;
+    const sensitive = [
+      "silicon-interface:access",
+      "silicon-interface:refresh",
+      "silicon-interface:silicon-key",
+      "silicon-chat:access",
+      "silicon-chat:refresh",
+      "silicon-chat:silicon-key",
     ];
-    for (const [oldKey, newKey] of moves) {
-      const v = window.localStorage.getItem(oldKey);
-      if (v != null && window.localStorage.getItem(newKey) == null) {
-        window.localStorage.setItem(newKey, v);
+    for (const key of sensitive) window.localStorage.removeItem(key);
+    const oldCarbon = window.localStorage.getItem("silicon-chat:carbon");
+    const currentCarbon = window.localStorage.getItem(CARBON_KEY);
+    const candidate = currentCarbon ?? oldCarbon;
+    if (candidate) {
+      try {
+        const carbon = hydratePersistedCarbon(JSON.parse(candidate));
+        if (carbon) {
+          window.localStorage.setItem(
+            CARBON_KEY,
+            JSON.stringify(persistedCarbonIdentity(carbon)),
+          );
+        } else {
+          window.localStorage.removeItem(CARBON_KEY);
+        }
+      } catch {
+        window.localStorage.removeItem(CARBON_KEY);
       }
-      if (v != null) window.localStorage.removeItem(oldKey);
     }
+    window.localStorage.removeItem("silicon-chat:carbon");
   } catch {
     /* storage unavailable — nothing to migrate */
   }
 }
-migrateLegacyKeys();
+purgeStoredCredentials();
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -61,46 +129,82 @@ function safeSet(key: string, value: string | null) {
   }
 }
 
+function deviceClaim(token: string | null): string | null {
+  if (!token) return null;
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const base = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const normalized = base.padEnd(Math.ceil(base.length / 4) * 4, "=");
+    const parsed = JSON.parse(window.atob(normalized)) as { device_id?: unknown };
+    return typeof parsed.device_id === "string" && parsed.device_id ? parsed.device_id : null;
+  } catch {
+    return null;
+  }
+}
+
 export const authStore = {
-  getAccess: () => safeGet(ACCESS_KEY),
-  getRefresh: () => safeGet(REFRESH_KEY),
-  getSiliconKey: () => safeGet(SILICON_KEY),
+  getAccess: () => accessToken,
+  getBoundDeviceId: () => deviceClaim(accessToken),
+  getRefresh: () => refreshToken,
+  getSiliconKey: () => siliconKey,
+  wasExplicitlyLoggedOut: () => explicitlyLoggedOut,
   getCarbon(): Carbon | null {
+    if (currentCarbon) return currentCarbon;
     const raw = safeGet(CARBON_KEY);
     if (!raw) return null;
     try {
-      return JSON.parse(raw) as Carbon;
+      // Do not promote the restricted offline identity into the live-profile
+      // slot. Reading storage must continue to reflect the current storage
+      // owner; only a server response may populate currentCarbon.
+      return hydratePersistedCarbon(JSON.parse(raw));
     } catch {
       return null;
     }
   },
   setSession(session: AuthSession) {
-    safeSet(ACCESS_KEY, session.access);
-    safeSet(REFRESH_KEY, session.refresh);
-    safeSet(CARBON_KEY, JSON.stringify(session.carbon));
+    explicitlyLoggedOut = false;
+    accessToken = session.access;
+    refreshToken = session.refresh ?? null;
+    currentCarbon = session.carbon;
+    safeSet(CARBON_KEY, JSON.stringify(persistedCarbonIdentity(session.carbon)));
     identifyCarbon(session.carbon);
     emit();
   },
-  setTokens(access: string, refresh: string, carbon?: Carbon) {
-    safeSet(ACCESS_KEY, access);
-    safeSet(REFRESH_KEY, refresh);
+  setTokens(access: string, refresh?: string | null, carbon?: Carbon) {
+    explicitlyLoggedOut = false;
+    accessToken = access;
+    refreshToken = refresh ?? null;
     if (carbon) {
-      safeSet(CARBON_KEY, JSON.stringify(carbon));
+      currentCarbon = carbon;
+      safeSet(CARBON_KEY, JSON.stringify(persistedCarbonIdentity(carbon)));
       identifyCarbon(carbon);
     }
     emit();
   },
   setCarbon(carbon: Carbon) {
-    safeSet(CARBON_KEY, JSON.stringify(carbon));
+    currentCarbon = carbon;
+    safeSet(CARBON_KEY, JSON.stringify(persistedCarbonIdentity(carbon)));
     // Keep PostHog person properties fresh (login, profile edits, tz sync).
     identifyCarbon(carbon);
     emit();
   },
   setSiliconKey(key: string | null) {
-    safeSet(SILICON_KEY, key);
+    if (key) explicitlyLoggedOut = false;
+    siliconKey = key;
+    emit();
+  },
+  /**
+   * Drop stale request authority without revoking the browser session or
+   * deleting the known offline owner. A later refresh can restore access.
+   */
+  expireAccess() {
+    accessToken = null;
+    refreshToken = null;
     emit();
   },
   clear() {
+    explicitlyLoggedOut = true;
     const current = authStore.getCarbon();
     if (typeof window !== "undefined") {
       window.dispatchEvent(
@@ -109,10 +213,21 @@ export const authStore = {
         }),
       );
     }
-    safeSet(ACCESS_KEY, null);
-    safeSet(REFRESH_KEY, null);
+    // Revoke/delete the HttpOnly refresh cookie. This is intentionally
+    // fire-and-forget so logout never waits on a network path before clearing
+    // the in-memory authority and protected local state.
+    if (typeof window !== "undefined") {
+      void fetch(`${env.apiBase}/api/v1/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "X-Silicon-Web-Session": "1" },
+      }).catch(() => undefined);
+    }
+    accessToken = null;
+    refreshToken = null;
+    currentCarbon = null;
     safeSet(CARBON_KEY, null);
-    safeSet(SILICON_KEY, null);
+    siliconKey = null;
     resetAnalytics();
     emit();
   },

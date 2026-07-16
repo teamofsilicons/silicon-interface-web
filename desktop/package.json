@@ -2,21 +2,29 @@
   "name": "silicon-interface-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Silicon Interface desktop shell (Electron) — wraps the Next.js standalone server.",
+  "description": "Secure cross-platform desktop shell for Silicon Interface.",
   "author": "Team of Silicons <team@45d.ai>",
   "homepage": "https://teamofsilicons.com",
-  "main": "main.js",
+  "main": "compiled/main.js",
+  "desktopName": "silicon-interface.desktop",
   "scripts": {
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux",
-    "dist:mac": "electron-builder --mac"
+    "build": "tsc -p tsconfig.json",
+    "start": "pnpm build && electron .",
+    "test": "pnpm build && node --test tests/*.test.cjs",
+    "manifest": "node scripts/release-manifest.mjs dist",
+    "sbom": "node scripts/generate-sbom.mjs dist/desktop.sbom.cdx.json",
+    "verify:artifacts": "node scripts/verify-update-artifacts.mjs",
+    "dist:mac:local": "pnpm build && electron-builder --mac dir --publish never --config.mac.identity=null --config.directories.output=dist-local && node scripts/adhoc-sign-mac.mjs dist-local",
+    "dist:win": "pnpm build && electron-builder --win",
+    "dist:linux": "pnpm build && electron-builder --linux",
+    "dist:mac": "pnpm build && electron-builder --mac"
   },
-  "//": "ms is a decoy: with zero prod deps, electron-builder's module collector falls back to the workspace root and stuffs the web app's entire node_modules into the asar.",
   "dependencies": {
-    "ms": "^2.1.3"
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "electron": "^42.4.0",
-    "electron-builder": "^26.15.2"
+    "electron-builder": "^26.15.2",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,0 +1,252 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing desktop-vX.Y.Z tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  RELEASE_REF: ${{ inputs.release_tag || github.ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node desktop/scripts/verify-release-version.mjs "$RELEASE_TAG"
+      - run: pnpm desktop:test
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm test:reliability
+      - run: pnpm build
+      - run: pnpm -C desktop sbom
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-sbom
+          path: desktop/dist/desktop.sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  package-macos:
+    needs: verify
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    env:
+      CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node desktop/scripts/check-release-env.mjs mac
+      - run: pnpm -C desktop build
+      - name: Build, sign, and notarize
+        run: pnpm -C desktop exec electron-builder --mac --${{ matrix.arch }} --publish never --config.directories.output=dist-${{ matrix.arch }}
+      - name: Verify update artifacts
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-${{ matrix.arch }} darwin ${{ matrix.arch }}
+      - name: Verify application signature
+        run: |
+          app_path="$(find desktop/dist-${{ matrix.arch }} -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=2 "$app_path"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-mac-${{ matrix.arch }}
+          path: |
+            desktop/dist-${{ matrix.arch }}/*.dmg
+            desktop/dist-${{ matrix.arch }}/*.zip
+            desktop/dist-${{ matrix.arch }}/*.yml
+            desktop/dist-${{ matrix.arch }}/*.blockmap
+          if-no-files-found: error
+          retention-days: 14
+
+  package-windows:
+    needs: verify
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    env:
+      WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node desktop/scripts/check-release-env.mjs win
+      - run: pnpm -C desktop build
+      - name: Build and sign
+        run: pnpm -C desktop exec electron-builder --win --${{ matrix.arch }} --publish never --config.directories.output=dist-${{ matrix.arch }}
+      - name: Verify update artifacts
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-${{ matrix.arch }} win32 ${{ matrix.arch }}
+      - name: Verify installer signature
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem "desktop/dist-${{ matrix.arch }}" -Filter *.exe
+          if ($installers.Count -eq 0) { throw "No Windows installer found" }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature $installer.FullName
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid signature on $($installer.Name): $($signature.Status)"
+            }
+          }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-win-${{ matrix.arch }}
+          path: |
+            desktop/dist-${{ matrix.arch }}/*.exe
+            desktop/dist-${{ matrix.arch }}/*.zip
+            desktop/dist-${{ matrix.arch }}/*.yml
+            desktop/dist-${{ matrix.arch }}/*.blockmap
+          if-no-files-found: error
+          retention-days: 14
+
+  package-linux:
+    needs: verify
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -C desktop build
+      - name: Build AppImage and Debian package
+        run: pnpm -C desktop exec electron-builder --linux --${{ matrix.arch }} --publish never --config.directories.output=dist-${{ matrix.arch }}
+      - name: Verify update artifacts
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-${{ matrix.arch }} linux ${{ matrix.arch }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-linux-${{ matrix.arch }}
+          path: |
+            desktop/dist-${{ matrix.arch }}/*.AppImage
+            desktop/dist-${{ matrix.arch }}/*.deb
+            desktop/dist-${{ matrix.arch }}/*.yml
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [package-macos, package-windows, package-linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+      AWS_RELEASE_BUCKET: ${{ vars.AWS_RELEASE_BUCKET }}
+      AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_REF }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: desktop-*
+          path: release-staging
+      - name: Arrange independent updater feeds
+        run: |
+          mkdir -p release/darwin/x64 release/darwin/arm64
+          mkdir -p release/win32/x64 release/win32/arm64
+          mkdir -p release/linux/x64 release/linux/arm64
+          mv release-staging/desktop-mac-x64/* release/darwin/x64/
+          mv release-staging/desktop-mac-arm64/* release/darwin/arm64/
+          mv release-staging/desktop-win-x64/* release/win32/x64/
+          mv release-staging/desktop-win-arm64/* release/win32/arm64/
+          mv release-staging/desktop-linux-x64/* release/linux/x64/
+          mv release-staging/desktop-linux-arm64/* release/linux/arm64/
+          mv release-staging/desktop-sbom/* release/
+      - run: node desktop/scripts/release-manifest.mjs release
+      - name: Require the release publishing role
+        run: |
+          test -n "$AWS_RELEASE_ROLE_ARN"
+          test -n "$AWS_RELEASE_BUCKET"
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: aws sts get-caller-identity
+      - name: Attest release provenance
+        if: ${{ vars.ENABLE_GITHUB_ATTESTATIONS == 'true' }}
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: release/**/*
+      - name: Create immutable GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Silicon Interface ${RELEASE_TAG#desktop-v}"
+          find release -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name 'SHA256SUMS.txt' -o -name 'release-manifest.json' -o -name '*.cdx.json' \) -print0 | \
+            xargs -0 gh release upload "$RELEASE_TAG" --clobber
+      - name: Publish architecture-scoped update metadata
+        run: |
+          aws s3 sync release/darwin/x64 "s3://$AWS_RELEASE_BUCKET/interface/stable/darwin/x64" --delete
+          aws s3 sync release/darwin/arm64 "s3://$AWS_RELEASE_BUCKET/interface/stable/darwin/arm64" --delete
+          aws s3 sync release/win32/x64 "s3://$AWS_RELEASE_BUCKET/interface/stable/win32/x64" --delete
+          aws s3 sync release/win32/arm64 "s3://$AWS_RELEASE_BUCKET/interface/stable/win32/arm64" --delete
+          aws s3 sync release/linux/x64 "s3://$AWS_RELEASE_BUCKET/interface/stable/linux/x64" --delete
+          aws s3 sync release/linux/arm64 "s3://$AWS_RELEASE_BUCKET/interface/stable/linux/arm64" --delete
+          aws s3 cp release/SHA256SUMS.txt "s3://$AWS_RELEASE_BUCKET/interface/stable/SHA256SUMS.txt"
+          aws s3 cp release/release-manifest.json "s3://$AWS_RELEASE_BUCKET/interface/stable/release-manifest.json"
+          aws s3 cp release/desktop.sbom.cdx.json "s3://$AWS_RELEASE_BUCKET/interface/stable/desktop.sbom.cdx.json"
+      - name: Refresh the downloads CDN
+        if: ${{ env.AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID != '' }}
+        run: aws cloudfront create-invalidation --distribution-id "$AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID" --paths '/interface/stable/*'

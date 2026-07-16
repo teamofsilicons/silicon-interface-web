@@ -17,6 +17,28 @@ import type { CapturedNetworkRequest } from "posthog-js";
 
 const token = process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN;
 
+// Older PostHog defaults can leave analytics cookies on the parent domain.
+// That makes an Interface cookie travel to glass.teamofsilicons.com where it
+// is both unnecessary and capable of triggering an edge WAF false positive.
+// Remove only PostHog-owned legacy cookies from our fixed parent domain before
+// initializing the new localStorage-only policy.
+function clearLegacyParentDomainPosthogCookies() {
+  if (typeof document === "undefined" || typeof location === "undefined") return;
+  if (
+    location.hostname !== "teamofsilicons.com" &&
+    !location.hostname.endsWith(".teamofsilicons.com")
+  ) {
+    return;
+  }
+  for (const pair of document.cookie.split(";")) {
+    const name = pair.split("=", 1)[0]?.trim();
+    if (!name || !/^ph_[A-Za-z0-9_.-]+_posthog(?:_cross_subdomain)?$/.test(name)) continue;
+    for (const domain of ["teamofsilicons.com", ".teamofsilicons.com"]) {
+      document.cookie = `${name}=; Max-Age=0; Path=/; Domain=${domain}; Secure; SameSite=Lax`;
+    }
+  }
+}
+
 // Header names that must never reach a replay. Compared case-insensitively.
 const SENSITIVE_HEADERS = ["authorization", "x-silicon-key", "cookie", "set-cookie"];
 
@@ -42,12 +64,15 @@ function maskNetworkRequest(
 }
 
 if (token) {
+  clearLegacyParentDomainPosthogCookies();
   posthog.init(token, {
     // First-party reverse proxy (see next.config.ts rewrites).
     api_host: "/ingest",
     ui_host: "https://us.posthog.com",
     // Required modern defaults bundle (history-change pageviews, etc.).
     defaults: "2026-01-30",
+    cross_subdomain_cookie: false,
+    persistence: "localStorage",
 
     // ---- product analytics: capture as much as possible ----
     autocapture: true, // clicks, input changes, form submits, $autocapture

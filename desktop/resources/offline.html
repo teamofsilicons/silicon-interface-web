@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action https://interface.teamofsilicons.com"
+    />
+    <title>Silicon Interface — Offline</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f4efe6;
+        color: #1d1d1b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 32px;
+        background-image: radial-gradient(#d9d2c7 1px, transparent 1px);
+        background-size: 18px 18px;
+      }
+      main {
+        width: min(460px, 100%);
+        border: 1px solid #cfc7bb;
+        background: #f4efe6;
+        padding: 36px;
+      }
+      h1 { margin: 0 0 12px; font-size: 28px; letter-spacing: -0.03em; }
+      p { margin: 0 0 28px; color: #68635d; line-height: 1.55; }
+      a {
+        display: block;
+        padding: 13px 18px;
+        background: #1d1d1b;
+        color: white;
+        text-align: center;
+        text-decoration: none;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>You’re offline</h1>
+      <p>Silicon Interface couldn’t connect. Check your internet connection, then try again.</p>
+      <a href="https://interface.teamofsilicons.com/">Try again</a>
+    </main>
+  </body>
+</html>

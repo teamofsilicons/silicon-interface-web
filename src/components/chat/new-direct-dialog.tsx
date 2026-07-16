@@ -73,15 +73,20 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
   React.useEffect(() => {
     if (!open) return;
     let alive = true;
-    setLoadingPeople(true);
-    Promise.all(teams.map((t) => api.teamMembers(t.slug).catch(() => [] as TeamMembership[])))
-      .then((lists) => {
-        if (!alive) return;
-        setPeople(peopleFromMembers(lists.flat(), myUsername));
-      })
-      .finally(() => {
-        if (alive) setLoadingPeople(false);
-      });
+    queueMicrotask(() => {
+      if (!alive) return;
+      setLoadingPeople(true);
+      void Promise.all(
+        teams.map((t) => api.teamMembers(t.slug).catch(() => [] as TeamMembership[])),
+      )
+        .then((lists) => {
+          if (!alive) return;
+          setPeople(peopleFromMembers(lists.flat(), myUsername));
+        })
+        .finally(() => {
+          if (alive) setLoadingPeople(false);
+        });
+    });
     return () => {
       alive = false;
     };
@@ -89,10 +94,16 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
 
   // Reset transient state on close.
   React.useEffect(() => {
-    if (!open) {
+    if (open) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
       setQuery("");
       setOpening(null);
-    }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
   const q = query.trim().toLowerCase();

@@ -1,4 +1,5 @@
 import type { Event } from "./types";
+import type { TimelineEvent } from "./timeline-identity";
 
 /**
  * A small per-room cache of the most recent events, in localStorage, so a
@@ -49,13 +50,10 @@ function cacheableEvents<T extends Event>(events: T[]): Event[] {
     .filter((event) => event.type !== "m.progress")
     .slice(-ROOM_SNIPPET_LIMIT)
     .map((event) => {
-      // Real events keep their monotonic receipt status so reopening a room can
-      // paint ticks on its first cached frame. Only the client id is specific
-      // to optimistic reconciliation and can be dropped after acknowledgement.
+      // Real events keep their receipt status and immutable local identity so
+      // reopening a room uses the same React key, order, and authored timestamp
+      // that the optimistic row had before Glass accepted it.
       const { ...rest } = event as Event & Record<string, unknown>;
-      if (!event.event_id.startsWith("temp-")) {
-        delete (rest as Record<string, unknown>)._clientId;
-      }
       return rest as Event;
     });
 }
@@ -78,10 +76,10 @@ export function saveRoomEventSnippet<T extends Event>(roomId: string, events: T[
  * send). Used by the chat page for rooms that aren't currently open.
  */
 function eventClientId(event: Event): string | null {
-  const local = (event as Event & { _clientId?: unknown })._clientId;
+  const local = (event as TimelineEvent)._clientId;
   if (typeof local === "string" && local) return local;
-  const content = event.content?.client_id;
-  return typeof content === "string" && content ? content : null;
+  const transaction = event.transaction_id;
+  return typeof transaction === "string" && transaction ? transaction : null;
 }
 
 export function appendRoomEventSnippet(roomId: string, event: Event): void {
@@ -90,14 +88,41 @@ export function appendRoomEventSnippet(roomId: string, event: Event): void {
   if (event.type === "m.progress") return;
   const existing = readRoomEventSnippet(roomId) ?? [];
   const clientId = eventClientId(event);
-  const idx = existing.findIndex(
-    (e) =>
-      e.event_id === event.event_id ||
-      (clientId !== null && eventClientId(e) === clientId),
-  );
+  const localKey = (event as TimelineEvent)._localKey;
+  const matches = existing
+    .map((candidate, index) => ({ candidate: candidate as TimelineEvent, index }))
+    .filter(
+      ({ candidate }) =>
+        candidate.event_id === event.event_id ||
+        (typeof localKey === "string" && localKey && candidate._localKey === localKey) ||
+        (clientId !== null && candidate._clientId === clientId),
+    )
+    .map(({ index }) => index);
+  const idx =
+    matches.find((index) => Boolean((existing[index] as TimelineEvent)._localKey)) ??
+    matches[0] ??
+    -1;
   if (idx >= 0) {
+    const local = existing[idx] as TimelineEvent;
+    const authoritativeAt = (event as TimelineEvent)._authoritativeCreatedAt ?? event.created_at;
+    const reconciled: TimelineEvent = {
+      ...event,
+      _localKey: local._localKey ?? (event as TimelineEvent)._localKey,
+      _localSequence: local._localSequence ?? (event as TimelineEvent)._localSequence,
+      _originDevice: local._originDevice ?? (event as TimelineEvent)._originDevice,
+      _localCreatedAt: local._localCreatedAt ?? (event as TimelineEvent)._localCreatedAt,
+      _authoritativeCreatedAt: authoritativeAt,
+      _clientId: local._clientId ?? clientId ?? undefined,
+      created_at:
+        local._localCreatedAt ??
+        (event as TimelineEvent)._localCreatedAt ??
+        event.created_at,
+    };
     const next = [...existing];
-    next[idx] = event;
+    next[idx] = reconciled;
+    for (const duplicate of matches.sort((left, right) => right - left)) {
+      if (duplicate !== idx) next.splice(duplicate, 1);
+    }
     saveRoomEventSnippet(roomId, next);
     return;
   }

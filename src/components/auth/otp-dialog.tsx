@@ -4,6 +4,10 @@ import * as React from "react";
 import { CircleNotch, PencilSimple } from "@phosphor-icons/react/dist/ssr";
 
 import type { useResendCooldown } from "@/lib/use-resend";
+import {
+  verificationDeliveryMessage,
+  type VerificationDeliveryFailure,
+} from "@/lib/verification-delivery";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -27,6 +31,8 @@ interface OtpDialogProps {
   resend: ReturnType<typeof useResendCooldown>;
   onResend: () => void;
   loading: boolean;
+  deliveryFailure?: VerificationDeliveryFailure | null;
+  providerWaitSeconds?: number;
 }
 
 /** OTP entry dialog with a pencil-to-edit affordance and escalating resend. */
@@ -40,6 +46,8 @@ export function OtpDialog({
   resend,
   onResend,
   loading,
+  deliveryFailure = null,
+  providerWaitSeconds = 0,
 }: OtpDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -48,7 +56,8 @@ export function OtpDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription className="flex flex-wrap items-center gap-1.5">
             <span>
-              code sent to <span className="font-medium text-foreground">{target}</span>
+              {deliveryFailure ? "delivery not confirmed for " : "code sent to "}
+              <span className="font-medium text-foreground">{target}</span>
             </span>
             <button
               type="button"
@@ -64,11 +73,12 @@ export function OtpDialog({
         {/* Body lives inside DialogContent so it unmounts on close — the code box
             resets itself on each open without an effect. */}
         <OtpBody
-          target={target}
           onVerify={onVerify}
           resend={resend}
           onResend={onResend}
           loading={loading}
+          deliveryFailure={deliveryFailure}
+          providerWaitSeconds={providerWaitSeconds}
         />
       </DialogContent>
     </Dialog>
@@ -76,17 +86,45 @@ export function OtpDialog({
 }
 
 function OtpBody({
-  target,
   onVerify,
   resend,
   onResend,
   loading,
-}: Pick<OtpDialogProps, "target" | "onVerify" | "resend" | "onResend" | "loading">) {
+  deliveryFailure,
+  providerWaitSeconds,
+}: Pick<
+  OtpDialogProps,
+  | "onVerify"
+  | "resend"
+  | "onResend"
+  | "loading"
+  | "deliveryFailure"
+  | "providerWaitSeconds"
+>) {
   const [code, setCode] = React.useState("");
   return (
     <div className="space-y-4">
+      {deliveryFailure && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="border border-amber-600/50 bg-amber-500/10 px-3 py-2 text-xs"
+        >
+          <p>{verificationDeliveryMessage(deliveryFailure)}</p>
+          {(providerWaitSeconds ?? 0) > 0 && (
+            <p className="mt-1 font-mono text-muted-foreground">
+              retry available in {providerWaitSeconds}s
+            </p>
+          )}
+        </div>
+      )}
       <OtpInput value={code} onChange={setCode} autoFocus onComplete={onVerify} />
-      <ResendRow resend={resend} onResend={onResend} loading={loading} />
+      <ResendRow
+        resend={resend}
+        onResend={onResend}
+        loading={loading}
+        providerWaitSeconds={providerWaitSeconds}
+      />
       <Button
         onClick={() => onVerify(code)}
         disabled={code.length !== 6 || loading}

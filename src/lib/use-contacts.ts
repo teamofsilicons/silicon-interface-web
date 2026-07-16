@@ -47,13 +47,16 @@ export function useContacts(ownerId?: string | null): UseContacts {
   React.useEffect(() => {
     let alive = true;
     const cached = ownerId ? loadCachedContacts(ownerId) : null;
-    if (cached) {
-      setRows(cached);
-      setLoading(false);
-    } else {
-      setRows([]);
-      setLoading(true);
-    }
+    queueMicrotask(() => {
+      if (!alive) return;
+      if (cached) {
+        setRows(cached);
+        setLoading(false);
+      } else {
+        setRows([]);
+        setLoading(true);
+      }
+    });
     (async () => {
       try {
         const rows = await api.contacts();

@@ -295,17 +295,22 @@ export function glyphSvg(text: string, opts: GlyphOptions = {}): string {
   const src = text || "?";
   const seedNum = seedFor(src);
   const grid = buildGrid(src, family, seedNum);
-  const id = `ms-${family}-${fnv(`${family}:${src}`).toString(36)}`;
 
   let body = "";
   if (config.theme === "split") {
     const h = VB / 2;
+    const left = `${cellMarkup(grid, config.n, FG)}${seedStripMarkup(seedNum, FG)}`;
+    const right = `${cellMarkup(grid, config.n, BG)}${seedStripMarkup(seedNum, BG)}`;
     body = [
-      `<defs><clipPath id="${id}-lh"><rect x="0" y="0" width="${h}" height="${VB}"/></clipPath><clipPath id="${id}-rh"><rect x="${h}" y="0" width="${h}" height="${VB}"/></clipPath></defs>`,
       `<rect x="0" y="0" width="${h}" height="${VB}" fill="${BG}"/>`,
       `<rect x="${h}" y="0" width="${h}" height="${VB}" fill="${FG}"/>`,
-      `<g clip-path="url(#${id}-lh)">${cellMarkup(grid, config.n, FG)}${seedStripMarkup(seedNum, FG)}</g>`,
-      `<g clip-path="url(#${id}-rh)">${cellMarkup(grid, config.n, BG)}${seedStripMarkup(seedNum, BG)}</g>`,
+      // Nested SVG viewports clip locally without document IDs. The previous
+      // <clipPath id=...> implementation emitted the same two IDs for every
+      // copy of a team mark. Duplicate DOM IDs made fragment resolution depend
+      // on mount order, so scrolling or rendering the same logo at two sizes
+      // could bind one instance to another instance's clip paths.
+      `<svg x="0" y="0" width="${h}" height="${VB}" viewBox="0 0 ${h} ${VB}" overflow="hidden">${left}</svg>`,
+      `<svg x="${h}" y="0" width="${h}" height="${VB}" viewBox="${h} 0 ${h} ${VB}" overflow="hidden">${right}</svg>`,
     ].join("");
   } else {
     const dark = config.theme === "dark";

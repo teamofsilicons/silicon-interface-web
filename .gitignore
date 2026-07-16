@@ -15,6 +15,7 @@
 
 # next.js
 /.next/
+/.next-*/
 /out/
 
 # production
@@ -44,3 +45,12 @@ next-env.d.ts
 # electron desktop build
 /desktop/node_modules
 /desktop/dist
+/desktop/compiled
+/desktop/dist-smoke-*
+
+# generated package archives
+/packages/silicon-interface-cli/*.tgz
+
+# Python helpers
+__pycache__/
+*.py[cod]

@@ -36,6 +36,7 @@ function fuzzy(q: string, text: string): boolean {
 }
 
 export function CommandMenu({ rooms, isStaff }: { rooms: Room[]; isStaff?: boolean }) {
+  void isStaff;
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
@@ -46,19 +47,14 @@ export function CommandMenu({ rooms, isStaff }: { rooms: Room[]; isStaff?: boole
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
+        setQ("");
+        setActive(0);
         setOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-
-  React.useEffect(() => {
-    if (open) {
-      setQ("");
-      setActive(0);
-    }
-  }, [open]);
 
   const entries = React.useMemo<Entry[]>(() => {
     const list: Entry[] = rooms.map((r) => {

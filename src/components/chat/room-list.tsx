@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Archive,
   Camera,
   CaretLeft,
   Check,
@@ -11,8 +12,10 @@ import {
   File,
   FolderSimple,
   FolderSimplePlus,
+  Gif,
   Microphone,
   PencilSimple,
+  PushPin,
   SpeakerHigh,
   Trash,
   WarningCircle,
@@ -21,9 +24,11 @@ import {
 import type { Contact, Room } from "@/lib/types";
 import { roomDisplay } from "@/lib/peers";
 import { contactKey } from "@/lib/use-contacts";
-import { useDraft } from "@/lib/drafts";
+import { useDraftListPreview } from "@/lib/drafts";
+import { useVoiceDraftListPreview } from "@/lib/voice-drafts";
 import { usePendingPreview } from "@/lib/pending-preview";
 import { cn, sidebarTime } from "@/lib/utils";
+import { serverRoomListStatus } from "@/lib/room-list-projection";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -96,6 +101,8 @@ interface Props {
   /** roomId → latest progress note for a working room, shown live in the
    *  row's message-preview line with a blinking dot. */
   workingNotes?: Record<string, string>;
+  /** Ephemeral peer composer activity, kept separate from durable room state. */
+  peerActivityNotes?: Record<string, string>;
   onRoomDragEnter?: (roomId: string) => void;
   onRoomDragLeave?: (roomId: string) => void;
   /** When set, render `groupSections` (collapsible) + `ungroupedRooms` instead
@@ -103,6 +110,13 @@ interface Props {
   groupSections?: GroupSection[];
   ungroupedRooms?: Room[];
   groupControls?: GroupControls;
+  archivedCount?: number;
+  showArchived?: boolean;
+  onShowArchivedChange?: (show: boolean) => void;
+  onListPreferenceChange?: (
+    roomId: string,
+    patch: Partial<{ pinned: boolean; archived: boolean }>,
+  ) => void;
 }
 
 export function RoomList({
@@ -117,11 +131,16 @@ export function RoomList({
   hoverRoomId,
   workingRoomIds,
   workingNotes,
+  peerActivityNotes,
   onRoomDragEnter,
   onRoomDragLeave,
   groupSections,
   ungroupedRooms,
   groupControls,
+  archivedCount = 0,
+  showArchived = false,
+  onShowArchivedChange,
+  onListPreferenceChange,
 }: Props) {
   const grouped = !!groupControls && !!groupSections;
   // The group currently drilled into (nested view of just its chats), if any.
@@ -139,7 +158,7 @@ export function RoomList({
       groupSections!.every((section) => section.rooms.length === 0) &&
       (ungroupedRooms?.length ?? 0) === 0
     : rooms.length === 0;
-  if (!loading && topLevelEmpty) {
+  if (!loading && topLevelEmpty && !(archivedCount > 0 && !showArchived)) {
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
         <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-28 text-center">
@@ -158,13 +177,26 @@ export function RoomList({
     hoverRoomId,
     workingRoomIds,
     workingNotes,
+    peerActivityNotes,
     onRoomDragEnter,
     onRoomDragLeave,
     groupControls,
+    onListPreferenceChange,
   };
 
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
+      {archivedCount > 0 || showArchived ? (
+        <button
+          type="button"
+          onClick={() => onShowArchivedChange?.(!showArchived)}
+          className="flex items-center gap-2 border-b px-6 py-2 text-left text-xs text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+          aria-pressed={showArchived}
+        >
+          <Archive className="h-3.5 w-3.5" />
+          <span>{showArchived ? "Back to conversations" : `Archived (${archivedCount})`}</span>
+        </button>
+      ) : null}
       <ScrollArea className="flex-1">
         {grouped ? (
           openSection ? (
@@ -392,9 +424,14 @@ interface RowProps {
   hoverRoomId?: string | null;
   workingRoomIds?: Set<string>;
   workingNotes?: Record<string, string>;
+  peerActivityNotes?: Record<string, string>;
   onRoomDragEnter?: (roomId: string) => void;
   onRoomDragLeave?: (roomId: string) => void;
   groupControls?: GroupControls;
+  onListPreferenceChange?: (
+    roomId: string,
+    patch: Partial<{ pinned: boolean; archived: boolean }>,
+  ) => void;
 }
 
 function RoomRow({
@@ -406,15 +443,18 @@ function RoomRow({
   hoverRoomId,
   workingRoomIds,
   workingNotes,
+  peerActivityNotes,
   onRoomDragEnter,
   onRoomDragLeave,
   groupControls,
+  onListPreferenceChange,
 }: RowProps) {
   const d = roomDisplay(r);
   const peers = Array.isArray(r.peers) ? r.peers : [];
   const isHover = hoverRoomId === r.room_id;
   const isWorking = workingRoomIds?.has(r.room_id) ?? false;
   const workingNote = workingNotes?.[r.room_id]?.trim() || "";
+  const peerActivityNote = peerActivityNotes?.[r.room_id]?.trim() || "";
   const unread = r.unread_count ?? (r.unread ? 1 : 0);
   // The latest message is mine when its sender handle matches me — in
   // that case the right slot shows a send-status tick instead of a
@@ -433,12 +473,24 @@ function RoomRow({
     unread > 0 ? "font-semibold" : "font-medium",
   );
   const preview = roomPreview(r, d.subtitle);
-  // An unsent draft takes over the preview line (italic "draft: …"), like
-  // Telegram. Updates live as the composer writes to the shared draft store.
-  const draft = useDraft(r.room_id);
+  // Telegram shows the draft body and its own timestamp, but lets a newer
+  // unread message take the preview line instead of pinning stale composer text.
+  const draft = useDraftListPreview(r.room_id);
+  const voiceDraft = useVoiceDraftListPreview(r.room_id);
+  const voiceIsLatest = voiceDraft.active && (
+    !draft.active || Date.parse(voiceDraft.updatedAt) >= Date.parse(draft.updatedAt)
+  );
+  const combinedDraft = voiceIsLatest
+    ? { active: true, text: "voice note", updatedAt: voiceDraft.updatedAt, originDevice: "" }
+    : draft;
+  // Once a local draft is visible it stays in the row until send/discard.
+  // Incoming messages may add an unread badge, but never replace draft text.
+  const visibleDraft = combinedDraft.active ? combinedDraft : null;
+  const visibleVoiceDraft = Boolean(visibleDraft && voiceIsLatest);
   // An outgoing message still waiting to send / in flight (e.g. the silicon 5s
   // hold) shows in the preview with a clock until it lands in last_event.
   const pending = usePendingPreview(r.room_id);
+  const serverStatus = serverRoomListStatus(r);
   const currentGroupId = groupControls?.assignmentByRoom[r.room_id];
   const currentGroup = currentGroupId
     ? groupControls?.groups.find((g) => g.id === currentGroupId)
@@ -450,7 +502,7 @@ function RoomRow({
   // it would overflow the viewport.
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [anchor, setAnchor] = React.useState({ x: 0, y: 0 });
-  const openMenu = groupControls
+  const openMenu = groupControls || onListPreferenceChange
     ? (e: React.MouseEvent) => {
         e.preventDefault();
         setAnchor({ x: e.clientX, y: e.clientY });
@@ -508,6 +560,9 @@ function RoomRow({
                   aria-label="observing (read-only)"
                 />
               )}
+              {r.list_preferences?.pinned ? (
+                <PushPin className="h-3 w-3 shrink-0 text-muted-foreground" weight="fill" aria-label="pinned" />
+              ) : null}
               {peer ? (
                 contact ? (
                   <span className={nameClass}>{contact.name}</span>
@@ -528,7 +583,7 @@ function RoomRow({
                 unread > 0 ? "font-medium text-foreground" : "text-muted-foreground",
               )}
             >
-              {sidebarTime(r.last_event?.at ?? r.updated_at)}
+              {sidebarTime(visibleDraft?.updatedAt ?? r.last_event?.at ?? r.updated_at)}
             </span>
           </div>
           {/* Last-message preview (one line, type-aware) + unread
@@ -556,16 +611,26 @@ function RoomRow({
                   />
                   <span className="min-w-0 truncate">{workingNote || "working…"}</span>
                 </span>
+              ) : peerActivityNote ? (
+                <span className="min-w-0 truncate text-foreground/70">{peerActivityNote}</span>
+              ) : visibleDraft ? (
+                <span className="inline-flex min-w-0 items-center gap-1">
+                  {visibleVoiceDraft ? <Microphone className="h-3.5 w-3.5 shrink-0" /> : null}
+                  <span className="truncate">
+                    <span className="font-medium text-destructive">Draft:</span>{" "}
+                    {visibleDraft.text}
+                  </span>
+                </span>
               ) : pending ? (
                 // Status (stopwatch / warning) rides in the receipt slot on the
                 // right, like the ticks — here we just show the text.
                 <span className={cn("min-w-0 truncate", pending.status === "failed" && "text-destructive")}>
                   {pending.text}
                 </span>
-              ) : draft ? (
-                <span className="italic">
-                  <span className="text-foreground/70">draft:</span> {draft}
-                </span>
+              ) : serverStatus === "attention" ? (
+                <span className="text-destructive">message needs attention</span>
+              ) : serverStatus === "held" ? (
+                <span className="text-foreground/70">scheduled message</span>
               ) : (
                 <LastEventPreview room={r} fallback={preview} />
               )}
@@ -587,9 +652,9 @@ function RoomRow({
                   aria-label="failed to send"
                 />
               ) : (
-                <Clock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="sending" />
+                <Clock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="waiting" />
               )
-            ) : mineLast ? (
+            ) : visibleDraft ? null : mineLast ? (
               r.last_event?.read ? (
                 <Checks
                   weight="bold"
@@ -600,7 +665,7 @@ function RoomRow({
                 <Check
                   weight="bold"
                   className="h-4 w-4 shrink-0 text-muted-foreground"
-                  aria-label="sent"
+                  aria-label="delivered"
                 />
               )
             ) : null}
@@ -611,7 +676,7 @@ function RoomRow({
           no hover affordance. The trigger is an invisible anchor pinned to the
           click point (fixed → viewport coords); Radix positions the menu there
           and flips it left/up via avoidCollisions when near an edge. */}
-      {groupControls ? (
+      {groupControls || onListPreferenceChange ? (
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <span
@@ -621,8 +686,29 @@ function RoomRow({
             />
           </DropdownMenuTrigger>
           <DropdownMenuContent side="right" align="start" sideOffset={2} className="min-w-[12rem]">
-            <DropdownMenuLabel>Add to group</DropdownMenuLabel>
-            {groupControls.groups.map((g) => (
+            {onListPreferenceChange ? (
+              <>
+                <DropdownMenuItem
+                  onSelect={() => onListPreferenceChange(r.room_id, {
+                    pinned: !r.list_preferences?.pinned,
+                  })}
+                >
+                  <PushPin className="mr-2 h-4 w-4" />
+                  {r.list_preferences?.pinned ? "Unpin" : "Pin"}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() => onListPreferenceChange(r.room_id, {
+                    archived: !r.list_preferences?.archived,
+                  })}
+                >
+                  <Archive className="mr-2 h-4 w-4" />
+                  {r.list_preferences?.archived ? "Unarchive" : "Archive"}
+                </DropdownMenuItem>
+              </>
+            ) : null}
+            {groupControls ? <DropdownMenuSeparator /> : null}
+            {groupControls ? <DropdownMenuLabel>Add to group</DropdownMenuLabel> : null}
+            {groupControls?.groups.map((g) => (
               <DropdownMenuItem
                 key={g.id}
                 disabled={currentGroup?.id === g.id}
@@ -634,13 +720,13 @@ function RoomRow({
                 )}
               </DropdownMenuItem>
             ))}
-            <DropdownMenuItem onSelect={() => groupControls.onCreateGroupWithRoom(r.room_id)}>
+            {groupControls ? <DropdownMenuItem onSelect={() => groupControls.onCreateGroupWithRoom(r.room_id)}>
               <FolderSimplePlus className="mr-2 h-4 w-4" /> New group…
-            </DropdownMenuItem>
+            </DropdownMenuItem> : null}
             {currentGroup ? (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => groupControls.onMoveRoom(r.room_id, null)}>
+                <DropdownMenuItem onSelect={() => groupControls?.onMoveRoom(r.room_id, null)}>
                   Remove from “{currentGroup.name}”
                 </DropdownMenuItem>
               </>
@@ -691,8 +777,14 @@ function LastEventPreview({ room, fallback }: { room: Room; fallback: string }) 
       return wrap(<Microphone className={iconCls} />, "voice note");
     case "m.tts":
       return wrap(<SpeakerHigh className={iconCls} />, stripPreviewEmoji(fallback) || "audio");
-    case "m.image":
-      return wrap(<Camera className={iconCls} />, stripPreviewEmoji(fallback) || "photo");
+    case "m.image": {
+      const label = stripPreviewEmoji(fallback) || "photo";
+      return /^GIF(?:\s*·|$)/i.test(label)
+        ? wrap(<Gif className={iconCls} />, label)
+        : wrap(<Camera className={iconCls} />, label);
+    }
+    case "m.album":
+      return wrap(<Camera className={iconCls} />, stripPreviewEmoji(fallback) || "attachments");
     case "m.remote_browser":
       return wrap(<SiliconBrowserMark className={iconCls} />, "Silicon Browser link");
     case "m.file":

@@ -6,6 +6,7 @@ export type EventType =
   | "m.text"
   | "m.image"
   | "m.file"
+  | "m.album"
   | "m.voice"
   | "m.tts"
   | "m.progress"
@@ -126,6 +127,14 @@ export interface RoomPeer {
   /** Delights §0a — colored ASCII treatment of the photo; preferred for avatars. */
   profile_ascii_url?: string | null;
   connection_state?: "online" | "connecting" | "offline" | string;
+  presence?: PresenceProjection;
+}
+
+export interface PresenceProjection {
+  state: "online" | "offline" | "hidden";
+  expires_at: string;
+  last_seen_at: string;
+  revision: number;
 }
 
 /** A cron a silicon scheduled. Carbons see these read-only. */
@@ -190,6 +199,42 @@ export interface RoomLastEvent {
   /** True when someone other than the sender has read up to this event —
    *  drives the sent (✓) vs read (✓✓) tick on my own latest message. */
   read?: boolean;
+  stream_position?: number;
+  stream_writer?: string;
+}
+
+export interface UnreadBoundary {
+  last_read_stream_position: number;
+  last_read_stream_vector?: StreamVectorPosition;
+  first_unread_event_id: string | null;
+  first_unread_stream_position: number | null;
+  first_unread_stream_writer?: string | null;
+  unread_count: number;
+  /** Fixed event-stream barrier at which this projection was calculated. */
+  through_stream_position: number;
+  through_stream_vector?: StreamVectorPosition;
+}
+
+export interface RoomListPreferences {
+  pinned: boolean;
+  archived: boolean;
+}
+
+export interface RoomListProjection {
+  version: 1;
+  complete: true;
+  through_stream_position: number;
+  through_stream_vector?: StreamVectorPosition;
+  activity_stream_position: number;
+  activity_at: string;
+  draft: {
+    active: boolean;
+    version: number;
+    updated_at: string;
+    content_updated_at?: string;
+    origin_device?: string;
+  };
+  held: { active_count: number; attention_count: number; next_release_at: string };
 }
 
 export interface Room {
@@ -203,16 +248,31 @@ export interface Room {
   /** Number of unread messages to me — drives the numbered sidebar badge.
    *  Patched live on the client as event frames arrive. */
   unread_count?: number;
+  /** Server-authoritative unread anchor. The UI freezes the first unread
+   * identity for a room-viewing session so paging and receipt refreshes cannot
+   * make the divider jump. */
+  unread_boundary: UnreadBoundary;
   /** True when I see this room only as a read-only observer (my carbon_id is
    *  in the backend SILICON_OBSERVER_CARBON_IDS allowlist and this is a
    *  silicon↔silicon room). Drives the read-only sidebar/room treatment. */
   observed?: boolean;
+  notification_preferences?: {
+    mode: "all" | "mentions" | "mute";
+    mute_until: string;
+    show_preview: boolean;
+    sound: boolean;
+  } | null;
+  list_preferences: RoomListPreferences | null;
+  list_projection: RoomListProjection;
   /** Lightweight last-event projection so the sidebar can show a preview
    *  without an N+1 fetch per room. Null when the room has no events. */
   last_event: RoomLastEvent | null;
   name: string;
   topic: string;
   settings: Record<string, unknown>;
+  security_mode: "server_managed" | "private_e2ee";
+  security_version: number;
+  security_frozen_at: string | null;
   created_by_kind: string;
   created_by_id: number | null;
   created_at: string;
@@ -368,25 +428,45 @@ export interface LinkPreview {
 
 export interface Event {
   event_id: string;
+  /** Device-scoped transaction echo. Glass only exposes this to the exact
+   * authoring X-Device-ID; peers and the author's other devices receive null. */
+  transaction_id?: string | null;
+  stream_position?: number;
+  stream_writer?: string;
   room: number;
   sender_kind: Kind;
   sender_id: number | null;
   sender_handle: string | null; // carbon username (== carbon_id) or silicon name
+  /** Stable public Carbon/Silicon identity for report/block actions. Never
+   * infer a Silicon id from its mutable display name. */
+  sender_public_id?: string | null;
   type: EventType;
   content: Record<string, unknown>;
   reply_to_event_id: string;
+  /** Canonical root for a non-reaction reply chain; empty on root events. */
+  thread_root_event_id?: string;
   /** The carbon message that triggered this silicon reply's run — lets the UI
    *  group the reply (and its progress) under the message it answers. Set
    *  server-side; empty for carbon messages and cron/proactive silicon sends. */
   run_anchor_event_id?: string;
   is_final: boolean;
   created_at: string;
+  /** Immutable server acceptance timestamp. Equal to created_at for events. */
+  accepted_at?: string;
   edited_at: string | null;
+  /** Optimistic-concurrency token for content edits (original event is 0). */
+  edit_version?: number;
   redacted_at: string | null;
   redaction_reason: string;
   /** Sender-scoped affordance from Glass. False when read/delivered gates have
    *  already closed the unsend window for this signed-in user. */
   can_unsend?: boolean;
+  delivery?: {
+    state: "sent" | "partially_delivered" | "delivered" | "partially_read" | "read";
+    recipient_count: number;
+    delivered_count: number;
+    read_count: number;
+  } | null;
   /** #25 — OG-style link preview projection, only set when body contains
    *  exactly one URL. */
   link_preview?: LinkPreview | null;
@@ -402,6 +482,75 @@ export interface Event {
     kind: "file" | "image" | "voice" | "tts_output";
     mime: string;
   } | null;
+  /** Ordered authoritative metadata for an atomically published media album.
+   * Optimistic rows may omit this and render from content.items until ack. */
+  media_items?: Array<{
+    position: number;
+    media_id: string;
+    filename: string;
+    kind: "file" | "image";
+    mime: string;
+    size: number;
+    width: number | null;
+    height: number | null;
+    duration_ms: number | null;
+  }> | null;
+}
+
+export interface HistoryPage {
+  events: Event[];
+  cursor: string | null;
+  has_more: boolean;
+  direction: "backward" | "forward";
+  through_event_id: string | null;
+}
+
+export interface ThreadPage {
+  root: Event;
+  events: Event[];
+  cursor: string | null;
+  has_more: boolean;
+  through_event_id: string | null;
+  reply_count: number;
+  unread_count: number;
+}
+
+export interface ThreadReadResult {
+  marked: number;
+  event_id: string;
+  unread_count: number;
+  removed_unread_count: number;
+}
+
+export interface SyncPageRange {
+  stream: "events" | "account";
+  from_position: number;
+  next_position: number;
+  through_position: number;
+  first_item_position: number | null;
+  last_item_position: number | null;
+  item_count: number;
+  has_more: boolean;
+  complete_through: boolean;
+  coverage: "authoritative_projection" | "contiguous";
+}
+
+export interface StreamVectorPosition {
+  floor: number;
+  writers: Record<string, number>;
+}
+
+export interface EventVectorRange {
+  version: 1;
+  stream: "events";
+  from: StreamVectorPosition;
+  next: StreamVectorPosition;
+  through: StreamVectorPosition;
+  items: Array<{ writer: string; position: number }>;
+  item_count: number;
+  has_more: boolean;
+  complete_through: boolean;
+  coverage: "authoritative_projection";
 }
 
 export interface MediaObject {
@@ -428,13 +577,13 @@ export interface MediaObject {
 
 export interface JwtPair {
   access: string;
-  refresh: string;
+  refresh?: string;
 }
 
 export interface AuthSession {
   carbon: Carbon;
   access: string;
-  refresh: string;
+  refresh?: string;
 }
 
 export type LoginChannel = "sms" | "email";
@@ -511,6 +660,8 @@ export interface DraftState {
   reply_to_snapshot: ReplyDraftTarget | Record<string, never>;
   version: number;
   updated_at: string;
+  /** When the composer contents changed, distinct from a retry/save time. */
+  content_updated_at?: string;
   cleared_at?: string;
   origin_device?: string;
 }
@@ -525,27 +676,114 @@ export interface DraftWritePayload {
   reply_to_event_id?: string;
   base_version?: number;
   origin_device?: string;
+  content_updated_at?: string;
 }
 
 export interface HeldSend {
   held_send_id: string;
   room_id: string;
   client_id: string;
+  device_id?: string;
   type: EventType;
   content: Record<string, unknown>;
   reply_to_event_id: string;
-  state: "pending" | "releasing" | "sent" | "cancelled" | "failed";
+  state:
+    | "pending"
+    | "releasing"
+    | "blocked"
+    | "challenge"
+    | "sent"
+    | "cancelled"
+    | "failed";
+  phase?:
+    | "held"
+    | "sending"
+    | "retry_wait"
+    | "blocked"
+    | "challenge"
+    | "accepted"
+    | "cancelled";
   release_at: string;
+  next_attempt_at?: string;
   sent_event_id: string;
   version: number;
+  release_attempts?: number;
   error: string;
+  failure_code?: string;
+  failure?: {
+    domain?: unknown;
+    code?: unknown;
+    retryable?: unknown;
+    automatic?: unknown;
+    correction_actions?: unknown;
+    retry_after_seconds?: unknown;
+  } | null;
+  failure_at?: string;
+  challenge?: Record<string, unknown>;
   created_at: string;
+  accepted_at?: string;
   updated_at: string;
   terminal_at: string;
 }
 
+export interface ClientOperationStatus {
+  operation_id: string;
+  room_id: string;
+  kind: "event_send" | "held_send";
+  client_id: string;
+  device_id: string;
+  state: "pending" | "succeeded" | "cancelled" | "failed";
+  resource_id: string;
+  result_event_id: string;
+  http_status: number;
+  accepted_at: string;
+  terminal_at: string;
+  expires_at: string;
+  result?:
+    | { kind: "event"; event: Event }
+    | { kind: "held_send"; held_send: HeldSend };
+}
+
 export interface HeldSendsListResponse {
   held_sends: HeldSend[];
+}
+
+export interface AccountSyncUpdate {
+  position: number;
+  kind: string;
+  room_id: string;
+  object_id: string;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface InitialSyncResponse {
+  sync_version: number;
+  server_time: string;
+  through: string;
+  account_through: string;
+  continuity: {
+    event_position: number;
+    event_vector?: StreamVectorPosition;
+    account_position: number;
+    complete_at_barrier: boolean;
+  };
+  rooms: Array<Room & {
+    timeline: { events: Event[]; limited: boolean; before: string | null };
+  }>;
+  account_data: null | {
+    drafts: DraftState[];
+    held_sends: HeldSend[];
+    operations: ClientOperationStatus[];
+    chat_preferences: {
+      read_receipts_enabled: boolean;
+      presence_visibility: "everyone" | "contacts" | "nobody";
+    };
+    devices: Array<Record<string, unknown>>;
+    blocks: Array<Record<string, unknown>>;
+  };
+  next: string | null;
+  has_more: boolean;
 }
 
 // ---- WebSocket frames ----
@@ -559,16 +797,54 @@ export interface Announcement {
 }
 
 export type WsFrame =
-  | { type: "hello"; subscribed_rooms: string[] }
+  | {
+      type: "hello";
+      subscribed_rooms: string[];
+      cursor: string;
+      account_cursor: string;
+      device_aware: boolean;
+      protocol_version?: number;
+      protocol_min?: number;
+      protocol_max?: number;
+      heartbeat_interval_ms?: number;
+      heartbeat_timeout_ms?: number;
+      presence_timeout_ms?: number;
+    }
   | { type: "announcement"; announcement: Announcement }
   | { type: "pong" }
-  | { type: "event"; room_id: string; event: Event }
+  | { type: "presence.ok"; state: "active" | "inactive"; revision: number }
+  | { type: "presence.error"; code: string }
+  | {
+      type: "presence";
+      room_id: string;
+      member_kind: "carbon";
+      member_id: number;
+      member_handle: string;
+      state: "online" | "offline" | "hidden";
+      expires_at: string;
+      last_seen_at: string;
+      revision: number;
+    }
+  | { type: "event"; room_id: string; event: Event; traceparent?: string }
   | { type: "event.delta"; room_id: string; event_id: string; delta: string; seq: number }
   | { type: "event.final"; room_id: string; event_id: string }
   | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
   | { type: "event.remote_browser_close"; room_id: string; event_id: string; expires_at: string }
   | { type: "draft"; draft: DraftState }
   | { type: "held_send"; held_send: HeldSend }
+  | {
+      type: "delivery_receipt";
+      room_id: string;
+      member_kind: Kind;
+      member_id: number;
+      member_handle?: string;
+      event_ids: string[];
+      deliveries?: Record<string, NonNullable<Event["delivery"]>>;
+    }
+  | { type: "room.updated" | "room.removed"; room_id: string }
+  | { type: "account.state"; kind: string; data: Record<string, unknown> }
+  | { type: "event.ack.ok"; acknowledged: number; request_id?: string }
+  | { type: "event.ack.error"; code: string; detail: string; request_id?: string }
   | {
       type: "read_receipt";
       room_id: string;
@@ -578,6 +854,25 @@ export type WsFrame =
        *  client tell its OWN reads (cross-device sync) from a peer's. */
       member_handle?: string;
       event_id: string;
+      /** Authoritative monotonic position committed by Glass. */
+      read_stream_position: number;
+      read_stream_vector?: StreamVectorPosition;
+      deliveries?: Record<string, NonNullable<Event["delivery"]>>;
+      deliveries_limited?: boolean;
+    }
+  | {
+      type: "thread_read_receipt";
+      room_id: string;
+      root_event_id: string;
+      member_kind: Kind;
+      member_id: number;
+      member_handle?: string;
+      event_id: string;
+      unread_count: number;
+      removed_unread_count: number;
+      deliveries?: Record<string, NonNullable<Event["delivery"]>>;
+      deliveries_limited?: boolean;
+      shared?: boolean;
     }
   | {
       type: "take_back";

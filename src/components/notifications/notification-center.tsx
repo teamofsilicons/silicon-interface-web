@@ -48,9 +48,15 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   }, []);
 
   React.useEffect(() => {
-    setSeen(loadSeen(ownerId));
+    let alive = true;
+    queueMicrotask(() => {
+      if (alive) setSeen(loadSeen(ownerId));
+    });
     reload();
     printConsoleBanner();
+    return () => {
+      alive = false;
+    };
   }, [ownerId, reload]);
 
   // A live announcement frame landed on the socket — fold it in.
@@ -83,7 +89,7 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="relative grid h-9 w-9 place-items-center border text-foreground transition-colors hover:bg-accent"
+          className="relative grid h-9 w-9 shrink-0 place-items-center border text-foreground transition-colors hover:bg-accent"
           aria-label={unread > 0 ? `${unread} unread notifications` : "notifications"}
           title="notifications"
         >
@@ -91,8 +97,15 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
           {unread > 0 ? (
             <span
               key={bump}
-              className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center bg-foreground px-1 font-mono text-[10px] font-semibold leading-none text-background motion-reduce:animate-none"
-              style={bump > 0 ? { animation: "unread-bump 0.28s ease-out" } : undefined}
+              className="absolute -right-1 -top-1 grid h-[18px] min-w-[18px] place-items-center rounded-full border-2 border-sidebar bg-foreground px-0.5 font-mono text-[9px] font-semibold leading-none text-background motion-reduce:animate-none"
+              style={{
+                // Keep the badge circular for one- and two-digit counts even
+                // when a utility stylesheet is still warming in development.
+                // The wider 99+ state remains a compact pill.
+                minWidth: unread > 99 ? 24 : 18,
+                paddingInline: unread > 99 ? 3 : 0,
+                ...(bump > 0 ? { animation: "unread-bump 0.28s ease-out" } : {}),
+              }}
             >
               {unread > 99 ? "99+" : unread}
               <style>{"@keyframes unread-bump{0%{transform:scale(1)}40%{transform:scale(1.35)}100%{transform:scale(1)}}"}</style>

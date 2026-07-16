@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- authenticated presigned/GIPHY media */
+
 import * as React from "react";
 import {
   CircleNotch,
@@ -11,6 +13,7 @@ import {
 
 import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
+import { isGifMedia } from "@/lib/media-meta";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import { languageForFile } from "@/lib/programmatic-files";
@@ -121,34 +124,46 @@ export function MediaAttachment({
 
   const retriedRef = React.useRef(false);
   React.useEffect(() => {
+    let alive = true;
     if (localUrl) {
-      setFailed(false);
-      setUrl(localUrl);
-      setMedia(
-        {
-          media_id: mediaId || "local",
-          uploader_kind: "carbon",
-          uploader_id: 0,
-          mime: mime || "audio/webm",
-          size: 0,
-          sha256: "",
-          status: "ready",
-          kind: (mime || "").startsWith("audio/") ? "voice" : "file",
-          transcript: "",
-          duration_ms: localDurationMs ?? null,
-          peaks: localPeaks ?? null,
-          width: null,
-          height: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        } as MediaObject,
-      );
-      return;
+      queueMicrotask(() => {
+        if (!alive) return;
+        setFailed(false);
+        setPollExhausted(false);
+        setUrl(localUrl);
+        setMedia(
+          {
+            media_id: mediaId || "local",
+            uploader_kind: "carbon",
+            uploader_id: 0,
+            mime: mime || "audio/webm",
+            size: 0,
+            sha256: "",
+            status: "ready",
+            kind: (mime || "").startsWith("audio/") ? "voice" : "file",
+            transcript: "",
+            duration_ms: localDurationMs ?? null,
+            peaks: localPeaks ?? null,
+            width: null,
+            height: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          } as MediaObject,
+        );
+      });
+      return () => {
+        alive = false;
+      };
     }
     if (!mediaId) return;
-    let alive = true;
     retriedRef.current = false;
-    setPollExhausted(false);
+    queueMicrotask(() => {
+      if (!alive) {
+        return;
+      }
+      setFailed(false);
+      setPollExhausted(false);
+    });
     let attempts = 0;
     let errors = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -212,9 +227,27 @@ export function MediaAttachment({
 
   const m = (mime || media?.mime || "").toLowerCase();
   const isImage = m.startsWith("image/") || media?.kind === "image";
+  const isGif = isGifMedia(m, filenameProp || caption);
   const isVideo = m.startsWith("video/");
   const isAudio = m.startsWith("audio/") || media?.kind === "voice" || media?.kind === "tts_output";
   const isDev = !!url && (url.includes("dev-download.local") || url.includes("dev-upload.local"));
+  const gifFrameRef = React.useRef<HTMLDivElement>(null);
+  const [gifInRenderRange, setGifInRenderRange] = React.useState(false);
+  React.useEffect(() => {
+    if (!isGif) return;
+    const element = gifFrameRef.current;
+    if (!element) return;
+    if (typeof IntersectionObserver === "undefined") {
+      queueMicrotask(() => setGifInRenderRange(true));
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setGifInRenderRange(entry.isIntersecting),
+      { rootMargin: "320px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [isGif, url]);
 
   // Decide the placeholder shape *before* the URL is known, so the bubble
   // doesn't visibly snap to size when the image actually arrives.
@@ -273,10 +306,10 @@ export function MediaAttachment({
           />
           <span className="inline-flex items-center gap-1 label-mono text-[10px] text-muted-foreground">
             {pollExhausted ? (
-              <>generation is taking longer than usual…</>
+              <>This is taking longer than usual…</>
             ) : (
               <>
-                <CircleNotch className="h-3 w-3 animate-spin" /> generating audio…
+                <CircleNotch className="h-3 w-3 animate-spin" /> Preparing audio…
               </>
             )}
           </span>
@@ -336,6 +369,7 @@ export function MediaAttachment({
       <>
         <figure className="space-y-1">
           <div
+            ref={gifFrameRef}
             role="button"
             tabIndex={0}
             onClick={() => setPreviewOpen(true)}
@@ -344,21 +378,30 @@ export function MediaAttachment({
             }}
             aria-label="preview image"
             className="group relative w-72 max-w-full cursor-pointer overflow-hidden bg-card"
-            style={{ aspectRatio: imgAspect }}
+            style={{
+              aspectRatio: imgAspect,
+              contain: "layout paint",
+            }}
           >
             {/* `absolute inset-0` sizes the image from the aspect box rather
                 than a percentage height — Safari fails to resolve `h-full`
                 inside an aspect-ratio box, which let tall images render at
                 natural size and spill out below the bubble. */}
-            {/* eslint-disable-next-line @next/next/no-img-element -- presigned/public S3 */}
-            <img
-              src={url}
-              alt={caption || ""}
-              draggable={false}
-              onError={refreshUrl}
-              className="sdr-media absolute inset-0 h-full w-full select-none object-contain transition-opacity hover:opacity-90"
-            />
-            <DownloadOverlay onClick={() => downloadAsset(url, filename, { mediaId })} />
+            {(!isGif || gifInRenderRange) && (
+              <img
+                src={url}
+                alt={caption || ""}
+                draggable={false}
+                loading="lazy"
+                decoding="async"
+                fetchPriority={isGif ? "low" : "auto"}
+                onError={refreshUrl}
+                className="sdr-media absolute inset-0 h-full w-full select-none object-contain transition-opacity hover:opacity-90"
+              />
+            )}
+            {!isGif && (
+              <DownloadOverlay onClick={() => downloadAsset(url, filename, { mediaId })} />
+            )}
           </div>
           {showCaption && caption && (
             <figcaption className="text-xs text-muted-foreground">{caption}</figcaption>

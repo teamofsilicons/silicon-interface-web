@@ -20,7 +20,12 @@ export interface CachedProgressEntry {
   source: "local" | "server";
   pct?: number | null;
   handle?: string | null;
-  receipt?: "sent" | "read";
+  receipt?:
+    | "waiting"
+    | "partially_delivered"
+    | "delivered"
+    | "partially_read"
+    | "read";
   /** Carbon message this run is working on — anchors the status under it. */
   anchorEventId?: string | null;
 }
@@ -44,8 +49,21 @@ function ensureHydrated(): void {
   try {
     const raw = window.sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return;
-    const obj = JSON.parse(raw) as Record<string, CachedProgressEntry>;
-    for (const [roomId, entry] of Object.entries(obj)) cache.set(roomId, entry);
+    const obj = JSON.parse(raw) as Record<
+      string,
+      Omit<CachedProgressEntry, "receipt"> & {
+        receipt?: CachedProgressEntry["receipt"] | "sent";
+      }
+    >;
+    for (const [roomId, entry] of Object.entries(obj)) {
+      const { receipt, ...rest } = entry;
+      const migratedReceipt: CachedProgressEntry["receipt"] =
+        receipt === "sent" ? "waiting" : receipt;
+      cache.set(roomId, {
+        ...rest,
+        ...(migratedReceipt ? { receipt: migratedReceipt } : {}),
+      });
+    }
   } catch {
     // corrupt / unavailable storage — start empty
   }

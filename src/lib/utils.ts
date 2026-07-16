@@ -23,6 +23,12 @@ export function relativeTime(iso: string | Date): string {
   return d.toLocaleDateString();
 }
 
+/** Presence copy keeps compact units while still reading as a sentence. */
+export function relativeTimeAgo(iso: string | Date): string {
+  const relative = relativeTime(iso);
+  return /^\d+[mhd]$/.test(relative) ? `${relative} ago` : relative;
+}
+
 // Sidebar conversation-list timestamps:
 //   • under a minute        → "just now"
 //   • under an hour         → "8m"

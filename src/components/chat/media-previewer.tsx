@@ -12,6 +12,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { desktopBridge } from "@/lib/desktop-bridge";
 import {
   Dialog,
   DialogContent,
@@ -62,7 +63,7 @@ interface Props {
 /**
  * Fullscreen-ish previewer for assets that render in the browser:
  *   • images, videos, audio   — inline image + Silicon custom media controls
- *   • PDFs                    — inline `<iframe>` (most desktop browsers)
+ *   • PDFs                    — authenticated bytes in a local blob frame
  *
  * The bare `<DialogContent>` doesn't ship with a visible title — we still
  * need one for screen readers, so we render a `sr-only` `DialogTitle`.
@@ -242,10 +243,10 @@ export function MediaPreviewer({
             />
           )}
           {isPdf && (
-            <iframe
-              src={url}
+            <PdfPreviewFrame
+              url={url}
+              mediaId={sourceMediaId}
               title={label}
-              className="h-full min-h-[40vh] w-full border-0"
             />
           )}
           {isText && (
@@ -299,6 +300,93 @@ export function MediaPreviewer({
 }
 
 type SourceViewMode = "preview" | "code";
+
+function PdfPreviewFrame({
+  url,
+  mediaId,
+  title,
+}: {
+  url: string;
+  mediaId?: string;
+  title: string;
+}) {
+  const key = `${mediaId ?? ""}\n${url}`;
+  const [state, setState] = React.useState<{
+    key: string;
+    frameUrl: string | null;
+    error: boolean;
+  } | null>(null);
+
+  React.useEffect(() => {
+    let alive = true;
+    let ownedUrl: string | null = null;
+
+    const load = async () => {
+      try {
+        // Persisted files use the authenticated same-origin content endpoint.
+        // This avoids both expiring presigns and storage response headers that
+        // forbid framing. Local draft previews can reuse their existing blob.
+        if (!mediaId && url.startsWith("blob:")) {
+          if (alive) setState({ key, frameUrl: url, error: false });
+          return;
+        }
+
+        let blob: Blob;
+        if (mediaId) {
+          try {
+            blob = await api.mediaContent(mediaId);
+          } catch {
+            const response = await fetch(url, { mode: "cors" });
+            if (!response.ok) throw new Error(`status ${response.status}`);
+            blob = await response.blob();
+          }
+        } else {
+          const response = await fetch(url, { mode: "cors" });
+          if (!response.ok) throw new Error(`status ${response.status}`);
+          blob = await response.blob();
+        }
+        if (!alive) return;
+        ownedUrl = URL.createObjectURL(
+          blob.type === "application/pdf"
+            ? blob
+            : new Blob([blob], { type: "application/pdf" }),
+        );
+        setState({ key, frameUrl: ownedUrl, error: false });
+      } catch {
+        if (alive) setState({ key, frameUrl: null, error: true });
+      }
+    };
+
+    void load();
+    return () => {
+      alive = false;
+      if (ownedUrl) URL.revokeObjectURL(ownedUrl);
+    };
+  }, [key, mediaId, url]);
+
+  const current = state?.key === key ? state : null;
+  if (current?.error) {
+    return (
+      <p className="m-auto p-6 text-sm text-muted-foreground">
+        couldn&rsquo;t load the PDF preview - use the download button.
+      </p>
+    );
+  }
+  if (!current?.frameUrl) {
+    return (
+      <p className="m-auto flex items-center gap-2 p-6 text-sm text-muted-foreground" role="status">
+        <CircleNotch className="h-4 w-4 animate-spin" /> loading PDF...
+      </p>
+    );
+  }
+  return (
+    <iframe
+      src={current.frameUrl}
+      title={title}
+      className="h-full min-h-[40vh] w-full border-0"
+    />
+  );
+}
 
 function SourceModeToggle({
   mode,
@@ -420,6 +508,19 @@ export async function downloadAsset(
     } catch {
       // Fall through to the blob path, which still works when S3 allows CORS.
     }
+  }
+  const bridge = desktopBridge();
+  const nativeUrl = attachmentUrl ?? url;
+  if (bridge && /^https?:\/\//i.test(nativeUrl)) {
+    const progressToast = toast.loading("downloading…");
+    const result = await bridge.downloads.saveUrl(
+      nativeUrl,
+      filename || guessFilenameFromUrl(url),
+    );
+    toast.dismiss(progressToast);
+    if (result === "saved") toast.success("download complete");
+    else if (result === "failed") toast.error("couldn't download attachment");
+    return;
   }
   if (attachmentUrl) {
     triggerDownload(attachmentUrl, filename || guessFilenameFromUrl(url));

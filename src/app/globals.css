@@ -139,6 +139,9 @@
 }
 
 :root {
+  --font-tiktok-sans: "TikTok Sans";
+  --font-jetbrains: "JetBrains Mono Variable";
+
   /* --- canvas & ink --- */
   --background:           #ede8e0; /* warm beige canvas */
   --foreground:           #1a1a1a; /* near-black ink */
@@ -296,6 +299,14 @@ textarea,
 .bubble-sent *::selection {
   background: var(--primary-foreground);
   color: var(--primary);
+}
+
+/* Hover actions can otherwise appear beneath a selection drag and steal the
+   pointer when it crosses the edge of a message. Keep the native text gesture
+   uninterrupted until the browser selection is cleared. */
+[data-timeline-selection-active="true"] .message-actions {
+  pointer-events: none;
+  opacity: 0 !important;
 }
 
 /* Keep HDR user/media images from glowing brighter than the interface. */

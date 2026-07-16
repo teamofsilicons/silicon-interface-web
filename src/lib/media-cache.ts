@@ -29,3 +29,9 @@ export function setCachedMedia(mediaId: string | null | undefined, value: Cached
   if (value.media?.status && value.media.status !== "ready") return;
   cache.set(mediaId, value);
 }
+
+/** A redaction revokes the session's signed capability immediately. */
+export function evictCachedMedia(mediaId: string | null | undefined): void {
+  if (!mediaId) return;
+  cache.delete(mediaId);
+}

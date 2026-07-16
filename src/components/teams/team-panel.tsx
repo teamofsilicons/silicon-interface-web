@@ -89,14 +89,28 @@ function TeamPanelBody({
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
   const [structureSvg, setStructureSvg] = React.useState<string>("");
   const [structureDsl, setStructureDsl] = React.useState<string>("");
-  const [tab, setTab] = React.useState<TeamPanelTab>(initialTab ?? "overview");
+  const [tabSelection, setTabSelection] = React.useState<{
+    initialTab: TeamPanelTab | undefined;
+    tab: TeamPanelTab;
+  }>(() => ({ initialTab, tab: initialTab ?? "overview" }));
 
-  // Honour a changed initialTab (e.g. "Pay now" deep-links to ?tab=billing
-  // while this panel is already open) — the panel isn't remounted, so the
-  // useState initializer alone wouldn't switch tabs.
-  React.useEffect(() => {
-    if (initialTab) setTab(initialTab);
-  }, [initialTab]);
+  // Honour a changed initialTab (e.g. "Pay now" deep-links to ?tab=billing)
+  // without a synchronising effect. React immediately retries this render with
+  // the adjusted selection, while an absent initialTab preserves the user's
+  // current in-panel selection just as before.
+  if (tabSelection.initialTab !== initialTab) {
+    setTabSelection({
+      initialTab,
+      tab: initialTab ?? tabSelection.tab,
+    });
+  }
+  const tab =
+    tabSelection.initialTab === initialTab
+      ? tabSelection.tab
+      : (initialTab ?? tabSelection.tab);
+  const setTab = (nextTab: TeamPanelTab) => {
+    setTabSelection({ initialTab, tab: nextTab });
+  };
 
   React.useEffect(() => {
     let alive = true;
@@ -589,17 +603,24 @@ function BillingSection({ slug }: { slug: string }) {
   const [busy, setBusy] = React.useState(false);
   const [checkoutLoading, setCheckoutLoading] = React.useState(false);
 
-  const load = React.useCallback(async () => {
+  const load = React.useCallback(async (isCurrent: () => boolean = () => true) => {
     try {
       const d = await api.teamBilling(slug);
-      setData(d);
+      if (isCurrent()) setData(d);
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : String(e));
+      if (isCurrent()) toast.error(e instanceof ApiError ? e.message : String(e));
     }
   }, [slug]);
 
   React.useEffect(() => {
-    void load();
+    let alive = true;
+    const timeout = window.setTimeout(() => {
+      void load(() => alive);
+    }, 0);
+    return () => {
+      alive = false;
+      window.clearTimeout(timeout);
+    };
   }, [load]);
 
   // §8e — "paid up" beat. We stash a flag before redirecting to checkout; on
@@ -967,14 +988,18 @@ function CronsSection({
     let alive = true;
     // §3.6 — scope to the team being viewed: crons owned by this team's
     // silicons (backend `?team=<slug>` filter), not the viewer's own crons.
-    setLoading(true);
-    api
-      .crons({ team: slug })
-      .then((rows) => alive && setCrons(rows))
-      .catch(() => alive && setCrons([]))
-      .finally(() => alive && setLoading(false));
+    const timeout = window.setTimeout(() => {
+      if (!alive) return;
+      setLoading(true);
+      void api
+        .crons({ team: slug })
+        .then((rows) => alive && setCrons(rows))
+        .catch(() => alive && setCrons([]))
+        .finally(() => alive && setLoading(false));
+    }, 0);
     return () => {
       alive = false;
+      window.clearTimeout(timeout);
     };
   }, [slug]);
 
@@ -997,23 +1022,33 @@ function InviteesSection({ slug }: { slug: string }) {
   const [busy, setBusy] = React.useState(false);
 
   const load = React.useCallback(
-    async (offset: number, limit: number) => {
+    async (offset: number, limit: number, isCurrent: () => boolean = () => true) => {
+      if (!isCurrent()) return;
       setBusy(true);
       try {
         const r = await api.teamInvitees(slug, offset, limit);
+        if (!isCurrent()) return;
         setItems((prev) => (offset === 0 ? r.results : [...prev, ...r.results]));
         setTotal(r.total);
         setHasMore(r.has_more);
       } catch {
         /* ignore */
+      } finally {
+        if (isCurrent()) setBusy(false);
       }
-      setBusy(false);
     },
     [slug],
   );
 
   React.useEffect(() => {
-    void load(0, 5);
+    let alive = true;
+    const timeout = window.setTimeout(() => {
+      void load(0, 5, () => alive);
+    }, 0);
+    return () => {
+      alive = false;
+      window.clearTimeout(timeout);
+    };
   }, [load]);
 
   return (
@@ -1477,7 +1512,11 @@ function readSettingsDraft(team: Team): TeamSettingsDraft {
   const fallback = draftFromTeam(team);
   if (typeof window === "undefined") return fallback;
   try {
-    const raw = window.localStorage.getItem(settingsDraftKey(team.slug));
+    const key = settingsDraftKey(team.slug);
+    // Older builds persisted whitelist addresses beyond the tab lifetime.
+    // Scrub that copy instead of migrating sensitive unsaved input.
+    window.localStorage.removeItem(key);
+    const raw = window.sessionStorage.getItem(key);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<TeamSettingsDraft>;
     return {
@@ -1512,17 +1551,13 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
   const split = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 
   React.useEffect(() => {
-    setDraft(readSettingsDraft(team));
-  }, [team.slug]);
-
-  React.useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       const key = settingsDraftKey(team.slug);
-      if (dirty) window.localStorage.setItem(key, JSON.stringify(draft));
-      else window.localStorage.removeItem(key);
+      if (dirty) window.sessionStorage.setItem(key, JSON.stringify(draft));
+      else window.sessionStorage.removeItem(key);
     } catch {
-      /* localStorage may be unavailable; the visible dirty marker still works */
+      /* sessionStorage may be unavailable; the visible dirty marker still works */
     }
   }, [dirty, draft, team.slug]);
 
@@ -1552,7 +1587,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
         },
         email_whitelist: { domains: split(draft.domains), emails: split(draft.emails) },
       });
-      window.localStorage.removeItem(settingsDraftKey(team.slug));
+      window.sessionStorage.removeItem(settingsDraftKey(team.slug));
       setDraft(draftFromTeam(updated));
       onSaved(updated);
       toast.success("settings saved");

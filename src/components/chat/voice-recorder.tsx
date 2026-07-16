@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { PaperPlaneRight, Trash } from "@phosphor-icons/react/dist/ssr";
+import { Microphone, PaperPlaneRight, Pause, Trash } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import {
@@ -10,6 +10,7 @@ import {
   voiceRecordingSession,
 } from "@/lib/voice-recording-session";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 /**
  * Controls for the browser-tab-wide voice recording session.
@@ -21,9 +22,7 @@ import { Button } from "@/components/ui/button";
 export function VoiceRecorder() {
   const session = useVoiceRecordingSession();
   const waveform = useVoiceRecordingWaveform();
-  const [elapsed, setElapsed] = React.useState(() =>
-    session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0,
-  );
+  const [elapsed, setElapsed] = React.useState(() => voiceRecordingSession.durationMs());
   const wavesContainerRef = React.useRef<HTMLDivElement>(null);
   const [barCount, setBarCount] = React.useState(48);
   const waves = fitWaveform(waveform, barCount);
@@ -46,7 +45,7 @@ export function VoiceRecorder() {
     let frame = 0;
 
     const tick = () => {
-      setElapsed(session.startedAt ? Math.max(0, Date.now() - session.startedAt) : 0);
+      setElapsed(voiceRecordingSession.durationMs());
       frame = requestAnimationFrame(tick);
     };
 
@@ -67,7 +66,7 @@ export function VoiceRecorder() {
   };
 
   if (session.phase === "idle") return null;
-  const canSend = session.phase === "recording";
+  const canSend = session.phase === "recording" || session.phase === "paused";
   const canCancel = session.phase !== "stopping";
 
   return (
@@ -84,7 +83,10 @@ export function VoiceRecorder() {
       </Button>
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <span className="flex items-center gap-1.5 label-mono text-xs">
-          <span className="inline-block h-2 w-2 animate-pulse bg-foreground" />
+          <span className={cn(
+            "inline-block h-2 w-2 bg-foreground",
+            session.phase === "recording" && "animate-pulse",
+          )} />
           {session.phase === "requesting" ? "starting…" : formatElapsed(elapsed)}
         </span>
         <div ref={wavesContainerRef} className="flex h-7 flex-1 items-center gap-[2px]">
@@ -97,6 +99,19 @@ export function VoiceRecorder() {
           ))}
         </div>
       </div>
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={() => {
+          if (session.phase === "paused") voiceRecordingSession.resume();
+          else voiceRecordingSession.pause();
+        }}
+        disabled={session.phase !== "recording" && session.phase !== "paused"}
+        aria-label={session.phase === "paused" ? "continue recording" : "pause recording"}
+        title={session.phase === "paused" ? "continue recording" : "pause recording"}
+      >
+        {session.phase === "paused" ? <Microphone /> : <Pause />}
+      </Button>
       <Button
         size="icon"
         onClick={() => void handleSend()}

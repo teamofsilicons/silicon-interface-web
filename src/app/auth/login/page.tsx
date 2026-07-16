@@ -13,6 +13,11 @@ import { track } from "@/lib/analytics";
 import { toastError } from "@/lib/errors";
 import { useResendCooldown } from "@/lib/use-resend";
 import {
+  verificationDeliveryFailure,
+  verificationDeliveryMessage,
+  type VerificationDeliveryFailure,
+} from "@/lib/verification-delivery";
+import {
   findCountry,
   guessCountryIso2,
   normalizePhonePaste,
@@ -82,11 +87,41 @@ function LoginPageInner() {
   // Mirror of the last verify error for the OTP field's aria-live region (the
   // toast alone isn't announced reliably / lingers off-screen for SR users).
   const [otpError, setOtpError] = React.useState("");
+  const [deliveryFailure, setDeliveryFailure] =
+    React.useState<VerificationDeliveryFailure | null>(null);
+  const [providerRetryAt, setProviderRetryAt] = React.useState(0);
+  const [clock, setClock] = React.useState(() => Date.now());
   // persistKey keeps the resend countdown/lockout alive across an OTP-screen
   // refresh instead of resetting it (which would let a reload dodge the throttle).
   const resend = useResendCooldown({ persistKey: "silicon-interface:resend:login" });
 
   const phoneE164 = number ? `+${country.dial}${number.replace(/\D/g, "")}` : "";
+  const providerWaitSeconds = Math.max(
+    0,
+    Math.ceil((providerRetryAt - clock) / 1000),
+  );
+
+  React.useEffect(() => {
+    if (providerRetryAt <= Date.now()) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [providerRetryAt]);
+
+  const retainDeliveryFailure = React.useCallback((error: unknown) => {
+    const failure = verificationDeliveryFailure(error);
+    if (!failure) return false;
+    setChallengeId(failure.intentId);
+    setChosenChannel(failure.channel);
+    setDeliveryFailure(failure);
+    const retryAt = Date.now() + (failure.retryAfterMs ?? 0);
+    setClock(Date.now());
+    setProviderRetryAt(retryAt);
+    // An ambiguous provider response may still have delivered the code. Keep
+    // verification available instead of trapping the user behind a retry UI.
+    setPhase("code");
+    setOtpError("");
+    return true;
+  }, []);
 
   const wrap = async (fn: () => Promise<void>) => {
     setLoading(true);
@@ -104,7 +139,13 @@ function LoginPageInner() {
   const start = () =>
     wrap(async () => {
       const value = mode === "phone" ? phoneE164 : identifier.trim();
-      const r = await api.loginStart(value);
+      let r;
+      try {
+        r = await api.loginStart(value);
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
+      }
       if (!r.challenge_id) {
         // No account → continue into sign-up, carrying email or phone so the
         // user doesn't re-type, and a notice so register can flag it.
@@ -126,6 +167,8 @@ function LoginPageInner() {
         // from the entry mode: phone → "sms", username/email → "email".
         setChosenChannel(r.channel ?? (mode === "phone" ? "sms" : "email"));
         setSentTo(r.sent_to ?? "");
+        setDeliveryFailure(null);
+        setProviderRetryAt(0);
         setPhase("code");
         resend.send();
       }
@@ -133,15 +176,24 @@ function LoginPageInner() {
 
   const choose = (channel: LoginChannel) =>
     wrap(async () => {
-      const r = await api.loginSelectChannel(challengeId, channel);
+      let r;
+      try {
+        r = await api.loginSelectChannel(challengeId, channel);
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
+      }
       setChosenChannel(channel);
       setSentTo(r.sent_to ?? "");
+      setDeliveryFailure(null);
+      setProviderRetryAt(0);
       setPhase("code");
       resend.send();
     });
 
   const doResend = () =>
     wrap(async () => {
+      if (providerWaitSeconds > 0) return;
       // Resend must reuse the IN-PROGRESS challenge, not start a fresh login.
       // Re-selecting the channel on the existing challenge_id re-sends a code
       // for that same challenge, so the code the user is typing stays valid.
@@ -151,15 +203,22 @@ function LoginPageInner() {
       // if somehow neither is present — do we restart, since there's nothing to
       // resend against.
       const channel = chosenChannel || (mode === "phone" ? "sms" : "email");
-      if (challengeId) {
-        const r = await api.loginSelectChannel(challengeId, channel);
-        if (!chosenChannel) setChosenChannel(channel);
-        setSentTo(r.sent_to ?? sentTo);
-      } else {
-        const r = await api.loginStart(mode === "phone" ? phoneE164 : identifier.trim());
-        if (r.challenge_id) setChallengeId(r.challenge_id);
-        setSentTo(r.sent_to ?? sentTo);
+      try {
+        if (challengeId) {
+          const r = await api.loginSelectChannel(challengeId, channel);
+          if (!chosenChannel) setChosenChannel(channel);
+          setSentTo(r.sent_to ?? sentTo);
+        } else {
+          const r = await api.loginStart(mode === "phone" ? phoneE164 : identifier.trim());
+          if (r.challenge_id) setChallengeId(r.challenge_id);
+          setSentTo(r.sent_to ?? sentTo);
+        }
+      } catch (error) {
+        if (retainDeliveryFailure(error)) return;
+        throw error;
       }
+      setDeliveryFailure(null);
+      setProviderRetryAt(0);
       resend.send();
       toast.success("code resent");
     });
@@ -171,6 +230,8 @@ function LoginPageInner() {
     if (value.length !== 6) return;
     verifyingRef.current = true;
     setOtpError("");
+    setDeliveryFailure(null);
+    setProviderRetryAt(0);
     return wrap(async () => {
       try {
         const r = await api.loginVerify(challengeId, value);
@@ -178,7 +239,7 @@ function LoginPageInner() {
         // of the follow-up profile fetch must never strand them on the login
         // screen with a valid session. Fetching `me` is a nicety; AuthGuard
         // backfills the carbon on /chat if it's missing, so we always navigate.
-        authStore.setTokens(r.access, r.refresh);
+        authStore.setTokens(r.access, r.refresh ?? null);
         track.loggedIn({ method: "otp" });
         try {
           const me = await api.me();
@@ -191,6 +252,12 @@ function LoginPageInner() {
         // dumping them on /chat.
         router.replace(consumePostAuthRedirect() ?? "/chat");
       } catch (e) {
+        const delivery = verificationDeliveryFailure(e);
+        if (delivery) {
+          retainDeliveryFailure(e);
+          setOtpError(verificationDeliveryMessage(delivery));
+          return;
+        }
         // Mirror the failure into the OTP field's aria-live region, then
         // re-throw so `wrap` still surfaces the toast for sighted users.
         setOtpError(e instanceof ApiError ? e.message : "That code didn't work. Try again.");
@@ -248,7 +315,11 @@ function LoginPageInner() {
               : "Enter your phone number to get a one-time code.")}
           {phase === "choose" && "Where should we send your code?"}
           {phase === "code" &&
-            (sentTo ? `Enter the code we sent to ${sentTo}.` : "Enter the code we sent you.")}
+            (deliveryFailure
+              ? "Delivery is not confirmed. If a code arrived, you can still use it."
+              : sentTo
+                ? `Enter the code we sent to ${sentTo}.`
+                : "Enter the code we sent you.")}
         </p>
       </header>
 
@@ -353,6 +424,20 @@ function LoginPageInner() {
 
       {phase === "code" && (
         <section className="space-y-4">
+          {deliveryFailure && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="border border-amber-600/50 bg-amber-500/10 px-3 py-2 text-xs"
+            >
+              <p>{verificationDeliveryMessage(deliveryFailure)}</p>
+              {providerWaitSeconds > 0 && (
+                <p className="mt-1 font-mono text-muted-foreground">
+                  retry available in {providerWaitSeconds}s
+                </p>
+              )}
+            </div>
+          )}
           <div className="space-y-4">
             <Label>verification code</Label>
             <OtpInput
@@ -366,7 +451,12 @@ function LoginPageInner() {
               error={otpError}
               onComplete={(v) => verify(v)}
             />
-            <ResendRow resend={resend} onResend={doResend} loading={loading} />
+            <ResendRow
+              resend={resend}
+              onResend={doResend}
+              loading={loading}
+              providerWaitSeconds={providerWaitSeconds}
+            />
           </div>
           <Button onClick={() => verify()} disabled={code.length !== 6 || loading} className="w-full">
             {loading && <CircleNotch className="animate-spin" />}

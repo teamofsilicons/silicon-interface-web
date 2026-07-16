@@ -11,6 +11,7 @@ import { track } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { ProfileEditor } from "@/components/profile/profile-editor";
 import { PreferencesSection } from "@/components/settings/preferences";
+import { SafetyStatusSection } from "@/components/settings/safety-status";
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -32,6 +33,8 @@ export default function SettingsPage() {
       <ProfileEditor />
 
       <PreferencesSection />
+
+      <SafetyStatusSection />
 
       <div className="border-t pt-5">
         <Button variant="outline" onClick={logout} className="w-full sm:w-auto">

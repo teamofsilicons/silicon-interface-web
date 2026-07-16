@@ -7,30 +7,81 @@ import {
   CircleNotch,
   File as FileIcon,
   FilePdf,
-  Gif,
   Microphone,
   Paperclip,
   PaperPlaneRight,
   PencilSimple,
+  Smiley,
   X,
 } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
-import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
+import {
+  ackOutbox,
+  enqueueOutbox,
+  listOutbox,
+  type OutboxEntry,
+} from "@/lib/outbox";
+import {
+  getHeldCancellation,
+  maySendHeldOutbox,
+  reconcileHeldCancellation,
+  requestHeldCancellation,
+  withOutboxClientLock,
+} from "@/lib/held-cancellation";
+import {
+  ABUSE_CHALLENGE_SOLVED_EVENT,
+  challengeFromErrorBody,
+} from "@/lib/abuse-challenge-store";
+import {
+  classifyOutboxFailure,
+  persistHeldOutboxState,
+  persistOutboxFailure,
+  wakeOutboxRecovery,
+} from "@/lib/outbox-recovery";
 import { track } from "@/lib/analytics";
 import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
-import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
-import { xhrUpload } from "@/lib/media-upload";
+import { emojiShortcodeQuery } from "@/lib/emoji-shortcode";
+import { computePeaks, isGifMedia, measureImage, measureVideo } from "@/lib/media-meta";
+import { uploadMediaResumable } from "@/lib/media-upload";
+import {
+  acknowledgeMediaSend,
+  ensureMediaOutboxStaged,
+  journalRemoteGifIntent,
+  MEDIA_OUTBOX_ACKNOWLEDGED_EVENT,
+  MEDIA_OUTBOX_STAGED_EVENT,
+  prepareMediaOutboxPayload,
+  stageMediaSendIntent,
+} from "@/lib/media-send";
+import {
+  listRoomMediaUploads,
+  patchMediaUpload,
+  readMediaUpload,
+  removeMediaUpload,
+} from "@/lib/media-upload-store";
 import {
   clearDraftAfterSend,
+  DRAFT_DURABILITY_BLOCKED_EVENT,
   flushDraft,
-  getDraft,
+  getDraftComposerState,
+  hydrateDraftJournal,
   loadServerDraft,
+  retryLocalDraftPersistence,
+  retryDraftSync,
+  resolveDraftConflict,
   setDraft,
   setDraftFocused,
+  setDraftSelection,
+  useDraftConflict,
+  useDraftSyncStatus,
+  type DraftSelectionDirection,
 } from "@/lib/drafts";
+import {
+  COMPOSER_SELECTION_COMMIT_DELAY_MS,
+  mayRestoreComposerSnapshot,
+} from "@/lib/composer-selection";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
 import {
   clearVoiceDraft,
@@ -53,10 +104,22 @@ import type { AnnotationDraft, Event, EventType, HeldSend } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
-import { GifPicker } from "@/components/chat/gif-picker";
+import { ComposerExpressionPicker } from "@/components/chat/expression-picker";
 import { SiliconAudio } from "@/components/chat/silicon-audio";
+import {
+  SILICON_TEXT_HOLD_MS,
+  SILICON_TEXT_HOLD_SECONDS,
+  siliconHoldReleaseAt,
+} from "@/lib/silicon-hold";
 import { FileName } from "@/components/chat/file-name";
 import { MarkdownView } from "@/components/chat/markdown-view";
 import { MediaPreviewer } from "@/components/chat/media-previewer";
@@ -64,6 +127,13 @@ import { looksLikeMarkdown } from "@/lib/markdown";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { sendTimeoutMs } from "@/lib/send-timeout";
 import type { GifResult } from "@/lib/giphy";
+import { albumMediaIdsOwnedByOutbox, buildAlbumContent } from "@/lib/albums";
+import {
+  composerEnterAction,
+  readComposerEnterBehavior,
+  subscribeComposerEnterBehavior,
+  type ComposerEnterBehavior,
+} from "@/lib/composer-preferences";
 
 
 /** Slice of an `Event` we can fabricate locally before the server responds. */
@@ -74,23 +144,32 @@ export interface OptimisticPayload {
   edited_at?: string | null;
 }
 
-export interface ComposerRestoreAttachment {
+/** Explicit recovery action payload. This is intentionally separate from
+ * unsend: deleting a message must never create one of these. */
+export interface ComposerCopyAttachment {
   mediaId: string;
   mime: string;
   name: string;
   size?: number;
 }
 
-export interface ComposerRestoreDraft {
+export interface ComposerCopyDraft {
   id: string;
   text: string;
-  attachments?: ComposerRestoreAttachment[];
+  attachments?: ComposerCopyAttachment[];
 }
+
+export type CancelQueuedResult =
+  | "cancelled"
+  | "pending"
+  | "sent"
+  | "not-held"
+  | "failed";
 
 function SavedVoicePlayer({ draft }: { draft: VoiceDraft }) {
   const [url] = React.useState(() => URL.createObjectURL(draft.blob));
   React.useEffect(() => () => URL.revokeObjectURL(url), [url]);
-  return <SiliconAudio url={url} durationMs={draft.durationMs} className="max-w-[22rem]" />;
+  return <SiliconAudio url={url} durationMs={draft.durationMs} className="min-w-0 w-full" />;
 }
 
 interface Props {
@@ -126,9 +205,14 @@ interface Props {
   onHoldStateChange?: (holding: boolean) => void;
   /** The parent stashes our `cancelQueued(clientId)` here so deleting a held
    *  message's bubble can drop it from the queue (never sends it). */
-  cancelQueuedRef?: React.MutableRefObject<((clientId: string) => void) | null>;
+  cancelQueuedRef?: React.MutableRefObject<
+    ((clientId: string) => Promise<CancelQueuedResult>) | null
+  >;
   /** Parent calls this when the server reports a held send terminal state. */
   clearHeldClientRef?: React.MutableRefObject<((clientId: string) => void) | null>;
+  /** Project a direct held-send response without waiting for a second socket or
+   * history round trip to reconcile its optimistic row. */
+  onHeldSendUpdate?: (held: HeldSend) => void;
   /** People in this room offered by the `@` mention autocomplete. */
   mentionCandidates?: MentionCandidate[];
   /** Message currently being edited in the composer. */
@@ -139,9 +223,9 @@ interface Props {
   onPersistedEdit?: (event: Event, body: string) => Promise<void>;
   /** Ask the parent to select the latest editable message, usually via ↑. */
   onRequestEditLast?: () => void;
-  /** Restore an unsent message back into the composer. */
-  restoreDraft?: ComposerRestoreDraft | null;
-  onRestoreDraftConsumed?: () => void;
+  /** Explicit “copy to composer” recovery action; never populated by unsend. */
+  copyDraft?: ComposerCopyDraft | null;
+  onComposerCopyConsumed?: () => void;
   /** Keyboard path for cancelling the latest held message. */
   onCancelHeldLast?: () => void;
   /** Keep draft editing available while blocking new sends. */
@@ -157,41 +241,15 @@ const MAX_ROWS = 12;
 // Emoji quick-picker is a fixed grid so keyboard nav is true 2-D: ←/→ move one
 // cell, ↑/↓ move a whole row (EMOJI_COLS cells).
 const EMOJI_COLS = 8; // minimum / fallback column count; actual count tracks bar width
-const SILICON_TEXT_SEND_DELAY_MS = 10_000;
-// Once a held silicon message is paused (you kept typing past the 10s mark),
+// Once a held silicon message is paused (you kept typing past the 5s mark),
 // emptying the input must NOT fire the send instantly — wait at least this long
 // after the box goes empty, so a quick clear/send of a follow-up doesn't
 // prematurely flush the held message.
-const SILICON_EMPTY_HOLD_MS = 10_000;
-const SILICON_WAIT_MORE_MS = 60_000;
+const SILICON_EMPTY_HOLD_MS = SILICON_TEXT_HOLD_MS;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 const EDIT_INACTIVITY_MS = 60_000;
 // Cap concurrent staged attachments so a stray multi-select can't queue hundreds.
 const MAX_ATTACHMENTS = 10;
-
-// §6.6 — Up-front file validation, before we even ask for a presigned URL.
-// A sane cap keeps a 5 GB drop from OOM-ing the metadata decode / hanging the
-// upload; a zero-byte guard stops empty files; and we refuse types the bubble
-// has no way to render so the user gets a clear toast instead of a broken tile.
-const MAX_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
-
-/** HEIC/HEIF aren't renderable as <img> in most browsers — treat them as a
- *  generic file rather than a broken image (and warn so the user isn't
- *  surprised it shows as a chip, not a thumbnail). */
-function isHeic(file: File): boolean {
-  const t = (file.type || "").toLowerCase();
-  if (t === "image/heic" || t === "image/heif") return true;
-  return /\.(heic|heif)$/i.test(file.name || "");
-}
-
-/** Returns an error string if the file can't be attached, or null if it's OK. */
-function validateFile(file: File): string | null {
-  if (file.size === 0) return "that file is empty (0 bytes).";
-  if (file.size > MAX_FILE_BYTES) {
-    return `that file is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024 / 1024)} GB).`;
-  }
-  return null;
-}
 
 interface QueuedTextSend {
   clientId: string;
@@ -440,7 +498,9 @@ function EmojiQuickPicker({
               onClick={() => onPick(r.emoji)}
               className={cn(
                 "inline-flex h-9 w-9 items-center justify-center border transition-colors hover:bg-accent",
-                i === selectedIndex ? "border-foreground bg-accent" : "border-transparent",
+                i === selectedIndex
+                  ? "border-foreground bg-foreground/30 shadow-inner"
+                  : "border-transparent",
               )}
               title={`:${r.name}:`}
             >
@@ -464,7 +524,9 @@ function EmojiQuickPicker({
           onClick={() => onPick(r.emoji)}
           className={cn(
             "inline-flex h-9 w-full items-center justify-center border transition-colors hover:bg-accent",
-            i === selectedIndex ? "border-foreground bg-accent" : "border-transparent",
+            i === selectedIndex
+              ? "border-foreground bg-foreground/30 shadow-inner"
+              : "border-transparent",
           )}
           title={`:${r.name}:`}
         >
@@ -591,13 +653,19 @@ function MentionQuickPicker({
 
 /** Quick one-line label of an event for the reply preview chip. */
 function previewOf(ev: Event): string {
+  if (ev.redacted_at) return "deleted message";
   const c = ev.content as Record<string, unknown>;
   if (ev.type === "m.text") {
     const body = String(c.body ?? "");
     return body.length > 80 ? `${body.slice(0, 80)}…` : body;
   }
-  if (ev.type === "m.image") return "photo";
+  if (ev.type === "m.image") {
+    return isGifMedia(c.mime, c.filename) ? "GIF" : "photo";
+  }
   if (ev.type === "m.file") return String(c.filename ?? c.caption ?? "attachment");
+  if (ev.type === "m.album") {
+    return String(c.caption ?? "attachments");
+  }
   if (ev.type === "m.voice") return "voice note";
   if (ev.type === "m.remote_browser") return "Silicon Browser link";
   if (ev.type === "m.tts") return "audio";
@@ -688,18 +756,33 @@ export function Composer({
   onHoldStateChange,
   cancelQueuedRef,
   clearHeldClientRef,
+  onHeldSendUpdate,
   mentionCandidates = [],
   editingEvent = null,
   onEditComplete,
   onPersistedEdit,
   onRequestEditLast,
-  restoreDraft,
-  onRestoreDraftConsumed,
+  copyDraft,
+  onComposerCopyConsumed,
   onCancelHeldLast,
   sendDisabled = false,
   sendDisabledReason = "sending is disabled",
 }: Props) {
   const [text, setText] = React.useState("");
+  const enterBehavior: ComposerEnterBehavior = React.useSyncExternalStore(
+    subscribeComposerEnterBehavior,
+    readComposerEnterBehavior,
+    (): ComposerEnterBehavior => "send",
+  );
+  const draftConflict = useDraftConflict(roomId);
+  const draftConflictSignature = draftConflict
+    ? `${draftConflict.version}:${draftConflict.content_updated_at ?? draftConflict.updated_at}:${draftConflict.origin_device ?? ""}:${draftConflict.text}`
+    : null;
+  const [dismissedDraftConflict, setDismissedDraftConflict] = React.useState<string | null>(null);
+  const draftSync = useDraftSyncStatus(roomId);
+  const localDraftUnsafe =
+    draftSync.localDurabilityPending || Boolean(draftSync.localDurabilityError);
+  const [composerAnnouncement, setComposerAnnouncement] = React.useState("");
   const annotationFeedbackRef = React.useRef(new Map<string, string>());
   // Multiple attachments can be staged at once; each uploads in the background
   // and is sent as its own message. `xhrRefs` lets us abort a specific in-flight
@@ -716,6 +799,7 @@ export function Composer({
   const xhrRefs = React.useRef<Map<string, React.MutableRefObject<XMLHttpRequest | null>>>(
     new Map(),
   );
+  const uploadAbortRefs = React.useRef<Map<string, AbortController>>(new Map());
   const updateAttachment = React.useCallback((id: string, patch: Partial<StagedFile>) => {
     setAttachments((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
   }, []);
@@ -736,8 +820,12 @@ export function Composer({
   const voiceSession = useVoiceRecordingSession();
   const recordingActive = voiceSession.phase !== "idle";
   const [busy, setBusy] = React.useState(false);
-  const [gifOpen, setGifOpen] = React.useState(false);
+  const [expressionPickerOpen, setExpressionPickerOpen] = React.useState(false);
   const gifUploadsInFlightRef = React.useRef(0);
+  const gifAcquisitionsInFlightRef = React.useRef(new Set<string>());
+  const [gifAcquisitions, setGifAcquisitions] = React.useState<
+    Array<{ entry: OutboxEntry; error?: string }>
+  >([]);
   const [editSaving, setEditSaving] = React.useState(false);
   // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
   // control during the upload, and retain the recorded blob if it fails so the
@@ -748,7 +836,19 @@ export function Composer({
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
   const textRef = React.useRef(text);
+  const composerInteractionEpochRef = React.useRef(0);
+  const noteComposerInteraction = React.useCallback(() => {
+    composerInteractionEpochRef.current += 1;
+  }, []);
+  const pendingDraftSelectionRef = React.useRef<{
+    roomId: string;
+    start: number;
+    end: number;
+    direction: DraftSelectionDirection;
+  } | null>(null);
+  const draftSelectionTimerRef = React.useRef<number | null>(null);
   const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
+  const heldIntentsRef = React.useRef<Map<string, QueuedTextSend>>(new Map());
   const heldSendIdsRef = React.useRef<Map<string, string>>(new Map());
   const heldSendsRef = React.useRef<Map<string, HeldSend>>(new Map());
   const cancelledHeldClientIdsRef = React.useRef<Set<string>>(new Set());
@@ -763,16 +863,134 @@ export function Composer({
   const typingActiveRef = React.useRef(false);
   const [queuePaused, setQueuePaused] = React.useState(false);
   const [queuedTextCount, setQueuedTextCount] = React.useState(0);
-  const [holdEndsAt, setHoldEndsAt] = React.useState<number | null>(null);
-  const [holdNowMs, setHoldNowMs] = React.useState(() => Date.now());
   const editingClientId =
     ((editingEvent as (Event & { _clientId?: string }) | null)?._clientId ?? null);
   const editingHeld = Boolean(editingEvent?.event_id.startsWith("temp-") && editingClientId);
   const isEditing = editingEvent !== null;
 
+  const commitPendingDraftSelection = React.useCallback(() => {
+    if (draftSelectionTimerRef.current) {
+      window.clearTimeout(draftSelectionTimerRef.current);
+      draftSelectionTimerRef.current = null;
+    }
+    const pending = pendingDraftSelectionRef.current;
+    pendingDraftSelectionRef.current = null;
+    if (!pending) return;
+    setDraftSelection(
+      pending.roomId,
+      pending.start,
+      pending.end,
+      pending.direction,
+    );
+  }, []);
+  const persistComposerSelection = React.useCallback(
+    (textarea: HTMLTextAreaElement, immediate = false) => {
+      if (isEditing) return;
+      pendingDraftSelectionRef.current = {
+        roomId,
+        start: textarea.selectionStart,
+        end: textarea.selectionEnd,
+        direction: textarea.selectionDirection as DraftSelectionDirection,
+      };
+      if (immediate) {
+        commitPendingDraftSelection();
+        return;
+      }
+      // Native selection emits many `select` events during a mouse/touch drag.
+      // Writing localStorage + IndexedDB for every intermediate pixel makes the
+      // handles visibly stutter. Keep the latest range in memory and durably
+      // checkpoint it after the gesture settles (pointer/key up flushes now).
+      if (draftSelectionTimerRef.current) {
+        window.clearTimeout(draftSelectionTimerRef.current);
+      }
+      draftSelectionTimerRef.current = window.setTimeout(
+        commitPendingDraftSelection,
+        COMPOSER_SELECTION_COMMIT_DELAY_MS,
+      );
+    },
+    [commitPendingDraftSelection, isEditing, roomId],
+  );
+
+  React.useEffect(() => () => {
+    commitPendingDraftSelection();
+  }, [commitPendingDraftSelection, roomId]);
+
   React.useEffect(() => {
     textRef.current = text;
   }, [text]);
+
+  const restoreComposerSnapshot = React.useCallback(
+    (targetRoomId: string, expectedInteractionEpoch?: number) => {
+      if (!mayRestoreComposerSnapshot(
+        expectedInteractionEpoch,
+        composerInteractionEpochRef.current,
+      )) {
+        return;
+      }
+      const snapshot = getDraftComposerState(targetRoomId);
+      setText(snapshot.text);
+      // React owns the textarea value. Restore selection after that value has
+      // committed, clamping once more in case a legacy/corrupt record escaped
+      // normalization. This intentionally does not steal focus.
+      window.requestAnimationFrame(() => {
+        if (targetRoomId !== roomId) return;
+        if (!mayRestoreComposerSnapshot(
+          expectedInteractionEpoch,
+          composerInteractionEpochRef.current,
+        )) {
+          return;
+        }
+        const textarea = taRef.current;
+        if (!textarea || textarea.value !== snapshot.text) return;
+        const start = Math.min(snapshot.selectionStart, textarea.value.length);
+        const end = Math.max(start, Math.min(snapshot.selectionEnd, textarea.value.length));
+        textarea.setSelectionRange(start, end, snapshot.selectionDirection);
+      });
+    },
+    [roomId],
+  );
+
+  React.useEffect(() => {
+    const focusDurabilityWarning = (event: globalThis.Event) => {
+      const blockedRoom = (
+        event as CustomEvent<{ roomId?: string | null }>
+      ).detail?.roomId;
+      if (blockedRoom && blockedRoom !== roomId) return;
+      setComposerAnnouncement(
+        "Draft navigation blocked until this device saves the composer locally.",
+      );
+      taRef.current?.focus();
+    };
+    window.addEventListener(DRAFT_DURABILITY_BLOCKED_EVENT, focusDurabilityWarning);
+    return () =>
+      window.removeEventListener(DRAFT_DURABILITY_BLOCKED_EVENT, focusDurabilityWarning);
+  }, [roomId]);
+
+  React.useEffect(() => {
+    const onStaged = (event: globalThis.Event) => {
+      const detail = (event as CustomEvent<{ entry?: OutboxEntry }>).detail;
+      const entry = detail?.entry;
+      if (!entry || entry.roomId !== roomId) return;
+      setGifAcquisitions((current) =>
+        current.map((item) =>
+          item.entry.clientId === entry.clientId ? { entry } : item,
+        ),
+      );
+    };
+    const onAcknowledged = (event: globalThis.Event) => {
+      const clientId = (event as CustomEvent<{ clientId?: string }>).detail?.clientId;
+      if (!clientId) return;
+      setGifAcquisitions((current) =>
+        current.filter((item) => item.entry.clientId !== clientId),
+      );
+    };
+    window.addEventListener(MEDIA_OUTBOX_STAGED_EVENT, onStaged);
+    window.addEventListener(MEDIA_OUTBOX_ACKNOWLEDGED_EVENT, onAcknowledged);
+    return () => {
+      window.removeEventListener(MEDIA_OUTBOX_STAGED_EVENT, onStaged);
+      window.removeEventListener(MEDIA_OUTBOX_ACKNOWLEDGED_EVENT, onAcknowledged);
+    };
+  }, [roomId]);
 
   // Recover a finalized voice note retained after a failed upload/reload.
   React.useEffect(() => {
@@ -782,6 +1000,44 @@ export function Composer({
     });
     return () => {
       alive = false;
+    };
+  }, [roomId]);
+
+  // A GIF click is journaled before its external source fetch. Restore those
+  // acquiring intents as actionable composer chips after a kill/reload; they
+  // are intentionally not rendered as sent timeline bubbles yet.
+  React.useEffect(() => {
+    let alive = true;
+    const owner = authStore.getCarbon()?.carbon_id;
+    if (!owner) {
+      return () => {
+        alive = false;
+      };
+    }
+    const refresh = () => {
+      void listOutbox(owner).then((rows) => {
+        if (!alive) return;
+        setGifAcquisitions(
+          rows
+            .filter(
+              (row) =>
+                row.roomId === roomId &&
+                row.operation === "media" &&
+                row.media?.phase === "acquiring" &&
+                row.media.acquisition?.provider === "giphy",
+            )
+            .map((entry) => ({ entry, error: entry.lastError })),
+        );
+      }).catch(() => undefined);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key?.startsWith("silicon-interface:outbox:v2:")) refresh();
+    };
+    refresh();
+    window.addEventListener("storage", onStorage);
+    return () => {
+      alive = false;
+      window.removeEventListener("storage", onStorage);
     };
   }, [roomId]);
 
@@ -798,30 +1054,31 @@ export function Composer({
       const { id, file } = stage;
       if (!file) return; // restored attachment — already uploaded, nothing to do
       const ref: React.MutableRefObject<XMLHttpRequest | null> = { current: null };
+      const abortController = new AbortController();
       xhrRefs.current.set(id, ref);
+      uploadAbortRefs.current.set(id, abortController);
       try {
-        const r = await api.presignUpload({
-          mime: file.type || "application/octet-stream",
-          size: file.size,
+        updateAttachment(id, { pct: 0, loaded: 0 });
+        const mime = file.type || "application/octet-stream";
+        const mediaId = await uploadMediaResumable({
+          clientId: id,
+          file,
+          mime,
           kind: file.type.startsWith("image/") ? "image" : "file",
           filename: file.name,
-          room_id: roomId,
+          roomId,
+          onProgress: (pct, loaded) => updateAttachment(id, { pct, loaded }),
+          xhrRef: ref,
+          signal: abortController.signal,
         });
-        const mediaId = r.media.media_id;
-        if (!r.upload.dev_mode) {
-          updateAttachment(id, { pct: 0, loaded: 0 });
-          const form = new FormData();
-          for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-          form.append("file", file);
-          await xhrUpload(
-            r.upload.url,
-            form,
-            (pct, loaded) => updateAttachment(id, { pct, loaded }),
-            ref,
-            sendTimeoutMs(file.size),
-          );
-          // Decode metadata (#22 image dims; #6 audio/video duration) so the
-          // bubble reserves the right aspect / shows duration immediately.
+        updateAttachment(id, {
+          status: "ready",
+          mediaId,
+          mime,
+          pct: null,
+          loaded: null,
+        });
+        void (async () => {
           let meta: Parameters<typeof api.mediaComplete>[1] = {};
           if (file.type.startsWith("image/")) {
             const d = await measureImage(file);
@@ -833,21 +1090,17 @@ export function Composer({
             const d = await computePeaks(file);
             if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
           }
-          await api.mediaComplete(mediaId, meta);
-        }
-        updateAttachment(id, {
-          status: "ready",
-          mediaId,
-          mime: file.type || "application/octet-stream",
-          pct: null,
-          loaded: null,
-        });
+          if (Object.keys(meta).length) await api.mediaComplete(mediaId, meta);
+        })().catch(() => undefined);
       } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") return; // removed
+        if (abortController.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) {
+          return; // user removed the attachment
+        }
         updateAttachment(id, { status: "error", pct: null, loaded: null });
         toast.error(e instanceof ApiError ? e.message : String(e));
       } finally {
         xhrRefs.current.delete(id);
+        uploadAbortRefs.current.delete(id);
       }
     },
     [roomId, updateAttachment],
@@ -855,9 +1108,21 @@ export function Composer({
 
   // Abort (if uploading) and drop a staged attachment.
   const removeAttachment = React.useCallback((id: string) => {
+    uploadAbortRefs.current.get(id)?.abort();
+    uploadAbortRefs.current.delete(id);
     xhrRefs.current.get(id)?.current?.abort();
     xhrRefs.current.delete(id);
     setAttachments((prev) => prev.filter((a) => a.id !== id));
+    const carbonId = authStore.getCarbon()?.carbon_id;
+    if (carbonId) {
+      const owner = `carbon:${carbonId}`;
+      void readMediaUpload(owner, id).then(async (row) => {
+        if (row?.sessionId && row.state !== "completed") {
+          await api.cancelMultipartUpload(row.sessionId).catch(() => undefined);
+        }
+        await removeMediaUpload(owner, id).catch(() => undefined);
+      });
+    }
   }, []);
 
   const retryAttachment = React.useCallback(
@@ -871,8 +1136,19 @@ export function Composer({
     [uploadOne],
   );
 
-  // §6.6 / §6.7 — Stage one or more files from the picker, a drag-drop, or a
-  // paste. Each is validated, staged, and starts uploading immediately.
+  React.useEffect(() => {
+    const resume = () => {
+      for (const item of attachmentsRef.current) {
+        if (item.status === "error") retryAttachment(item.id);
+      }
+    };
+    window.addEventListener(ABUSE_CHALLENGE_SOLVED_EVENT, resume);
+    return () => window.removeEventListener(ABUSE_CHALLENGE_SOLVED_EVENT, resume);
+  }, [retryAttachment]);
+
+  // Stage one or more files from the picker, a drag-drop, or a paste. Selection
+  // goes straight into the upload path; Glass remains the authority for any
+  // storage or processing constraints.
   const attachFiles = React.useCallback(
     (list: FileList | File[] | null | undefined) => {
       if (isEditing) {
@@ -891,14 +1167,6 @@ export function Composer({
         if (staged.length >= room) {
           toast.message(`only the first ${MAX_ATTACHMENTS} attachments were added.`);
           break;
-        }
-        const err = validateFile(file);
-        if (err) {
-          toast.error(`${file.name}: ${err}`);
-          continue;
-        }
-        if (isHeic(file)) {
-          toast.message("HEIC photo attached as a file (browsers can't preview it inline).");
         }
         staged.push({
           id: newClientId(),
@@ -968,15 +1236,49 @@ export function Composer({
     const after = text.slice(caret);
     const replaced = before.replace(MENTION_RE, `@${cand.handle} `);
     const nextText = replaced + after;
+    const nextCaret = replaced.length;
     setText(nextText);
-    if (!isEditing) persistDraft(nextText);
+    if (!isEditing) {
+      persistDraft(nextText, { start: nextCaret, end: nextCaret, direction: "none" });
+    }
     setMentionQuery(null);
     queueMicrotask(() => {
       const ta = taRef.current;
       if (!ta) return;
       ta.focus();
-      const pos = replaced.length;
-      ta.selectionStart = ta.selectionEnd = pos;
+      ta.selectionStart = ta.selectionEnd = nextCaret;
+    });
+  };
+  // Shared by the explicit Emoji/GIF picker and the `:shortcode` autocomplete.
+  // The textarea keeps its selection while the popover owns focus, so an emoji
+  // lands exactly where the user left the caret without disturbing attachments,
+  // reply state, or the rest of the existing draft.
+  const insertEmoji = (emoji: string, replaceShortcode = false) => {
+    const current = textRef.current;
+    const el = taRef.current;
+    const start = el?.selectionStart ?? current.length;
+    const end = el?.selectionEnd ?? start;
+    const before = current.slice(0, start);
+    const prefix = replaceShortcode
+      ? before.replace(/:([a-z0-9_+\-]*)$/i, emoji)
+      : `${before}${emoji}`;
+    const nextText = prefix + current.slice(end);
+    const nextCaret = prefix.length;
+    textRef.current = nextText;
+    setText(nextText);
+    if (!isEditing) {
+      persistDraft(nextText, {
+        start: nextCaret,
+        end: nextCaret,
+        direction: "none",
+      });
+    }
+    setEmojiQuery(null);
+    queueMicrotask(() => {
+      const textarea = taRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = nextCaret;
     });
   };
   // The emoji picker spans the full chat bar; its column count is derived from
@@ -1003,8 +1305,10 @@ export function Composer({
   // ownership.
   React.useEffect(() => {
     if (droppedFile) {
-      attachFiles([droppedFile]);
-      onDroppedFileConsumed?.();
+      queueMicrotask(() => {
+        attachFiles([droppedFile]);
+        onDroppedFileConsumed?.();
+      });
     }
   }, [droppedFile, onDroppedFileConsumed, attachFiles]);
 
@@ -1035,17 +1339,24 @@ export function Composer({
       };
       return [...withoutDupe, row];
     });
-    setText((current) => {
-      const nextFeedback = draft.feedbackText.trim();
-      const previousFeedback = annotationFeedbackRef.current.get(draft.sourceMediaId);
-      annotationFeedbackRef.current.set(draft.sourceMediaId, nextFeedback);
-      if (!nextFeedback || current.includes(nextFeedback)) return current;
-      if (previousFeedback && current.includes(previousFeedback)) {
-        return current.replace(previousFeedback, nextFeedback);
-      }
-      return current.trim() ? `${current.trimEnd()}\n\n${nextFeedback}` : nextFeedback;
-    });
-  }, []);
+    const current = textRef.current;
+    const nextFeedback = draft.feedbackText.trim();
+    const previousFeedback = annotationFeedbackRef.current.get(draft.sourceMediaId);
+    annotationFeedbackRef.current.set(draft.sourceMediaId, nextFeedback);
+    let next = current;
+    if (nextFeedback && !current.includes(nextFeedback)) {
+      next = previousFeedback && current.includes(previousFeedback)
+        ? current.replace(previousFeedback, nextFeedback)
+        : current.trim()
+          ? `${current.trimEnd()}\n\n${nextFeedback}`
+          : nextFeedback;
+    }
+    if (next !== current) {
+      textRef.current = next;
+      setText(next);
+      if (!isEditing) setDraft(roomId, next);
+    }
+  }, [isEditing, roomId]);
 
   // Pull an annotation draft in from the studio (via RoomView) — same consume-
   // hint pattern as the dropped-file effect above.
@@ -1070,63 +1381,157 @@ export function Composer({
   // Drafts live in a shared store (localStorage-backed) so the sidebar can show
   // a live "draft: …" preview as the user types.
   const persistDraft = React.useCallback(
-    (v: string) => {
-      setDraft(roomId, v);
+    (
+      v: string,
+      selection?: {
+        start: number;
+        end: number;
+        direction?: DraftSelectionDirection;
+      },
+    ) => {
+      return setDraft(roomId, v, selection);
     },
     [roomId],
   );
+  const pendingCommittedClearRef = React.useRef(false);
+  const clearComposerAfterDurableTransfer = React.useCallback(async () => {
+    const committed = await clearDraftAfterSend(roomId);
+    if (committed) {
+      pendingCommittedClearRef.current = false;
+      setText("");
+      return true;
+    }
+    pendingCommittedClearRef.current = true;
+    setComposerAnnouncement(
+      "Message saved. This text will clear as soon as saving finishes.",
+    );
+    return false;
+  }, [roomId]);
+
+  React.useEffect(() => {
+    if (
+      !pendingCommittedClearRef.current ||
+      draftSync.localDurabilityPending ||
+      draftSync.localDurabilityError
+    ) {
+      return;
+    }
+    pendingCommittedClearRef.current = false;
+    restoreComposerSnapshot(roomId);
+  }, [
+    draftSync.localDurabilityError,
+    draftSync.localDurabilityPending,
+    restoreComposerSnapshot,
+    roomId,
+  ]);
   // Load the room's saved draft when the active room changes. On leaving the
   // room, flush its draft to the sidebar immediately (don't wait for the typing
   // pause) so switching chats surfaces the draft right away.
   React.useEffect(() => {
     let cancelled = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- room restore must hydrate composer before user types.
-    setText(getDraft(roomId));
+    const untouchedInteractionEpoch = composerInteractionEpochRef.current;
+    restoreComposerSnapshot(roomId, untouchedInteractionEpoch);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset room-scoped picker state with the room switch.
     setEmojiQuery(null);
     // Restore any uploaded attachments staged in this room's draft.
     setAttachments(restoreStagedAttachments(roomId));
-    void loadServerDraft(roomId).then(() => {
+    void hydrateDraftJournal(roomId).then(() => loadServerDraft(roomId)).then(async () => {
       if (cancelled) return;
-      setText(getDraft(roomId));
-      setAttachments(restoreStagedAttachments(roomId));
+      // Cloud/journal hydration may finish after the user has already placed a
+      // caret, selected text, or started typing. The durable merge still runs,
+      // but it must never overwrite that live UI range.
+      restoreComposerSnapshot(roomId, untouchedInteractionEpoch);
+      const restored = restoreStagedAttachments(roomId);
+      const carbonId = authStore.getCarbon()?.carbon_id;
+      if (!carbonId) {
+        setAttachments(restored);
+        return;
+      }
+      let durableRows = [] as Awaited<ReturnType<typeof listRoomMediaUploads>>;
+      let albumOutboxMediaIds = new Set<string>();
+      try {
+        durableRows = await listRoomMediaUploads(`carbon:${carbonId}`, roomId);
+        const outboxRows = await listOutbox(carbonId).catch(() => []);
+        albumOutboxMediaIds = albumMediaIdsOwnedByOutbox(outboxRows, roomId);
+      } catch {
+        // Existing uploaded cloud-draft attachments still restore below.
+      }
+      if (cancelled) return;
+      const durableStages: StagedFile[] = [];
+      for (const row of durableRows) {
+        // Rows bound to an already-saved outbox belong to that immutable send,
+        // not the draft composer. They must never appear as a second draft chip.
+        if (row.outboxClientId && row.outboxClientId !== row.clientId) continue;
+        // The outbox commit is the ownership boundary. If the renderer died
+        // before it could stamp/remove every upload row, the immutable album
+        // manifest still proves that this media is already queued exactly once.
+        if (row.mediaId && albumOutboxMediaIds.has(row.mediaId)) continue;
+        if (row.state === "completed" && row.mediaId) {
+          durableStages.push({
+            id: row.clientId, file: null, name: row.name, size: row.size,
+            status: "ready" as const, pct: null, loaded: null,
+            mediaId: row.mediaId, mime: row.mime,
+          });
+          continue;
+        }
+        if (!row.blob) continue;
+        durableStages.push({
+          id: row.clientId,
+          file: new File([row.blob], row.name, { type: row.mime }),
+          name: row.name,
+          size: row.size,
+          status: "uploading" as const,
+          pct: null,
+          loaded: null,
+          mediaId: null,
+          mime: row.mime,
+        });
+      }
+      const durableIds = new Set(durableStages.map((row) => row.id));
+      setAttachments([...restored.filter((row) => !durableIds.has(row.id)), ...durableStages]);
+      durableStages.filter((row) => row.file && row.status === "uploading")
+        .forEach((row) => void uploadOne(row));
     });
     return () => {
       cancelled = true;
       setDraftFocused(roomId, false);
       flushDraft(roomId);
     };
-  }, [roomId]);
+  }, [roomId, restoreComposerSnapshot, uploadOne]);
 
+  // Only the explicit recovery action “copy to composer” enters here. Unsend
+  // has no path to this prop, so a redacted message can never repopulate text
+  // or attachments as a side effect of deletion.
   React.useEffect(() => {
-    if (!restoreDraft) return;
+    if (!copyDraft) return;
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
       if (editingEvent) onEditComplete?.();
-      const restoredText = restoreDraft.text;
-      const restoredAttachments = (restoreDraft.attachments ?? []).map((a) => ({
+      const copiedText = copyDraft.text;
+      const copiedAttachments = (copyDraft.attachments ?? []).map((attachment) => ({
         id: newClientId(),
         file: null,
-        name: a.name,
-        size: a.size ?? 0,
+        name: attachment.name,
+        size: attachment.size ?? 0,
         status: "ready" as const,
         pct: null,
         loaded: null,
-        mediaId: a.mediaId,
-        mime: a.mime || "application/octet-stream",
+        mediaId: attachment.mediaId,
+        mime: attachment.mime || "application/octet-stream",
       }));
-      setText(restoredText);
-      persistDraft(restoredText);
-      setAttachments(restoredAttachments);
+      setText(copiedText);
+      persistDraft(copiedText);
+      setAttachments(copiedAttachments);
       setEmojiQuery(null);
       setMentionQuery(null);
-      onRestoreDraftConsumed?.();
+      onComposerCopyConsumed?.();
       taRef.current?.focus();
     });
     return () => {
       cancelled = true;
     };
-  }, [editingEvent, onEditComplete, onRestoreDraftConsumed, persistDraft, restoreDraft]);
+  }, [copyDraft, editingEvent, onComposerCopyConsumed, onEditComplete, persistDraft]);
 
   // Persist the room's uploaded attachments so a chat-switch / refresh keeps
   // them. Skip the render where roomId just changed (the effect above restores
@@ -1172,7 +1577,6 @@ export function Composer({
         emptyHoldTimerRef.current = null;
       }
       setQueuePaused(true);
-      setHoldEndsAt(null);
       onHoldStateChange?.(true);
     }
     if (!isTypingRef.current) {
@@ -1218,14 +1622,6 @@ export function Composer({
     el.style.overflowY = contentH > maxH ? "auto" : "hidden";
   }, [text]);
 
-  const reset = () => {
-    setText("");
-    clearDraftAfterSend(roomId);
-    for (const ref of xhrRefs.current.values()) ref.current?.abort();
-    xhrRefs.current.clear();
-    setAttachments([]);
-  };
-
   const clearDelayTimer = React.useCallback(() => {
     if (delayTimerRef.current) {
       clearTimeout(delayTimerRef.current);
@@ -1265,25 +1661,72 @@ export function Composer({
     delayedTextQueueRef.current = [];
     setQueuedTextCount(0);
     setQueuePaused(false);
-    setHoldEndsAt(null);
     clearDelayTimer();
     onHoldStateChange?.(false);
   }, [clearDelayTimer, onHoldStateChange]);
 
   // Drop a held message from the queue when its bubble is deleted — never send.
   const cancelQueued = React.useCallback(
-    (clientId: string) => {
+    async (clientId: string): Promise<CancelQueuedResult> => {
       const heldSendId = heldSendIdsRef.current.get(clientId);
-      if (heldSendId) {
-        heldSendIdsRef.current.delete(clientId);
-        heldSendsRef.current.delete(clientId);
-        cancelledHeldClientIdsRef.current.add(clientId);
-        api.cancelHeldSend(roomId, heldSendId).catch(() => undefined);
-      } else {
-        cancelledHeldClientIdsRef.current.add(clientId);
-      }
       const current = delayedTextQueueRef.current;
-      if (!current.some((it) => it.clientId === clientId)) return;
+      const item =
+        current.find((queued) => queued.clientId === clientId) ??
+        heldIntentsRef.current.get(clientId);
+      const held = heldSendsRef.current.get(clientId);
+      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+      const existingCancellation = outboxOwner
+        ? await getHeldCancellation(outboxOwner, clientId)
+        : null;
+      // A temp event from an ordinary immediate send is not a held message.
+      // Hiding it here would leave its durable event outbox free to deliver.
+      if (!item && !held && !heldSendId && !existingCancellation) return "not-held";
+
+      const payload = item
+        ? buildQueuedPayload(item, Math.max(1, current.length))
+        : {
+            type: "m.text" as const,
+            content: { ...(held?.content ?? {}), body: String(held?.content?.body ?? "") },
+            reply_to_event_id: held?.reply_to_event_id || undefined,
+          };
+
+      if (!outboxOwner) {
+        // Without a durable owner namespace, only an authoritative DELETE may
+        // hide the bubble. A local/storage failure leaves it visible.
+        try {
+          const target = heldSendId ?? held?.held_send_id;
+          if (!target) return "failed";
+          const result = await api.cancelHeldSend(roomId, target);
+          if (result.state === "sent") return "sent";
+          if (result.state !== "cancelled" && result.state !== "failed") return "failed";
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "couldn't cancel this message");
+          return "failed";
+        }
+      } else {
+        try {
+          await requestHeldCancellation(outboxOwner, {
+            roomId,
+            clientId,
+            heldSendId: heldSendId ?? held?.held_send_id,
+            body: item?.body ?? String(held?.content?.body ?? existingCancellation?.body ?? ""),
+            content: payload.content ?? existingCancellation?.content,
+            replyTo: payload.reply_to_event_id ?? existingCancellation?.replyTo,
+            releaseAt: item?.releaseAt ?? held?.release_at ?? existingCancellation?.releaseAt,
+          });
+          wakeOutboxRecovery(outboxOwner, clientId);
+        } catch (error) {
+          // Do not mutate the queue or UI if neither durability layer accepted
+          // the user's cancellation.
+          toast.error(error instanceof Error ? error.message : "couldn't save this cancellation");
+          return "failed";
+        }
+      }
+
+      heldSendIdsRef.current.delete(clientId);
+      heldSendsRef.current.delete(clientId);
+      heldIntentsRef.current.delete(clientId);
+      cancelledHeldClientIdsRef.current.add(clientId);
       const next = current
         .filter((it) => it.clientId !== clientId)
         .map((it, index) => ({ ...it, holdIndex: index }));
@@ -1295,6 +1738,19 @@ export function Composer({
         for (const queued of next) {
           onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, next.length));
         }
+      }
+      if (!outboxOwner) return "cancelled";
+      try {
+        const state = await reconcileHeldCancellation(
+          (await getHeldCancellation(outboxOwner, clientId))!,
+        );
+        wakeOutboxRecovery(outboxOwner, clientId);
+        if (state === "cancelled" || state === "failed") return "cancelled";
+        if (state === "sent") toast.message("that held message was already sent");
+        return state === "sent" ? "sent" : "pending";
+      } catch {
+        toast.message("Cancel request saved. We’ll confirm it when connected.");
+        return "pending";
       }
     },
     [buildQueuedPayload, clearDelayedQueue, onOptimisticUpdate, roomId],
@@ -1311,6 +1767,7 @@ export function Composer({
     (clientId: string) => {
       heldSendIdsRef.current.delete(clientId);
       heldSendsRef.current.delete(clientId);
+      heldIntentsRef.current.delete(clientId);
       cancelledHeldClientIdsRef.current.delete(clientId);
       const current = delayedTextQueueRef.current;
       if (!current.some((it) => it.clientId === clientId)) return;
@@ -1345,43 +1802,121 @@ export function Composer({
         ...(extra ? [extra] : []),
       ];
       if (!items.length) return;
+      for (const item of items) heldIntentsRef.current.set(item.clientId, item);
       clearDelayedQueue();
 
       const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
       const total = items.length;
       for (const item of items) {
+        if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, item.clientId))) continue;
         const heldSendId = heldSendIdsRef.current.get(item.clientId);
         if (heldSendId) {
-          api
-            .sendHeldNow(roomId, heldSendId)
-            .catch((err) => {
-              if (optimistic) onFail(item.clientId, err);
-              else toast.error(err instanceof ApiError ? err.message : String(err));
-            })
-            .finally(() => heldSendIdsRef.current.delete(item.clientId));
-          heldSendsRef.current.delete(item.clientId);
+          const knownHeld = heldSendsRef.current.get(item.clientId);
+          if (
+            knownHeld &&
+            (knownHeld.state === "blocked" ||
+              knownHeld.state === "challenge" ||
+              knownHeld.state === "failed" ||
+              knownHeld.phase === "retry_wait")
+          ) {
+            clearHeldClient(item.clientId);
+            continue;
+          }
+          try {
+            const release = async (): Promise<HeldSend | null> => {
+              if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, item.clientId))) {
+                return null;
+              }
+              return api.sendHeldNow(roomId, heldSendId);
+            };
+            const released = outboxOwner
+              ? await withOutboxClientLock(outboxOwner, item.clientId, release)
+              : await release();
+            if (released) onHeldSendUpdate?.(released);
+          } catch (err) {
+            if (optimistic) onFail(item.clientId, err);
+            else toast.error(err instanceof ApiError ? err.message : String(err));
+          } finally {
+            heldSendIdsRef.current.delete(item.clientId);
+            heldSendsRef.current.delete(item.clientId);
+            heldIntentsRef.current.delete(item.clientId);
+          }
           continue;
         }
-        const payload = buildQueuedPayload(item, total);
-        const sendPayload = {
-          type: payload.type,
-          content: payload.content,
-          reply_to_event_id: payload.reply_to_event_id,
-        };
-        if (outboxOwner) {
-          enqueueOutbox(outboxOwner, {
-            roomId,
-            clientId: item.clientId,
-            body: item.body,
-            content: payload.content,
-            replyTo: payload.reply_to_event_id,
-            at: Date.now(),
-          });
-        }
+        let payload = buildQueuedPayload(item, total);
         try {
-          const real = await api.sendEvent(roomId, sendPayload, item.clientId);
-          if (outboxOwner) ackOutbox(outboxOwner, item.clientId);
-          if (optimistic) onAck(item.clientId, real);
+          if (outboxOwner) {
+            const existing = (await listOutbox(outboxOwner)).find(
+              (row) => row.clientId === item.clientId,
+            );
+            const durable = existing ?? await enqueueOutbox(outboxOwner, {
+                roomId,
+                clientId: item.clientId,
+                operation: "held",
+                type: payload.type,
+                body: item.body,
+                content: payload.content,
+                replyTo: payload.reply_to_event_id,
+                releaseAt: item.releaseAt,
+                at: Date.now(),
+              });
+            if (durable.roomId !== roomId || durable.operation !== "held") {
+              throw new Error("saved held send has a conflicting operation scope");
+            }
+            // A lost create response must replay the exact durable payload,
+            // not a newly recomputed group projection from current UI state.
+            payload = {
+              type: (durable.type ?? "m.text") as Event["type"],
+              content: { ...(durable.content ?? {}), body: durable.body },
+              ...(durable.replyTo ? { reply_to_event_id: durable.replyTo } : {}),
+            };
+          }
+          // If the create response was lost, retrying the SAME held operation
+          // retrieves it idempotently. Never fall back to immediate-send with a
+          // different operation namespace: that can duplicate a hold which was
+          // accepted just before the network disappeared.
+          const createAndRelease = async (): Promise<HeldSend | null> => {
+            if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, item.clientId))) return null;
+            const held = await api.createHeldSend(roomId, {
+              type: "m.text",
+              content: { ...payload.content, client_id: item.clientId },
+              client_id: item.clientId,
+              reply_to_event_id: payload.reply_to_event_id,
+              hold_seconds: 1,
+            });
+            // A cancellation can commit while create is in flight. Re-read its
+            // independent tombstone before both local ack and release.
+            if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, item.clientId))) {
+              await api.cancelHeldSend(roomId, held.held_send_id).catch(() => undefined);
+              return null;
+            }
+            if (
+              held.state === "blocked" ||
+              held.state === "challenge" ||
+              held.state === "failed"
+            ) {
+              if (outboxOwner) {
+                await persistHeldOutboxState(outboxOwner, item.clientId, held);
+              }
+              return null;
+            }
+            if (held.phase === "retry_wait") {
+              if (outboxOwner) await ackOutbox(outboxOwner, item.clientId);
+              return null;
+            }
+            if (outboxOwner) await ackOutbox(outboxOwner, item.clientId).catch(() => undefined);
+            if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, item.clientId))) {
+              await api.cancelHeldSend(roomId, held.held_send_id).catch(() => undefined);
+              return null;
+            }
+            return api.sendHeldNow(roomId, held.held_send_id);
+          };
+          const released = outboxOwner
+            ? await withOutboxClientLock(outboxOwner, item.clientId, createAndRelease)
+            : await createAndRelease();
+          if (!released) continue;
+          onHeldSendUpdate?.(released);
+          heldIntentsRef.current.delete(item.clientId);
           track.messageSent({
             room_id: roomId,
             message_type: "m.text",
@@ -1396,8 +1931,9 @@ export function Composer({
     [
       buildQueuedPayload,
       clearDelayedQueue,
-      onAck,
+      clearHeldClient,
       onFail,
+      onHeldSendUpdate,
       roomId,
     ],
   );
@@ -1410,19 +1946,15 @@ export function Composer({
     clearDelayTimer();
     setQueuePaused(false);
     onHoldStateChange?.(false);
-    const deadline = Date.now() + SILICON_TEXT_SEND_DELAY_MS;
-    setHoldNowMs(Date.now());
-    setHoldEndsAt(deadline);
     delayTimerRef.current = setTimeout(() => {
       delayTimerRef.current = null;
-      setHoldEndsAt(null);
       if (hasContinuingDraft()) {
         setQueuePaused(true);
         onHoldStateChange?.(true);
       } else {
         void flushDelayedTextQueue();
       }
-    }, SILICON_TEXT_SEND_DELAY_MS);
+    }, SILICON_TEXT_HOLD_MS);
   }, [
     clearDelayedQueue,
     clearDelayTimer,
@@ -1432,7 +1964,7 @@ export function Composer({
   ]);
 
   const queueDelayedTextSend = React.useCallback(
-    (body: string) => {
+    async (body: string): Promise<boolean> => {
       const clientId = newClientId();
       const existingQueue = delayedTextQueueRef.current;
       const holdGroupId = existingQueue[0]?.holdGroupId ?? newClientId();
@@ -1442,8 +1974,63 @@ export function Composer({
         replyToEventId: replyTo?.event_id,
         holdGroupId,
         holdIndex: existingQueue.length,
-        releaseAt: new Date(Date.now() + SILICON_TEXT_SEND_DELAY_MS).toISOString(),
+        releaseAt: siliconHoldReleaseAt(Date.now()),
       };
+      const queuedPayload = buildQueuedPayload(item, existingQueue.length + 1);
+      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+      try {
+        if (outboxOwner) {
+          await enqueueOutbox(outboxOwner, {
+            roomId,
+            clientId,
+            operation: "held",
+            type: queuedPayload.type,
+            body,
+            content: queuedPayload.content,
+            replyTo: item.replyToEventId,
+            releaseAt: item.releaseAt,
+            at: Date.now(),
+          });
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Message couldn’t be saved");
+        return false;
+      }
+
+      const createOnGlass = () => {
+        const create = async () => {
+          if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, clientId))) {
+            throw new Error("held message was cancelled");
+          }
+          const held = await api.createHeldSend(roomId, {
+            type: "m.text",
+            content: { body, client_id: clientId },
+            client_id: clientId,
+            reply_to_event_id: replyTo?.event_id,
+            hold_seconds: SILICON_TEXT_HOLD_SECONDS,
+          });
+          if (outboxOwner && !(await maySendHeldOutbox(outboxOwner, clientId))) {
+            return api.cancelHeldSend(roomId, held.held_send_id);
+          }
+          return held;
+        };
+        return outboxOwner
+          ? withOutboxClientLock(outboxOwner, clientId, create)
+          : create();
+      };
+
+      // A non-Carbon session has no local outbox namespace. Do not clear its
+      // composer until Glass has durably accepted the held operation.
+      let acceptedWithoutOutbox: HeldSend | null = null;
+      if (!outboxOwner) {
+        try {
+          acceptedWithoutOutbox = await createOnGlass();
+        } catch (error) {
+          toast.error(error instanceof ApiError ? error.message : String(error));
+          return false;
+        }
+      }
+
       delayedTextQueueRef.current = [...existingQueue, item];
       const queue = delayedTextQueueRef.current;
       setQueuedTextCount(queue.length);
@@ -1454,25 +2041,56 @@ export function Composer({
         onOptimisticUpdate?.(queued.clientId, buildQueuedPayload(queued, queue.length));
       }
       restartDelayedFlushTimer();
-      api
-        .createHeldSend(roomId, {
-          type: "m.text",
-          content: { body, client_id: clientId },
-          client_id: clientId,
-          reply_to_event_id: replyTo?.event_id,
-          hold_seconds: SILICON_TEXT_SEND_DELAY_MS / 1000,
-        })
-        .then((held) => {
-          if (cancelledHeldClientIdsRef.current.has(clientId)) {
-            api.cancelHeldSend(roomId, held.held_send_id).catch(() => undefined);
+      const accepted = acceptedWithoutOutbox
+        ? Promise.resolve(acceptedWithoutOutbox)
+        : createOnGlass();
+      void accepted
+        .then(async (held) => {
+          const durablyCancelled = outboxOwner
+            ? !(await maySendHeldOutbox(outboxOwner, clientId))
+            : false;
+          if (cancelledHeldClientIdsRef.current.has(clientId) || durablyCancelled) {
+            if (outboxOwner) {
+              void requestHeldCancellation(outboxOwner, {
+                roomId,
+                clientId,
+                heldSendId: held.held_send_id,
+                body,
+                content: queuedPayload.content,
+                replyTo: item.replyToEventId,
+                releaseAt: item.releaseAt,
+              })
+                .then((row) => reconcileHeldCancellation(row))
+                .catch(() => undefined);
+            } else {
+              api.cancelHeldSend(roomId, held.held_send_id).catch(() => undefined);
+            }
             return;
           }
+          if (
+            held.state === "blocked" ||
+            held.state === "challenge" ||
+            held.state === "failed"
+          ) {
+            if (outboxOwner) {
+              await persistHeldOutboxState(outboxOwner, clientId, held);
+            }
+            clearHeldClient(clientId);
+            return;
+          }
+          if (held.phase === "retry_wait") {
+            if (outboxOwner) await ackOutbox(outboxOwner, clientId);
+            clearHeldClient(clientId);
+            return;
+          }
+          if (outboxOwner) void ackOutbox(outboxOwner, clientId).catch(() => undefined);
           heldSendIdsRef.current.set(clientId, held.held_send_id);
           heldSendsRef.current.set(clientId, held);
-          // Keep the locally-anchored 10s display deadline. `held.release_at`
+          onHeldSendUpdate?.(held);
+          // Keep the locally-anchored 5s display deadline. `held.release_at`
           // is an absolute server timestamp; replacing the local deadline with
           // it makes clock skew look like a 60s+ hold even though Glass stored
-          // exactly ten seconds.
+          // exactly five seconds.
         })
         .catch(async (err) => {
           if (cancelledHeldClientIdsRef.current.has(clientId)) {
@@ -1480,33 +2098,21 @@ export function Composer({
             // in flight. If create fails, do not fall back to immediate send.
             return;
           }
-          // Honest old-client/API fallback: send immediately with the same
-          // client_id, or leave the optimistic bubble failed. Never fake a
-          // local-only server hold.
-          try {
-            const payload = buildQueuedPayload(item, queue.length);
-            const real = await api.sendEvent(
-              roomId,
-              {
-                type: payload.type,
-                content: payload.content,
-                reply_to_event_id: payload.reply_to_event_id,
-              },
-              clientId,
-            );
-            onAck(clientId, real);
-          } catch {
-            onFail(clientId, err);
-          }
+          // Keep the durable held operation. The timer/reconnect flusher retries
+          // create with this same client ID, so an ambiguous response cannot
+          // become a second immediate event.
+          onFail(clientId, err);
         });
       onClearReply?.();
+      return true;
     },
     [
       buildQueuedPayload,
-      onAck,
+      clearHeldClient,
       onClearReply,
       onFail,
       onHoldStateChange,
+      onHeldSendUpdate,
       onOptimisticAdd,
       onOptimisticUpdate,
       replyTo,
@@ -1533,7 +2139,7 @@ export function Composer({
     persistDraft(restore);
     onEditComplete?.();
     queueMicrotask(() => taRef.current?.focus());
-  }, [clearEditInactivityTimer, onEditComplete, persistDraft]);
+  }, [clearEditInactivityTimer, onEditComplete, persistDraft, setEmojiQuery, setMentionQuery]);
 
   const cancelEdit = React.useCallback(() => {
     if (!editingEvent) return;
@@ -1624,7 +2230,6 @@ export function Composer({
       if (editingHeld) {
         clearDelayTimer();
         setQueuePaused(true);
-        setHoldEndsAt(null);
         setQueuedTextCount(delayedTextQueueRef.current.length);
         onHoldStateChange?.(true);
       }
@@ -1649,7 +2254,6 @@ export function Composer({
   }, [clearEditInactivityTimer, confirmEdit, editingEvent, text]);
 
   React.useEffect(() => {
-    const hideCountdown = () => queueMicrotask(() => setHoldEndsAt(null));
     // Not paused → no post-empty countdown should be pending.
     if (!queuePaused || queuedTextCount === 0) {
       if (emptyHoldTimerRef.current) {
@@ -1663,7 +2267,6 @@ export function Composer({
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
       }
-      hideCountdown();
       return;
     }
     // Still typing a follow-up → keep holding; cancel any empty-hold countdown.
@@ -1672,71 +2275,18 @@ export function Composer({
         clearTimeout(emptyHoldTimerRef.current);
         emptyHoldTimerRef.current = null;
       }
-      hideCountdown();
       return;
     }
     // Input is empty while paused: wait at least SILICON_EMPTY_HOLD_MS before
     // sending (NOT instantly). Don't restart an already-running countdown.
     if (emptyHoldTimerRef.current) return;
-    const deadline = Date.now() + SILICON_EMPTY_HOLD_MS;
-    setHoldNowMs(Date.now());
-    setHoldEndsAt(deadline);
     emptyHoldTimerRef.current = setTimeout(() => {
       emptyHoldTimerRef.current = null;
-      setHoldEndsAt(null);
       // Re-check: if they resumed typing in the meantime, this effect will have
       // cancelled us; only send if the box is still empty.
       if (!hasContinuingDraft()) void flushDelayedTextQueue();
     }, SILICON_EMPTY_HOLD_MS);
   }, [editingHeld, flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
-
-  React.useEffect(() => {
-    if (holdEndsAt == null) return;
-    const timer = window.setInterval(() => setHoldNowMs(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [holdEndsAt]);
-
-  const waitOneMoreMinute = React.useCallback(async () => {
-    const queued = delayedTextQueueRef.current;
-    if (!queued.length) return;
-    try {
-      const serverList = await api.heldSends(roomId);
-      const byClient = new Map(serverList.held_sends.map((held) => [held.client_id, held] as const));
-      const now = Date.now();
-      const extended = await Promise.all(
-        queued.map(async (item) => {
-          const held = heldSendsRef.current.get(item.clientId) ?? byClient.get(item.clientId);
-          if (!held || held.state !== "pending") return null;
-          // Browser-anchored: server absolute timestamps can be clock-skewed.
-          const remainingSeconds = Math.max(0, Math.ceil((Date.parse(item.releaseAt) - now) / 1000));
-          const updated = await api.updateHeldSend(roomId, held.held_send_id, {
-            base_version: held.version,
-            hold_seconds: remainingSeconds + SILICON_WAIT_MORE_MS / 1000,
-          });
-          heldSendsRef.current.set(item.clientId, updated);
-          item.releaseAt = new Date(now + (remainingSeconds * 1000) + SILICON_WAIT_MORE_MS).toISOString();
-          return item;
-        }),
-      );
-      if (!extended.some(Boolean)) throw new Error("held message is no longer waiting");
-      const deadline = Math.max(...queued.map((item) => Date.parse(item.releaseAt)));
-      clearDelayTimer();
-      setQueuePaused(false);
-      setHoldNowMs(now);
-      setHoldEndsAt(deadline);
-      onHoldStateChange?.(false);
-      for (const item of queued) {
-        onOptimisticUpdate?.(item.clientId, buildQueuedPayload(item, queued.length));
-      }
-      delayTimerRef.current = setTimeout(() => {
-        delayTimerRef.current = null;
-        setHoldEndsAt(null);
-        if (!hasContinuingDraft()) void flushDelayedTextQueue();
-      }, Math.max(0, deadline - now));
-    } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : "couldn't extend the hold");
-    }
-  }, [buildQueuedPayload, clearDelayTimer, flushDelayedTextQueue, hasContinuingDraft, onHoldStateChange, onOptimisticUpdate, roomId]);
 
   React.useEffect(
     () => () => {
@@ -1746,6 +2296,7 @@ export function Composer({
       delayedTextQueueRef.current = [];
       heldSendIdsRef.current.clear();
       heldSendsRef.current.clear();
+      heldIntentsRef.current.clear();
       // Do NOT clear explicit-cancel tombstones here. A held-create request may
       // still resolve after unmount; its then() must see the tombstone and issue
       // cancelHeldSend so a user-deleted optimistic message cannot later release.
@@ -1757,137 +2308,254 @@ export function Composer({
 
   const sendOptimistic = async (
     payload: OptimisticPayload,
-    options?: { sizeBytes?: number },
+    options?: {
+      sizeBytes?: number;
+      /** Runs after the outbox owns the immutable intent and before transport. */
+      afterDurableEnqueue?: (clientId: string) => Promise<void>;
+    },
   ): Promise<boolean> => {
     const clientId = newClientId();
-    onOptimisticAdd(clientId, payload, {
-      timeoutMs: sendTimeoutMs(options?.sizeBytes),
-    });
+    const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
     try {
-      const real = await api.sendEvent(roomId, payload, clientId);
-      onAck(clientId, real);
+      if (outboxOwner) {
+        await enqueueOutbox(outboxOwner, {
+          roomId,
+          clientId,
+          type: payload.type,
+          body: String(payload.content?.body ?? ""),
+          content: payload.content ?? {},
+          replyTo: payload.reply_to_event_id,
+          at: Date.now(),
+        });
+        if (options?.afterDurableEnqueue) {
+          try {
+            await options.afterDurableEnqueue(clientId);
+          } catch {
+            // The outbox is already authoritative, so a secondary cleanup-link
+            // failure must never invite a duplicate resend or hide the queued
+            // message. Recovery also correlates the immutable album manifest.
+            setComposerAnnouncement(
+              "Message saved. We’ll finish preparing its attachment automatically.",
+            );
+          }
+        }
+      }
+      // The optimistic row and any composer cleanup happen only after the
+      // local outbox transaction has committed. For sessions without a Carbon
+      // outbox owner, wait for authoritative server acceptance instead.
+      onOptimisticAdd(clientId, payload, {
+        timeoutMs: sendTimeoutMs(options?.sizeBytes),
+      });
+      if (!outboxOwner) {
+        const real = await api.sendEvent(roomId, payload, clientId);
+        onAck(clientId, real);
+        return true;
+      }
+      void api
+        .sendEvent(roomId, payload, clientId)
+        .then((real) => {
+          onAck(clientId, real);
+          void ackOutbox(outboxOwner, clientId, { roomId, event: real });
+        })
+        .catch((error) => onFail(clientId, error));
       return true;
     } catch (error) {
-      onFail(clientId, error);
+      // No optimistic item was created if local durability failed, so leave
+      // the composer untouched and explain why Send could not be accepted.
+      toast.error(error instanceof Error ? error.message : "Message couldn’t be saved");
       return false;
+    }
+  };
+
+  const processDurableGif = async (
+    initial: OutboxEntry,
+    optimisticAlreadyAdded = false,
+  ) => {
+    if (gifAcquisitionsInFlightRef.current.has(initial.clientId)) return;
+    const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+    if (!outboxOwner) return;
+    gifAcquisitionsInFlightRef.current.add(initial.clientId);
+    setGifAcquisitions((current) =>
+      current.map((item) =>
+        item.entry.clientId === initial.clientId ? { ...item, error: undefined } : item,
+      ),
+    );
+    let entry = initial;
+    let optimisticAdded = optimisticAlreadyAdded;
+    let activityStarted = false;
+    try {
+      // This is the first external fetch. The provider id/URL/title/dimensions,
+      // room, reply, and immutable client id are already in the outbox.
+      entry = await ensureMediaOutboxStaged(outboxOwner, entry);
+      setGifAcquisitions((current) =>
+        current.filter((item) => item.entry.clientId !== entry.clientId),
+      );
+      const acquisition = entry.media?.acquisition;
+      if (!optimisticAlreadyAdded) {
+        onOptimisticAdd(entry.clientId, {
+          type: "m.image",
+          content: {
+            ...(entry.content ?? {}),
+            ...(acquisition?.url ? { local_url: acquisition.url } : {}),
+          },
+          ...(entry.replyTo ? { reply_to_event_id: entry.replyTo } : {}),
+        });
+        optimisticAdded = true;
+      }
+      gifUploadsInFlightRef.current += 1;
+      activityStarted = true;
+      if (gifUploadsInFlightRef.current === 1) {
+        api.activity(roomId, "uploading", true).catch(() => undefined);
+      }
+      const payload = await prepareMediaOutboxPayload(outboxOwner, entry);
+      const real = await api.sendEvent(roomId, payload, entry.clientId);
+      onAck(entry.clientId, real);
+      await acknowledgeMediaSend(outboxOwner, entry, undefined, {
+        roomId,
+        event: real,
+      });
+      track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
+      onClearReply?.();
+    } catch (error) {
+      if (optimisticAdded) {
+        onFail(entry.clientId, error);
+        const message = error instanceof Error ? error.message : "GIF source is unavailable";
+        setGifAcquisitions((current) => {
+          const without = current.filter((item) => item.entry.clientId !== entry.clientId);
+          return [...without, { entry, error: message }];
+        });
+      } else {
+        await persistOutboxFailure(outboxOwner, entry.clientId, error).catch(() => false);
+        const message = error instanceof Error ? error.message : "GIF source is unavailable";
+        setGifAcquisitions((current) => {
+          const without = current.filter((item) => item.entry.clientId !== entry.clientId);
+          return [...without, { entry, error: message }];
+        });
+        toast.error(`${message}. The GIF is saved here — retry when ready.`);
+      }
+    } finally {
+      gifAcquisitionsInFlightRef.current.delete(initial.clientId);
+      if (activityStarted) {
+        gifUploadsInFlightRef.current = Math.max(0, gifUploadsInFlightRef.current - 1);
+        if (gifUploadsInFlightRef.current === 0) {
+          api.activity(roomId, "uploading", false).catch(() => undefined);
+        }
+      }
     }
   };
 
   const sendGif = async (gif: GifResult) => {
     if (sendDisabled || busy || isEditing) return;
+    const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+    if (!outboxOwner) {
+      toast.error("A signed-in owner is required for a durable GIF send");
+      return;
+    }
     const safeTitle = gif.title
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "")
       .slice(0, 48);
-    const filename = `${safeTitle || gif.id}.gif`;
-    const clientId = newClientId();
-    onOptimisticAdd(clientId, {
-      type: "m.image",
-      content: {
-        local_url: gif.downloadUrl,
-        mime: "image/gif",
-        filename,
+    try {
+      // Strict click journal: no fetch, picker close, reply clear, composer
+      // clear, activity POST, or optimistic timeline row precedes this commit.
+      const entry = await journalRemoteGifIntent({
+        outboxOwnerId: outboxOwner,
+        mediaOwnerId: `carbon:${outboxOwner}`,
+        roomId,
+        clientId: newClientId(),
+        gifId: gif.id,
+        sourceUrl: gif.downloadUrl,
+        title: gif.title,
+        filename: `${safeTitle || gif.id}.gif`,
         width: gif.width,
         height: gif.height,
-      },
-      ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
-    });
-    setGifOpen(false);
-    gifUploadsInFlightRef.current += 1;
-    if (gifUploadsInFlightRef.current === 1) {
-      api.activity(roomId, "uploading", true).catch(() => undefined);
-    }
-    try {
-      const response = await fetch(gif.downloadUrl, { mode: "cors" });
-      if (!response.ok) throw new Error(`GIF download failed (${response.status})`);
-      const blob = await response.blob();
-      const file = new File([blob], filename, { type: "image/gif" });
-      const validationError = validateFile(file);
-      if (validationError) throw new Error(validationError);
-
-      const upload = await api.presignUpload({
-        mime: file.type,
-        size: file.size,
-        kind: "image",
-        filename: file.name,
-        room_id: roomId,
+        replyTo: replyTo?.event_id,
       });
-      if (!upload.upload.dev_mode) {
-        const form = new FormData();
-        for (const [key, value] of Object.entries(upload.upload.fields)) form.append(key, value);
-        form.append("file", file);
-        const xhrRef: React.MutableRefObject<XMLHttpRequest | null> = { current: null };
-        await xhrUpload(
-          upload.upload.url,
-          form,
-          () => undefined,
-          xhrRef,
-          sendTimeoutMs(file.size),
-        );
-        const dimensions = await measureImage(file);
-        await api.mediaComplete(
-          upload.media.media_id,
-          dimensions ? { width: dimensions.width, height: dimensions.height } : {},
-        );
-      }
-
-      const real = await api.sendEvent(
-        roomId,
-        {
-          type: "m.image",
-          content: {
-            media_id: upload.media.media_id,
-            mime: file.type,
-            filename: file.name,
-          },
-          ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
+      // The durable click journal already owns ordering and recovery. Paint the
+      // lightweight GIPHY preview immediately while the full rendition uploads
+      // in the background, so later messages can never overtake this GIF.
+      onOptimisticAdd(entry.clientId, {
+        type: "m.image",
+        content: {
+          ...(entry.content ?? {}),
+          local_url: gif.previewUrl,
         },
-        clientId,
-      );
-      onAck(clientId, real);
-      track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
-      onClearReply?.();
+        ...(entry.replyTo ? { reply_to_event_id: entry.replyTo } : {}),
+      });
+      setGifAcquisitions((current) => [...current, { entry }]);
+      setExpressionPickerOpen(false);
+      void processDurableGif(entry, true);
     } catch (error) {
-      onFail(clientId, error);
-    } finally {
-      gifUploadsInFlightRef.current = Math.max(0, gifUploadsInFlightRef.current - 1);
-      if (gifUploadsInFlightRef.current === 0) {
-        api.activity(roomId, "uploading", false).catch(() => undefined);
-      }
+      toast.error(error instanceof Error ? error.message : "GIF could not be saved for sending");
     }
   };
 
-  const sendTextOptimistic = (body: string, extraContent?: Record<string, unknown>) => {
+  const sendTextOptimistic = async (body: string, extraContent?: Record<string, unknown>) => {
     const clientId = newClientId();
     const payload: OptimisticPayload = {
       type: "m.text",
       content: { body, ...(extraContent ?? {}) },
       reply_to_event_id: replyTo?.event_id,
     };
-    onOptimisticAdd(clientId, payload, { timeoutMs: sendTimeoutMs() });
     // Persisted outbox: enqueue BEFORE the POST, ack on success. On failure
     // the entry stays — the reconnect/mount flusher (and the failed bubble's
     // tap-to-retry) re-POSTs it with the same client id, which the server
-    // dedupes. Plain-text only: extraContent (bundle_id) can't be rebuilt by
-    // the flusher, so those sends keep the ephemeral path.
-    const outboxOwner = extraContent ? null : (authStore.getCarbon()?.carbon_id ?? null);
-    if (outboxOwner) {
-      enqueueOutbox(outboxOwner, {
-        roomId,
-        clientId,
-        body,
-        replyTo: replyTo?.event_id,
-        at: Date.now(),
-      });
-    }
-    api
-      .sendEvent(roomId, payload, clientId) // §2.3 — echo-match by client id
-      .then((real) => {
-        if (outboxOwner) ackOutbox(outboxOwner, clientId);
+    // dedupes. Persist the complete text payload (mentions, bundles, attachment
+    // refs) so a crash cannot silently downgrade or discard its semantics.
+    const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+    try {
+      if (outboxOwner) {
+        await enqueueOutbox(outboxOwner, {
+          roomId,
+          clientId,
+          body,
+          content: payload.content,
+          replyTo: replyTo?.event_id,
+          at: Date.now(),
+        });
+      }
+      onOptimisticAdd(clientId, payload, { timeoutMs: sendTimeoutMs() });
+      if (!outboxOwner) {
+        const real = await api.sendEvent(roomId, payload, clientId);
         onAck(clientId, real);
-      })
-      .catch((err) => onFail(clientId, err));
+      } else {
+        void api
+          .sendEvent(roomId, payload, clientId)
+          .then((real) => {
+            onAck(clientId, real);
+            void ackOutbox(outboxOwner, clientId, { roomId, event: real });
+          })
+          .catch((error) => {
+            const attempts = 1;
+            const challenge =
+              error instanceof ApiError ? challengeFromErrorBody(error.body) : null;
+            if (challenge) {
+              setComposerAnnouncement(
+                "Message saved. Verify this device to continue sending.",
+              );
+              onFail(clientId, error);
+              return;
+            }
+            const decision = classifyOutboxFailure({
+              status: error instanceof ApiError ? error.status : 0,
+              attempts,
+              now: Date.now(),
+              retryAfterMs: error instanceof ApiError ? error.retryAfterMs : null,
+              message: error instanceof Error ? error.message : "temporarily unavailable",
+            });
+            setComposerAnnouncement(
+              decision.state === "queued"
+                ? "Message saved. We’ll keep trying."
+                : "Message saved, but it needs your attention.",
+            );
+            onFail(clientId, error);
+          });
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Message couldn’t be saved");
+      return false;
+    }
     track.messageSent({
       room_id: roomId,
       message_type: "m.text",
@@ -1895,11 +2563,20 @@ export function Composer({
     });
     // Clear the reply target on send.
     onClearReply?.();
+    return true;
   };
 
   const send = async () => {
+    if (draftSync.localDurabilityPending || draftSync.localDurabilityError) {
+      toast.error("Save this draft locally before sending or leaving the chat.");
+      return;
+    }
     if (sendDisabled) {
       toast.message(sendDisabledReason);
+      return;
+    }
+    if (replyTo?.redacted_at) {
+      toast.error("The message you were replying to was deleted. Remove the reply to send without losing this draft.");
       return;
     }
     if (editingEvent) {
@@ -1913,19 +2590,23 @@ export function Composer({
     if (attachments.length === 0 && body.startsWith("/")) {
       const result = runSlashCommand(body);
       if (result.handled) {
-        setText("");
-        clearDraftAfterSend(roomId);
+        await clearComposerAfterDurableTransfer();
         if (result.clearReply) onClearReply?.();
         return;
       }
       if (result.replaceWith !== undefined) body = result.replaceWith; // transform + send
     }
 
-    // Attachment path — uploads already started on attach. Each ready file is
-    // posted as its own message (the send button stays disabled until none are
-    // still uploading), then any typed text follows as a separate message.
+    // Attachment path — uploads already started on attach. Two or more files
+    // publish as ONE ordered m.album event after every item is ready. This is
+    // the atomic boundary: retries reuse one client id and peers can never see
+    // a partial group. A single file retains the legacy one-event flow.
     if (attachments.length > 0) {
       if (anyUploading) return;
+      if (attachments.some((attachment) => attachment.status !== "ready" || !attachment.mediaId)) {
+        toast.error("Retry or remove failed attachments before sending this group.");
+        return;
+      }
       const ready = attachments.filter((a) => a.status === "ready" && a.mediaId);
       if (ready.length === 0 && !body) return;
       setBusy(true);
@@ -1933,12 +2614,76 @@ export function Composer({
         // When text rides along with attachments, tag both with a shared
         // bundle_id so the timeline can render the attachments as pins on the
         // text bubble. With no text, attachments stand alone (no bundle).
-        const bundleId = body && ready.length > 0 ? newClientId() : null;
+        const isAlbum = ready.length >= 2;
+        const bundleId = !isAlbum && body && ready.length > 0 ? newClientId() : null;
         let sentAnnotations = false;
-        for (const a of ready) {
+        let albumQueued = false;
+        const queuedAttachmentIds = new Set<string>();
+        if (isAlbum) {
+          const annotationParents = new Set(
+            ready.flatMap((attachment) =>
+              attachment.kind === "annotations" && attachment.annotation?.sourceEventId
+                ? [attachment.annotation.sourceEventId]
+                : [],
+            ),
+          );
+          const albumReply = replyTo?.event_id ??
+            (annotationParents.size === 1 ? [...annotationParents][0] : undefined);
+          const content = buildAlbumContent(
+            ready.map((attachment) => ({
+              mediaId: attachment.mediaId as string,
+              filename:
+                attachment.kind === "annotations" && attachment.annotation
+                  ? attachment.annotation.annotatedName
+                  : attachment.name,
+            })),
+            body,
+          );
+          const sent = await sendOptimistic(
+            {
+              type: "m.album",
+              content,
+              ...(albumReply ? { reply_to_event_id: albumReply } : {}),
+            },
+            {
+              sizeBytes: ready.reduce((total, attachment) => total + attachment.size, 0),
+              afterDurableEnqueue: async (albumClientId) => {
+                const carbonId = authStore.getCarbon()?.carbon_id;
+                if (!carbonId) return;
+                const results = await Promise.allSettled(
+                  ready.map((attachment) =>
+                    patchMediaUpload(`carbon:${carbonId}`, attachment.id, {
+                      outboxClientId: albumClientId,
+                      state: "cleanup",
+                    }),
+                  ),
+                );
+                if (results.some((result) => result.status === "rejected")) {
+                  throw new Error("album ownership binding did not fully commit");
+                }
+              },
+            },
+          );
+          if (sent) {
+            albumQueued = true;
+            for (const attachment of ready) {
+              queuedAttachmentIds.add(attachment.id);
+              if (attachment.kind === "annotations" && attachment.annotation) {
+                clearAnnotationSession(roomId, attachment.annotation.sourceMediaId);
+                sentAnnotations = true;
+              }
+              const carbonId = authStore.getCarbon()?.carbon_id;
+              if (carbonId) {
+                await removeMediaUpload(`carbon:${carbonId}`, attachment.id).catch(() => undefined);
+              }
+            }
+            track.messageSent({ room_id: roomId, message_type: "m.album", has_attachment: true });
+          }
+        }
+        for (const a of isAlbum ? [] : ready) {
           if (a.kind === "annotations" && a.annotation) {
             // The generated annotated file → a normal m.file/m.image, reply-
-            // linked to the original so the thread + silicon reference it.
+            // linked to the original so replies + the silicon reference it.
             const d = a.annotation;
             const annType = d.annotatedMime.startsWith("image/") ? "m.image" : "m.file";
             const sent = await sendOptimistic({
@@ -1952,6 +2697,7 @@ export function Composer({
               ...(d.sourceEventId ? { reply_to_event_id: d.sourceEventId } : {}),
             });
             if (sent) {
+              queuedAttachmentIds.add(a.id);
               clearAnnotationSession(roomId, d.sourceMediaId);
               sentAnnotations = true;
               track.messageSent({ room_id: roomId, message_type: annType, has_attachment: true });
@@ -1968,30 +2714,75 @@ export function Composer({
                 filename: a.name,
                 ...(bundleId ? { bundle_id: bundleId } : {}),
               },
+              ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
             },
             { sizeBytes: a.size },
           );
           if (sent) {
+            queuedAttachmentIds.add(a.id);
+            const carbonId = authStore.getCarbon()?.carbon_id;
+            if (carbonId) {
+              await removeMediaUpload(`carbon:${carbonId}`, a.id).catch(() => undefined);
+            }
             track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
           }
         }
-        reset();
+        // Remove only attachments whose complete send semantics are now in the
+        // durable outbox. A storage failure leaves that row staged instead of
+        // clearing the whole composer and inviting an accidental duplicate.
+        const remainingAttachments = attachments.filter(
+          (attachment) => !queuedAttachmentIds.has(attachment.id),
+        );
+        setAttachments(remainingAttachments);
+        setDraftAttachments(
+          roomId,
+          remainingAttachments
+            .filter(
+              (attachment) =>
+                attachment.status === "ready" &&
+                attachment.mediaId &&
+                attachment.kind !== "annotations",
+            )
+            .map((attachment) => ({
+              id: attachment.id,
+              mediaId: attachment.mediaId as string,
+              mime: attachment.mime,
+              name: attachment.name,
+              size: attachment.size,
+            })),
+        );
         // An attached annotation set carried the reply to the file — clear it so
         // the next message isn't unexpectedly a reply (unless text handles it).
-        if (sentAnnotations && !body) onClearReply?.();
-        // Typed text rides as a *separate* message after the attachments,
+        if (sentAnnotations && !body && remainingAttachments.length === 0) onClearReply?.();
+        // For an album, typed text is its one root caption. For a lone legacy
+        // attachment it rides as a separate bundled message.
         // carrying the same bundle_id so they render together. If the user
         // typed @filename references, persist the resolved attachment ids too.
-        if (body) {
+        if (albumQueued) {
+          if (remainingAttachments.length === 0) {
+            await clearComposerAfterDurableTransfer();
+            onClearReply?.();
+          }
+        } else if (body) {
           const attachmentRefs = attachmentRefsForBody(body, ready);
           const extraContent = {
             ...(bundleId ? { bundle_id: bundleId } : {}),
             ...(attachmentRefs.length > 0 ? { attachment_refs: attachmentRefs } : {}),
           };
-          sendTextOptimistic(
+          const textQueued = await sendTextOptimistic(
             body,
             Object.keys(extraContent).length > 0 ? extraContent : undefined,
           );
+          if (textQueued) {
+            if (remainingAttachments.length === 0) {
+              await clearComposerAfterDurableTransfer();
+            } else if (await persistDraft("")) {
+              setText("");
+            }
+          }
+        } else if (remainingAttachments.length === 0 && queuedAttachmentIds.size > 0) {
+          await clearComposerAfterDurableTransfer();
+          onClearReply?.();
         }
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
@@ -2005,131 +2796,96 @@ export function Composer({
     if (!body) return;
     if (delayTextForSilicon) {
       // Every send (first or follow-up) enters the hold: it merges into the
-      // held batch and restarts the 10s window. The batch goes out once the
+      // held batch and restarts the 5s window. The batch goes out once the
       // window elapses with no new send / typing, or via "send now".
-      queueDelayedTextSend(body);
-      setText("");
-      clearDraftAfterSend(roomId);
+      const queued = await queueDelayedTextSend(body);
+      if (queued) {
+        await clearComposerAfterDurableTransfer();
+      }
       return;
     }
-    sendTextOptimistic(body);
-    setText("");
-    clearDraftAfterSend(roomId);
+    const queued = await sendTextOptimistic(body);
+    if (queued) {
+      await clearComposerAfterDurableTransfer();
+    }
   };
 
   // ----- Voice recording -----
 
-  const waitForVoiceTranscription = async (mediaId: string): Promise<string> => {
-    await api.stt({ media_id: mediaId });
-    const deadline = Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      const detail = await api.mediaDetail(mediaId);
-      if (detail.media.transcription_status === "ready") {
-        return detail.media.transcript;
-      }
-      if (detail.media.transcription_status === "failed") {
-        throw new Error("voice transcription failed - tap retry to try again");
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 750));
-    }
-    throw new Error("voice transcription is taking longer than usual - tap retry shortly");
-  };
-
-  const uploadVoice = async (blob: Blob, durationMs: number) => {
-    // Show the voice note instantly (with a pending clock) — don't make the
-    // user stare at nothing while it uploads.
-    const clientId = newClientId();
+  const uploadVoice = async (blob: Blob, durationMs: number, savedClientId?: string) => {
+    const clientId = savedClientId ?? newClientId();
     const mime = blob.type || "audio/webm";
-    const localUrl = URL.createObjectURL(blob);
-    onOptimisticAdd(
-      clientId,
-      {
-        type: "m.voice",
-        content: { duration_ms: durationMs, mime, local_url: localUrl },
-        reply_to_event_id: replyTo?.event_id,
-      },
-      { timeoutMs: sendTimeoutMs(blob.size) },
-    );
-    const peaksPromise = computePeaks(blob)
-      .then((peaks) => {
-        if (peaks) {
-          onOptimisticUpdate?.(clientId, {
-            type: "m.voice",
-            content: {
-              duration_ms: peaks.duration_ms || durationMs,
-              mime,
-              local_url: localUrl,
-              peaks: peaks.peaks,
-            },
-            reply_to_event_id: replyTo?.event_id,
-          });
-        }
-        return peaks;
-      })
-      .catch(() => null);
-    api.activity(roomId, "uploading", true).catch(() => undefined);
+    const replyEventId = replyTo?.event_id;
+    let localUrl: string | null = null;
+    let optimisticAdded = false;
+    let activityStarted = false;
     setBusy(true);
     try {
-      const filename = `voice-${Date.now()}.webm`;
-      const r = await api.presignUpload({
-        mime,
-        size: blob.size,
-        kind: "voice",
-        filename,
-        room_id: roomId,
-      });
-      const mediaId = r.media.media_id;
-      if (!r.upload.dev_mode) {
-        const form = new FormData();
-        for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-        form.append("file", blob, filename);
-        // §6.3 — Route the voice upload through the same xhr-with-progress +
-        // abort path the file picker uses, so a long note on a slow uplink
-        // shows progress and can be cancelled instead of an inert spinner.
-        setVoiceUploadPct(0);
-        await xhrUpload(
-          r.upload.url,
-          form,
-          setVoiceUploadPct,
-          voiceXhrRef,
-          sendTimeoutMs(blob.size),
-        );
-      }
-      // #6 — Send the peaks we computed during recording (durationMs is
-      // already known; the recorder reports it). This runs for dev uploads too
-      // so the server event has metadata after the optimistic row is replaced.
-      const peaks = await peaksPromise;
-      await api.mediaComplete(mediaId, {
-        duration_ms: peaks?.duration_ms || durationMs,
+      const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+      if (!outboxOwner) throw new Error("Please sign in again before sending this voice note");
+      const filename = `voice-${clientId}.webm`;
+      const peaks = await computePeaks(blob).catch(() => null);
+      const resolvedDuration = peaks?.duration_ms || durationMs;
+      const eventContent = {
+        duration_ms: resolvedDuration,
         ...(peaks ? { peaks: peaks.peaks } : {}),
-      });
-      const transcript = await waitForVoiceTranscription(mediaId);
-      const real = await api.sendEvent(
+      };
+      const entry = await stageMediaSendIntent({
+        outboxOwnerId: outboxOwner,
+        mediaOwnerId: `carbon:${outboxOwner}`,
         roomId,
+        clientId,
+        blob,
+        kind: "voice",
+        type: "m.voice",
+        filename,
+        mime,
+        optimisticContent: { ...eventContent, mime },
+        eventContent,
+        completionMeta: eventContent,
+        transcribe: true,
+        replyTo: replyEventId,
+      });
+      // The voice draft and media/outbox journals are now strict-commit safe.
+      // Only now may the timeline change or an upload/STT request begin.
+      localUrl = URL.createObjectURL(blob);
+      onOptimisticAdd(
+        clientId,
         {
           type: "m.voice",
-          content: {
-            media_id: mediaId,
-            mime,
-            duration_ms: peaks?.duration_ms || durationMs,
-            transcript,
-          },
-          reply_to_event_id: replyTo?.event_id,
+          content: { ...(entry.content ?? {}), local_url: localUrl },
+          ...(replyEventId ? { reply_to_event_id: replyEventId } : {}),
         },
-        clientId, // §2.3
+        { timeoutMs: sendTimeoutMs(blob.size) },
       );
+      optimisticAdded = true;
+      api.activity(roomId, "uploading", true).catch(() => undefined);
+      activityStarted = true;
+      setVoiceUploadPct(0);
+      const payload = await prepareMediaOutboxPayload(
+        outboxOwner,
+        entry,
+        undefined,
+        (pct) => setVoiceUploadPct(pct),
+        voiceXhrRef,
+      );
+      const real = await api.sendEvent(roomId, payload, clientId); // §2.3
       onAck(clientId, real);
+      await acknowledgeMediaSend(outboxOwner, entry, undefined, {
+        roomId,
+        event: real,
+      });
       onClearReply?.();
-      // §6.4 — Succeeded: the recording is safely on the server, so drop the
-      // retained blob.
+      // The media outbox retains its own source until acknowledgement. The
+      // redundant voice draft can now be cleared after authoritative success.
       await clearVoiceDraft(roomId);
       setPendingVoice(null);
       track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
-      onFail(clientId, e);
+      if (optimisticAdded) onFail(clientId, e);
       // Aborts, offline failures, and room switches all retain the same durable
       // draft. Only an explicit discard is allowed to delete captured audio.
-      const draft = { blob, durationMs, savedAt: Date.now() };
+      const draft = { blob, durationMs, savedAt: Date.now(), clientId };
       setPendingVoice(draft);
       await saveVoiceDraft(roomId, draft);
       if (!(e instanceof DOMException && e.name === "AbortError")) {
@@ -2142,20 +2898,20 @@ export function Composer({
       // §6.4 — Revoke the object URL in `finally` regardless of outcome. The
       // optimistic bubble has already captured the bytes it needs (peaks +
       // duration); leaving the URL live leaked blob memory on every failure.
-      URL.revokeObjectURL(localUrl);
-      api.activity(roomId, "uploading", false).catch(() => undefined);
+      if (localUrl) URL.revokeObjectURL(localUrl);
+      if (activityStarted) api.activity(roomId, "uploading", false).catch(() => undefined);
     }
   };
 
   const onVoiceSubmit = (blob: Blob, durationMs: number) => {
     api.activity(roomId, "recording", false).catch(() => undefined);
-    const draft = { blob, durationMs, savedAt: Date.now() };
+    const draft = { blob, durationMs, savedAt: Date.now(), clientId: newClientId() };
     setPendingVoice(draft);
     void (async () => {
       // Persist before beginning the upload so a refresh/crash during transfer
       // still leaves a recoverable copy.
       await saveVoiceDraft(roomId, draft);
-      await uploadVoice(blob, durationMs);
+      await uploadVoice(blob, durationMs, draft.clientId);
     })();
   };
 
@@ -2170,12 +2926,91 @@ export function Composer({
     );
   }
 
-  const holdRemainingSeconds = holdEndsAt == null
-    ? 0
-    : Math.max(0, Math.ceil((holdEndsAt - holdNowMs) / 1000));
-
   return (
     <div className="space-y-2 border-t bg-background p-2">
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {busy || editSaving
+          ? "Sending message"
+          : anyUploading
+            ? "Uploading attachment"
+            : composerAnnouncement}
+      </div>
+      <Dialog
+        open={draftConflict !== null && dismissedDraftConflict !== draftConflictSignature}
+        onOpenChange={(open) => {
+          if (!open && draftConflictSignature) setDismissedDraftConflict(draftConflictSignature);
+        }}
+      >
+        <DialogContent className="w-[calc(100vw-2rem)] max-w-md">
+          <DialogHeader>
+            <DialogTitle>Draft changed on another device</DialogTitle>
+            <DialogDescription>
+              Choose which version to keep. Your draft on this device will remain saved until you decide.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border bg-muted/40 p-3 text-sm">
+            <div className="mb-1 text-xs font-medium text-muted-foreground">Other device</div>
+            <div className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
+              {draftConflict?.text || (draftConflict?.cleared_at ? "The other device cleared this draft." : "Empty draft")}
+            </div>
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => resolveDraftConflict(roomId, "local")}
+            >
+              Keep this device
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                resolveDraftConflict(roomId, "remote");
+                restoreComposerSnapshot(roomId);
+              }}
+            >
+              Use other device
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {draftSync.error && draftSync.blocked && draftConflict === null && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 border border-input bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+          role="status"
+        >
+          <span>
+            This draft is safe here, but needs your attention before it can be saved everywhere.
+          </span>
+          <button
+            type="button"
+            onClick={() => retryDraftSync(roomId)}
+            className="font-medium text-foreground underline-offset-2 hover:underline"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+      {(draftSync.localDurabilityPending || draftSync.localDurabilityError) && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+          role="alert"
+          aria-live="assertive"
+        >
+          <span>
+            {draftSync.localDurabilityError ??
+              "Saving this draft to the device. Stay in this chat until it finishes."}
+          </span>
+          <button
+            type="button"
+            disabled={draftSync.localDurabilityPending}
+            onClick={() => void retryLocalDraftPersistence(roomId)}
+            className="font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+          >
+            {draftSync.localDurabilityPending ? "Saving…" : "Try again"}
+          </button>
+        </div>
+      )}
       {replyTo && (
         <div className="flex items-start gap-2 border-l-2 border-foreground/60 bg-card px-2 py-1 text-xs">
           <ArrowBendUpLeft className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-60" />
@@ -2183,8 +3018,16 @@ export function Composer({
             <div className="label-mono text-[10px] opacity-60">
               replying to {replyTo.sender_handle ? `@${replyTo.sender_handle}` : "message"}
             </div>
-            <div className="truncate text-foreground/80">
-              {replyTo.type === "m.voice" ? (
+            <div
+              className={cn(
+                "truncate text-foreground/80",
+                replyTo.redacted_at && "text-destructive",
+              )}
+              role={replyTo.redacted_at ? "alert" : undefined}
+            >
+              {replyTo.redacted_at ? (
+                "original message was deleted — remove this reply target to send"
+              ) : replyTo.type === "m.voice" ? (
                 <span className="inline-flex items-center gap-1 align-middle">
                   <Microphone className="h-3 w-3 shrink-0" /> voice note
                 </span>
@@ -2224,6 +3067,35 @@ export function Composer({
           </button>
         </div>
       )}
+      {gifAcquisitions.map(({ entry, error }) => (
+        <div
+          key={entry.clientId}
+          className="flex flex-wrap items-center justify-between gap-3 border border-input bg-card px-3 py-2 text-xs"
+          role="status"
+        >
+          <span className="min-w-0">
+            <span className="font-medium">
+              {entry.media?.acquisition?.title || entry.media?.filename || "GIF"}
+            </span>{" "}
+            <span className="text-muted-foreground">
+              {error
+                ? `— ${error}`
+                : entry.media?.phase === "staged"
+                  ? "— saved; sending…"
+                  : "— saved; acquiring source…"}
+            </span>
+          </span>
+          {error && (
+            <button
+              type="button"
+              onClick={() => void processDurableGif(entry)}
+              className="font-medium text-foreground underline-offset-2 hover:underline"
+            >
+              retry
+            </button>
+          )}
+        </div>
+      ))}
       {attachments.length > 0 && (
         // Inset to line up with the text box (past the 44px attach/send buttons
         // + 8px gap on each side), so attachments are as wide as the chat box.
@@ -2295,7 +3167,13 @@ export function Composer({
           <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
-              onClick={() => void uploadVoice(pendingVoice.blob, pendingVoice.durationMs)}
+              onClick={() =>
+                void uploadVoice(
+                  pendingVoice.blob,
+                  pendingVoice.durationMs,
+                  pendingVoice.clientId,
+                )
+              }
               disabled={busy}
               className="font-medium text-foreground underline-offset-2 hover:underline"
             >
@@ -2312,37 +3190,6 @@ export function Composer({
             >
               discard
             </button>
-          </div>
-        </div>
-      )}
-      {queuedTextCount > 0 && (queuePaused || holdEndsAt != null) && (
-        <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-3 py-2 text-xs text-muted-foreground" role="status">
-          <span className="min-w-0">
-            {holdEndsAt != null
-              ? `sending in ${holdRemainingSeconds} second${holdRemainingSeconds === 1 ? "" : "s"}.`
-              : editingHeld
-                ? "holding this message until you finish editing."
-                : "holding the message until you finish typing."}
-          </span>
-          <div className="flex shrink-0 items-center gap-4">
-            {holdEndsAt != null && (
-              <button
-                type="button"
-                onClick={() => void waitOneMoreMinute()}
-                className="font-medium text-foreground underline-offset-2 hover:underline"
-              >
-                add 60 more seconds
-              </button>
-            )}
-            {!editingHeld && (
-              <button
-                type="button"
-                onClick={() => void flushDelayedTextQueue()}
-                className="font-medium text-foreground underline-offset-2 hover:underline"
-              >
-                send now
-              </button>
-            )}
           </div>
         </div>
       )}
@@ -2419,17 +3266,37 @@ export function Composer({
             ref={taRef}
             autoFocus
             value={text}
-            onFocus={() => setDraftFocused(roomId, true)}
-            onBlur={() => {
+            onFocus={(event) => {
+              setDraftFocused(roomId, true);
+              persistComposerSelection(event.currentTarget, true);
+            }}
+            onBlur={(event) => {
+              persistComposerSelection(event.currentTarget, true);
               setDraftFocused(roomId, false);
               flushDraft(roomId);
             }}
-            onCompositionStart={() => setMentionInputComposing(true)}
+            onSelect={(event) => {
+              persistComposerSelection(event.currentTarget);
+            }}
+            onPointerDown={noteComposerInteraction}
+            onPointerUp={(event) => persistComposerSelection(event.currentTarget, true)}
+            onKeyUp={(event) => persistComposerSelection(event.currentTarget, true)}
+            onCompositionStart={() => {
+              noteComposerInteraction();
+              setMentionInputComposing(true);
+            }}
             onCompositionEnd={() => setMentionInputComposing(false)}
             onChange={(e) => {
+              noteComposerInteraction();
               const v = e.target.value;
               setText(v);
-              if (!isEditing) persistDraft(v);
+              if (!isEditing) {
+                persistDraft(v, {
+                  start: e.target.selectionStart,
+                  end: e.target.selectionEnd,
+                  direction: e.target.selectionDirection as DraftSelectionDirection,
+                });
+              }
               if (v) beaconTyping();
               // Detect a `:foo` token at the caret. If found, open picker.
               // The `(?<![\w])` lookbehind stops the trigger firing inside
@@ -2438,9 +3305,9 @@ export function Composer({
               // character, to be treated as an emoji shortcode start.
               const caret = e.target.selectionStart ?? v.length;
               const upTo = v.slice(0, caret);
-              const m = upTo.match(/(?<![\w]):([a-z0-9_+\-]*)$/i);
-              if (m) {
-                setEmojiQuery(m[1] ?? "");
+              const shortcode = emojiShortcodeQuery(upTo);
+              if (shortcode !== null) {
+                setEmojiQuery(shortcode);
                 setEmojiIdx(0);
               } else {
                 setEmojiQuery(null);
@@ -2467,6 +3334,7 @@ export function Composer({
               mirror.scrollLeft = event.currentTarget.scrollLeft;
             }}
             onPaste={(e) => {
+              noteComposerInteraction();
               // Paste a screenshot (or any file) to attach it. We only consume
               // the event when the clipboard actually carries a file — a normal
               // text paste falls through to the default behavior untouched.
@@ -2481,6 +3349,7 @@ export function Composer({
               }
             }}
             onKeyDown={(e) => {
+              noteComposerInteraction();
               // §6.8 — Suppress all of the picker/send key handling while an
               // IME is composing so a composition-commit Enter doesn't pick an
               // emoji or send.
@@ -2541,22 +3410,7 @@ export function Composer({
                 if (e.key === "Tab" || (e.key === "Enter" && results.length > 0)) {
                   e.preventDefault();
                   const picked = results[emojiIdx] ?? results[0];
-                  if (picked) {
-                    const caret = taRef.current?.selectionStart ?? text.length;
-                    const before = text.slice(0, caret);
-                    const after = text.slice(caret);
-                    const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, picked.emoji);
-                    const nextText = replaced + after;
-                    setText(nextText);
-                    if (!isEditing) persistDraft(nextText);
-                    setEmojiQuery(null);
-                    queueMicrotask(() => {
-                      const el = taRef.current;
-                      if (!el) return;
-                      const pos = replaced.length;
-                      el.selectionStart = el.selectionEnd = pos;
-                    });
-                  }
+                  if (picked) insertEmoji(picked.emoji, true);
                   return;
                 }
                 if (e.key === "Escape") {
@@ -2603,13 +3457,17 @@ export function Composer({
                 onClearReply?.();
                 return;
               }
-              if (e.key === "Enter" && !e.shiftKey) {
-                // §6.8 — Don't send mid-IME-composition. While a CJK (or any)
-                // input method is composing, Enter *commits the candidate* —
-                // sending here would fire a half-composed message. `isComposing`
-                // is the modern signal; keyCode 229 is the legacy fallback some
-                // browsers still report during composition.
-                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              const enterAction = composerEnterAction({
+                key: e.key,
+                behavior: enterBehavior,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                metaKey: e.metaKey,
+                altKey: e.altKey,
+                isComposing: e.nativeEvent.isComposing,
+                keyCode: e.keyCode,
+              });
+              if (enterAction === "send") {
                 e.preventDefault();
                 if (sendDisabled) {
                   toast.message(sendDisabledReason);
@@ -2668,6 +3526,7 @@ export function Composer({
             onClick={send}
             disabled={
               sendDisabled ||
+              localDraftUnsafe ||
               busy ||
               editSaving ||
               anyUploading ||
@@ -2683,20 +3542,26 @@ export function Composer({
             )}
           </button>
         )}
-        <Popover open={gifOpen} onOpenChange={setGifOpen}>
+        <Popover open={expressionPickerOpen} onOpenChange={setExpressionPickerOpen}>
           <PopoverTrigger asChild>
             <button
               type="button"
-              title="add GIF"
-              aria-label="add GIF"
+              title="add emoji or GIF"
+              aria-label="add emoji or GIF"
               disabled={sendDisabled || busy || isEditing}
               className="flex h-11 w-11 shrink-0 items-center justify-center border border-input bg-transparent text-foreground transition-opacity hover:opacity-70 disabled:opacity-50"
             >
-              <Gif className="h-5 w-5" />
+              <Smiley className="h-5 w-5" />
             </button>
           </PopoverTrigger>
           <PopoverContent side="top" align="end" sideOffset={8} className="w-auto">
-            <GifPicker onPick={(gif) => void sendGif(gif)} />
+            <ComposerExpressionPicker
+              onPickEmoji={(emoji) => {
+                insertEmoji(emoji);
+                setExpressionPickerOpen(false);
+              }}
+              onPickGif={(gif) => void sendGif(gif)}
+            />
           </PopoverContent>
         </Popover>
         {emojiQuery !== null && (
@@ -2705,16 +3570,7 @@ export function Composer({
             selectedIndex={emojiIdx}
             cols={emojiCols}
             limit={emojiLimit}
-            onPick={(em) => {
-              const caret = taRef.current?.selectionStart ?? text.length;
-              const before = text.slice(0, caret);
-              const after = text.slice(caret);
-              const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, em);
-              setText(replaced + after);
-              if (!isEditing) persistDraft(replaced + after);
-              setEmojiQuery(null);
-              queueMicrotask(() => taRef.current?.focus());
-            }}
+            onPick={(emoji) => insertEmoji(emoji, true)}
           />
         )}
         {mentionQuery !== null && (

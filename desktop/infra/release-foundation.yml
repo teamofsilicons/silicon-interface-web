@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Private S3 and CloudFront release foundation for Silicon Interface desktop.
+
+Parameters:
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: Issued us-east-1 ACM certificate for downloads.teamofsilicons.com.
+  ReleaseDomain:
+    Type: String
+    Default: downloads.teamofsilicons.com
+  GitHubOwner:
+    Type: String
+    Default: teamofsilicons
+  GitHubOwnerId:
+    Type: String
+    Default: "293847080"
+  GitHubRepository:
+    Type: String
+    Default: silicon-interface-web
+  GitHubRepositoryId:
+    Type: String
+    Default: "1246439206"
+
+Conditions:
+  HasIssuedCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Resources:
+  ReleaseBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetireNoncurrentReleaseVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Product
+          Value: Silicon Interface
+        - Key: Purpose
+          Value: Desktop releases
+
+  ReleaseOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: silicon-interface-desktop-releases
+        Description: Signed CloudFront reads from the private desktop release bucket.
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ReleaseResponseHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: silicon-interface-desktop-release-headers
+        Comment: CORS and browser hardening for public release downloads.
+        CorsConfig:
+          AccessControlAllowCredentials: false
+          AccessControlAllowHeaders:
+            Items: ["*"]
+          AccessControlAllowMethods:
+            Items: [GET, HEAD, OPTIONS]
+          AccessControlAllowOrigins:
+            Items: ["*"]
+          AccessControlExposeHeaders:
+            Items: [ETag, Content-Length]
+          AccessControlMaxAgeSec: 86400
+          OriginOverride: true
+        SecurityHeadersConfig:
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: no-referrer
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+
+  UpdateMetadataCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: silicon-interface-desktop-update-metadata
+        Comment: Fast propagation and rollback for mutable updater pointers.
+        DefaultTTL: 30
+        MaxTTL: 60
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  ReleaseDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases: !If
+          - HasIssuedCertificate
+          - [!Ref ReleaseDomain]
+          - !Ref AWS::NoValue
+        CacheBehaviors:
+          - PathPattern: interface/stable/*/latest*.yml
+            TargetOriginId: release-bucket
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref UpdateMetadataCachePolicy
+            ResponseHeadersPolicyId: !Ref ReleaseResponseHeaders
+          - PathPattern: interface/stable/release-manifest.json
+            TargetOriginId: release-bucket
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref UpdateMetadataCachePolicy
+            ResponseHeadersPolicyId: !Ref ReleaseResponseHeaders
+          - PathPattern: interface/stable/SHA256SUMS.txt
+            TargetOriginId: release-bucket
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref UpdateMetadataCachePolicy
+            ResponseHeadersPolicyId: !Ref ReleaseResponseHeaders
+          - PathPattern: interface/stable/desktop.sbom.cdx.json
+            TargetOriginId: release-bucket
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref UpdateMetadataCachePolicy
+            ResponseHeadersPolicyId: !Ref ReleaseResponseHeaders
+        Comment: Silicon Interface signed desktop downloads
+        DefaultCacheBehavior:
+          TargetOriginId: release-bucket
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref ReleaseResponseHeaders
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        Origins:
+          - DomainName: !GetAtt ReleaseBucket.RegionalDomainName
+            Id: release-bucket
+            OriginAccessControlId: !GetAtt ReleaseOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        PriceClass: PriceClass_200
+        ViewerCertificate: !If
+          - HasIssuedCertificate
+          - AcmCertificateArn: !Ref CertificateArn
+            MinimumProtocolVersion: TLSv1.2_2021
+            SslSupportMethod: sni-only
+          - CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: Product
+          Value: Silicon Interface
+        - Key: Purpose
+          Value: Desktop releases
+
+  ReleaseBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReleaseBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${ReleaseBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ReleaseDistribution}
+
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Product
+          Value: Silicon Interface
+
+  GitHubDesktopReleaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SiliconInterfaceDesktopRelease
+      Description: Publish signed desktop releases from tag-triggered GitHub Actions only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubActionsOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              ForAnyValue:StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOwner}/${GitHubRepository}:ref:refs/tags/desktop-v*
+                  - !Sub repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:ref:refs/tags/desktop-v*
+      Policies:
+        - PolicyName: PublishDesktopRelease
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListStableReleasePrefix
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt ReleaseBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - interface/stable
+                      - interface/stable/*
+              - Sid: PublishStableReleaseObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource: !Sub ${ReleaseBucket.Arn}/interface/stable/*
+              - Sid: InvalidateDesktopReleaseDistribution
+                Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ReleaseDistribution}
+      Tags:
+        - Key: Product
+          Value: Silicon Interface
+        - Key: Purpose
+          Value: GitHub desktop release publisher
+
+Outputs:
+  BucketName:
+    Value: !Ref ReleaseBucket
+  DistributionId:
+    Value: !Ref ReleaseDistribution
+  DistributionDomainName:
+    Value: !GetAtt ReleaseDistribution.DomainName
+  GitHubReleaseRoleArn:
+    Value: !GetAtt GitHubDesktopReleaseRole.Arn
+  ReleaseDomain:
+    Value: !Ref ReleaseDomain
+  ReleaseEndpoint:
+    Value: !If
+      - HasIssuedCertificate
+      - !Sub https://${ReleaseDomain}
+      - !Sub https://${ReleaseDistribution.DomainName}

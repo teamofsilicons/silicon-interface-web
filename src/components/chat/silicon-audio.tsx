@@ -214,24 +214,27 @@ export function SiliconAudio({ url, peaks, durationMs, autoPlay = false, classNa
       <span className="shrink-0 label-mono text-[10px] opacity-60">
         {formatTime(currentMs)}/{formatTime(dur)}
       </span>
-      <button
-        type="button"
-        onClick={toggleMute}
-        aria-label={muted ? "unmute audio" : "mute audio"}
-        className="grid size-7 shrink-0 place-items-center opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current [&_svg]:size-4"
-      >
-        {muted ? <SpeakerSlash /> : <SpeakerHigh />}
-      </button>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step="0.05"
-        value={muted ? 0 : volume}
-        onChange={(event) => changeVolume(Number(event.target.value))}
-        aria-label="audio volume"
-        className="hidden h-7 w-10 shrink-0 accent-current sm:block"
-      />
+      <div className="group/volume relative shrink-0">
+        <button
+          type="button"
+          onClick={toggleMute}
+          aria-label={muted ? "unmute audio" : "mute audio"}
+          className="grid size-7 place-items-center opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current [&_svg]:size-4"
+        >
+          {muted ? <SpeakerSlash /> : <SpeakerHigh />}
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step="0.05"
+          value={muted ? 0 : volume}
+          onChange={(event) => changeVolume(Number(event.target.value))}
+          aria-label="audio volume"
+          style={{ writingMode: "vertical-lr", direction: "rtl" }}
+          className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 h-24 w-8 -translate-x-1/2 translate-y-1 border border-current bg-background py-2 text-foreground opacity-0 shadow-sm accent-current transition-all duration-150 ease-out group-hover/volume:pointer-events-auto group-hover/volume:translate-y-0 group-hover/volume:opacity-100 group-focus-within/volume:pointer-events-auto group-focus-within/volume:translate-y-0 group-focus-within/volume:opacity-100"
+        />
+      </div>
       <button
         type="button"
         onClick={cycleRate}

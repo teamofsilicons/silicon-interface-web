@@ -2,20 +2,37 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { ArrowDown, Check, Checks, Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
-import { cn, dayLabel } from "@/lib/utils";
+import { loadStoredRoomEvents, storeEvents } from "@/lib/chat-store";
+import { evictCachedMedia } from "@/lib/media-cache";
+import {
+  SyncIntegrityError,
+  validateHistoryPage,
+  type HistoryTraversal,
+} from "@/lib/sync-integrity";
+import {
+  classifySyncFailure,
+  reportSyncRecovered,
+  reportSyncRecovery,
+  syncRecoveryState,
+} from "@/lib/sync-recovery";
+import { cn, dayLabel, relativeTimeAgo } from "@/lib/utils";
+import { presenceIsOnline } from "@/lib/presence-state";
 import { authStore, useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent, playAckTick, vibrate } from "@/lib/sounds";
 import {
   shouldPromptNotifications,
   markNotificationsAsked,
+  closeBrowserNotification,
+  removeNotificationByEvent,
   requestBrowserNotifications,
-  usePresence,
 } from "@/lib/notifications";
+import { projectRedactedEvent, projectRedactedWindow } from "@/lib/redaction-state";
 import type { AnnotationDraft, Event, EventType, HeldSend, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
 import {
@@ -29,13 +46,132 @@ import {
   clearPendingPreview,
   failPendingPreview,
 } from "@/lib/pending-preview";
-import { advanceEventCursor } from "@/lib/event-cursor";
 import { track } from "@/lib/analytics";
-import { ackOutbox, enqueueOutbox } from "@/lib/outbox";
+import {
+  ackOutbox,
+  commitOutboxCorrection,
+  discardOutbox,
+  enqueueOutbox,
+  listOutbox,
+  type OutboxEntry,
+} from "@/lib/outbox";
+import {
+  heldCancellationCanHide,
+  listHeldCancellations,
+  maySendHeldOutbox,
+  withOutboxClientLock,
+} from "@/lib/held-cancellation";
+import {
+  acceptedHeldSend,
+  eventForSentHeld,
+  isAmbiguousSendFailure,
+} from "@/lib/operation-recovery";
+import {
+  ABUSE_CHALLENGE_SOLVED_EVENT,
+  challengeFromErrorBody,
+  rememberAbuseChallenge,
+} from "@/lib/abuse-challenge-store";
+import {
+  OUTBOX_RETRY_SCHEDULED_EVENT,
+  persistOutboxFailure,
+  prepareManualOutboxRetry,
+  wakeOutboxRecovery,
+} from "@/lib/outbox-recovery";
+import {
+  discardMediaSend,
+  replaceMediaOutboxSource,
+  restartMediaUploadGeneration,
+} from "@/lib/media-send";
+import { ensureDeviceRegistration } from "@/lib/device-registration";
+import {
+  isUnreadEligibleEvent,
+  roomOpenReadTarget,
+  selectUnreadDividerEventId,
+  selectVisibleReadTarget,
+} from "@/lib/unread-boundary";
+import {
+  classifySendFailure,
+  sendFailureFromHeld,
+  sendFailureMessage,
+  type CorrectionAction,
+  type SendFailureRecord,
+} from "@/lib/send-failure";
+import {
+  heldSendDeadline,
+  heldChallengeUsableOnDevice,
+  heldSendBelongsToDevice,
+  heldSendMaySchedule,
+  heldSendProjectionKey,
+  heldSendUiState,
+} from "@/lib/held-send-state";
+import {
+  restoredOutboxStatus,
+  statusAfterSendFailure,
+  statusAfterSendTimeout,
+} from "@/lib/outbox-ui-state";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
-import { setDraftReply, useDraftReply } from "@/lib/drafts";
+import { SILICON_TEXT_HOLD_MS } from "@/lib/silicon-hold";
+import { isGifMedia } from "@/lib/media-meta";
+import {
+  anchorPixelCorrection,
+  findVirtualAnchorIndex,
+} from "@/lib/virtualization-anchor";
+import { countNovelHistoryRows, hasNovelHistoryRows } from "@/lib/history-window";
+import { belongsToSameTimelinePanel } from "@/lib/timeline-panel";
+import {
+  shouldLoadOlderDuringRangeChange,
+  timelineViewportPadding,
+} from "@/lib/timeline-text-selection";
+import { authoritativeEditConflict } from "@/lib/edit-conflict";
+import { reconcileReplyTarget } from "@/lib/reply-state";
+import { chatConnectingCopy } from "@/lib/connection-status";
+import { messageReceiptPresentation } from "@/lib/message-receipt";
+import { mergeSearchPage, recentLocalSearch } from "@/lib/reliable-search";
+import {
+  aggregateReactions,
+  applyOwnReactionOverride,
+  normalizeReactionEmoji,
+  ownReactionIsActive,
+  reactionIntentKey,
+  reconcileReactionResult,
+  retryReactionMutation,
+} from "@/lib/reaction-state";
+import {
+  allowDraftNavigation,
+  setDraft,
+  setDraftReply,
+  useDraftReply,
+} from "@/lib/drafts";
 import { useVoiceRecordingSession } from "@/lib/voice-recording-session";
 import { loadCachedTeamRoster, saveCachedTeamRoster } from "@/lib/sidebar-cache";
+import {
+  canSendPlaintextToRoom,
+  normalizeDeliveryObject,
+  normalizeDeliverySummary,
+} from "@/lib/delivery-state";
+import { deviceId } from "@/lib/device-id";
+import {
+  createModerationReportIntent,
+  listModerationReportIntents,
+  MODERATION_REPORT_RETRY_SCHEDULED_EVENT,
+  writeModerationReportIntent,
+  type ModerationReportRetryScheduledDetail,
+  type ModerationReportIntent,
+  type ModerationReportReason,
+} from "@/lib/moderation-report-journal";
+import { createModerationReportRecoveryScheduler } from "@/lib/moderation-report-recovery";
+import {
+  applyTimelineIdentity,
+  bindAcceptedTimelineEvent,
+  canEditAuthoritativeTimelineEvent,
+  ensureTimelineIdentitySync,
+  hasAuthoritativeEventId,
+  identityFromPersistedFields,
+  readTimelineIdentity,
+  reconcileTimelineEvents,
+  timelineRenderKey,
+  type TimelineEvent,
+} from "@/lib/timeline-identity";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -49,7 +185,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import {
   Composer,
-  type ComposerRestoreDraft,
+  type CancelQueuedResult,
+  type ComposerCopyDraft,
   type MentionCandidate,
   type OptimisticPayload,
 } from "@/components/chat/composer";
@@ -62,6 +199,8 @@ import { sendTimeoutMs } from "@/lib/send-timeout";
 import type { AnnotationOpenRequest } from "@/components/chat/media-previewer";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 import { CronDrawer } from "@/components/chat/cron-drawer";
+import { SiliconBrowserMark } from "@/components/chat/remote-browser-card";
+import { SiliconBrowserDialog } from "@/components/chat/silicon-browser-dialog";
 import { SaveContactDialog } from "@/components/chat/save-contact-dialog";
 import type { Contact } from "@/lib/types";
 import { contactKey } from "@/lib/use-contacts";
@@ -73,6 +212,7 @@ interface Props {
   allRooms: Room[];
   socket: {
     ready: boolean;
+    state?: "offline" | "captive" | "degraded" | "connecting" | "authenticating" | "syncing" | "online";
     send: (frame: object) => void;
     // QA §2.1: subscribe to EVERY frame (no coalescing). Returns an unsubscribe.
     subscribe: (fn: (f: WsFrame) => void) => () => void;
@@ -83,22 +223,36 @@ interface Props {
   onContactsChanged?: () => void;
   /** The parent is confirming fresh room metadata; avoid showing stale offline state. */
   connectionStatePending?: boolean;
+  /** Fired only after Glass commits a genuinely visible read target. */
+  onReadThrough?: (eventId: string, streamPosition: number) => void;
 }
 
-type LocalEvent = Event & {
+type LocalEvent = TimelineEvent & {
   _status?: MessageStatus;
-  _clientId?: string;
   _sendTimeoutAt?: string;
   _sendTimeoutMs?: number;
+  _failure?: SendFailureRecord;
+  _nextAttemptAt?: number;
+  _heldSendId?: string;
+  _heldVersion?: number;
+  _heldChallengeDeviceMismatch?: boolean;
 };
 
-const VISIBLE_HELD_SEND_MS = 10_000;
+type PendingTextCorrection = {
+  event: LocalEvent;
+  action: "edit_message" | "review_input";
+  text: string;
+};
+
+const VISIBLE_HELD_SEND_MS = SILICON_TEXT_HOLD_MS;
 const MAX_EXTENDED_HELD_SEND_MS = 300_000;
 const HELD_SEND_RECOVERY_MAX_DELAY_MS = MAX_EXTENDED_HELD_SEND_MS + 100;
 
 function localHeldReleaseAt(held: HeldSend): string {
   const now = Date.now();
-  const serverHoldMs = Date.parse(held.release_at) - Date.parse(held.updated_at || held.created_at);
+  const serverHoldMs =
+    Date.parse(heldSendDeadline(held)) -
+    Date.parse(held.updated_at || held.created_at);
   const localDelay = Number.isFinite(serverHoldMs)
     ? Math.min(MAX_EXTENDED_HELD_SEND_MS, Math.max(0, serverHoldMs))
     : VISIBLE_HELD_SEND_MS;
@@ -124,9 +278,39 @@ interface ProgressEntry {
   handle?: string | null;
   /** Carbon message this run is working on — anchors the status under it. */
   anchorEventId?: string | null;
-  /** Receipt phase shown right after sending, before real work progress:
-   *  "sent" → "read" → (after a moment) the actual silicon progress. */
-  receipt?: "sent" | "read";
+  /** Plain recipient activity shown before real work progress. */
+  receipt?:
+    | "waiting"
+    | "partially_delivered"
+    | "delivered"
+    | "partially_read"
+    | "read";
+}
+
+type ActivityReceipt = NonNullable<ProgressEntry["receipt"]>;
+
+function activityReceiptFromDeliveries(
+  deliveries: Record<string, NonNullable<Event["delivery"]>> | undefined,
+): ActivityReceipt | null {
+  const statuses = Object.values(deliveries ?? {}).map(
+    (delivery) => normalizeDeliveryObject(delivery).state,
+  );
+  if (statuses.length === 0) return null;
+  if (statuses.every((status) => status === "read")) return "read";
+  if (
+    statuses.every(
+      (status) =>
+        status === "delivered" || status === "partially_read" || status === "read",
+    )
+  ) {
+    return statuses.every((status) => status === "delivered")
+      ? "delivered"
+      : "partially_read";
+  }
+  if (statuses.some((status) => status === "partially_delivered")) {
+    return "partially_delivered";
+  }
+  return "waiting";
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
@@ -142,10 +326,13 @@ function replyPreviewOf(event: Event): string {
     const body = String(content.body ?? "");
     return body.length > 80 ? `${body.slice(0, 80)}…` : body;
   }
-  if (event.type === "m.image") return "photo";
+  if (event.type === "m.image") {
+    return isGifMedia(content.mime, content.filename) ? "GIF" : "photo";
+  }
   if (event.type === "m.file") {
     return String(content.filename ?? content.caption ?? "attachment");
   }
+  if (event.type === "m.album") return String(content.caption ?? "attachments");
   if (event.type === "m.voice") return "voice note";
   if (event.type === "m.remote_browser") return "Silicon Browser link";
   if (event.type === "m.tts") return "audio";
@@ -159,10 +346,17 @@ function outgoingPreviewText(payload: OptimisticPayload): string {
   switch (payload.type) {
     case "m.text":
       return String(c.body ?? "");
-    case "m.image":
-      return c.caption ? String(c.caption) : "photo";
+    case "m.image": {
+      const caption = c.caption ? String(c.caption) : "";
+      if (isGifMedia(c.mime, c.filename)) return caption ? `GIF · ${caption}` : "GIF";
+      return caption || "photo";
+    }
     case "m.file":
       return c.filename ? String(c.filename) : "attachment";
+    case "m.album": {
+      const count = Array.isArray(c.items) ? c.items.length : 0;
+      return c.caption ? String(c.caption) : count ? `${count} attachments` : "attachments";
+    }
     case "m.voice":
       return "voice note";
     case "m.tts":
@@ -180,12 +374,13 @@ const PROGRESS_MESSAGE_TYPES = new Set([
   "m.text",
   "m.image",
   "m.file",
+  "m.album",
   "m.voice",
   "m.tts",
   "m.remote_browser",
 ]);
 const MIN_PROGRESS_STATUS_MS = 1000;
-// How long a "message sent / read" receipt shows before switching to the
+// How long recipient activity shows before switching to the
 // actual silicon work progress.
 const RECEIPT_HOLD_MS = 3000;
 // §1.1 — progress staleness. We keep showing the last live line as long as the
@@ -196,18 +391,21 @@ const PROGRESS_STALE_HARD_MS = 100_000;
 const SEARCH_INTERVAL = 40;
 const SEARCH_DEBOUNCE_MS = 280;
 
-// The "loading earlier…" indicator at the top of the timeline. Constant height
+// The earlier-history connection indicator has constant height
 // (just fades in/out) so toggling it never shoves the list up/down.
 function ChatListHeader({ loadingOlder }: { loadingOlder: boolean }) {
   return (
     <div className="flex justify-center pb-2 pt-4">
       <span
+        role="status"
+        aria-live="polite"
+        aria-hidden={!loadingOlder}
         className={cn(
           "label-mono text-[11px] text-muted-foreground transition-opacity",
           loadingOlder ? "opacity-100" : "opacity-0",
         )}
       >
-        loading earlier…
+        Connecting…
       </span>
     </div>
   );
@@ -224,7 +422,9 @@ const PAGE_SIZE = 30;
 const RAW_SCAN_PAGE_SIZE = 200;
 
 function isTimelineEvent(event: Event): boolean {
-  return event.type !== "m.reaction" && event.type !== "m.progress" && !event.redacted_at;
+  // Signal/Element keep a stable tombstone row so replies, scroll anchors, and
+  // unread boundaries do not collapse when content is redacted.
+  return event.type !== "m.reaction" && event.type !== "m.progress";
 }
 
 /**
@@ -234,49 +434,90 @@ function isTimelineEvent(event: Event): boolean {
  * progress-heavy tail can fill the latest API page and make an established
  * conversation look empty with no scroll surface available to reach history.
  */
-async function loadTimelineWindow(roomId: string, before?: string) {
+async function loadTimelineWindow(
+  roomId: string,
+  pageCursor?: string | null,
+  anchor?: string,
+  expectedBefore?: string,
+  knownEventIds: ReadonlySet<string> = new Set(),
+) {
   const pages: Event[][] = [];
   const seenCursors = new Set<string>();
-  let cursor = before;
+  let cursor = pageCursor ?? "";
   let visibleCount = 0;
   let requestLimit = PAGE_SIZE;
   let hasMore = false;
+  let nextCursor: string | null = cursor;
+  let traversal: HistoryTraversal = {
+    throughEventId: undefined,
+    seenEventIds: new Set<string>(),
+    oldestEventId: anchor ?? expectedBefore,
+  };
+  if (cursor) seenCursors.add(cursor);
 
   while (visibleCount < PAGE_SIZE) {
-    const page = await api.events(roomId, cursor, requestLimit);
-    if (page.length === 0) {
+    const page = await api.historyPage(
+      roomId,
+      cursor,
+      requestLimit,
+      "backward",
+      cursor ? undefined : anchor,
+    );
+    traversal = validateHistoryPage(page, traversal, roomId);
+    if (page.events.length === 0) {
       hasMore = false;
+      nextCursor = null;
       break;
     }
 
-    pages.unshift(page);
-    visibleCount += page.filter(isTimelineEvent).length;
-    hasMore = page.length >= requestLimit;
+    pages.unshift(page.events);
+    // A durable cache can paint farther back than the first live response.
+    // Keep advancing the *same signed traversal* until this window contains a
+    // useful number of timeline rows that the caller does not already own.
+    // Counting cached overlap here would strand the user at scrollTop=0 with
+    // a cursor that still points inside the cached range.
+    visibleCount += countNovelHistoryRows(page.events, knownEventIds, isTimelineEvent);
+    hasMore = page.has_more && Boolean(page.cursor);
+    nextCursor = page.cursor;
     if (!hasMore || visibleCount >= PAGE_SIZE) break;
 
-    const nextCursor = page[0]?.event_id;
-    if (!nextCursor || seenCursors.has(nextCursor)) {
-      hasMore = false;
-      break;
+    if (!page.cursor || seenCursors.has(page.cursor)) {
+      throw new SyncIntegrityError(
+        "history",
+        "page_invariant",
+        "History continuation did not make progress.",
+        { roomId },
+      );
     }
-    seenCursors.add(nextCursor);
-    cursor = nextCursor;
+    seenCursors.add(page.cursor);
+    cursor = page.cursor;
     requestLimit = RAW_SCAN_PAGE_SIZE;
   }
 
-  return { events: pages.flat(), hasMore };
+  return {
+    events: pages.flat(),
+    hasMore,
+    cursor: hasMore ? nextCursor : null,
+    boundaryEventId: traversal.oldestEventId ?? null,
+  };
 }
 
-// Receipt progression is monotonic — pending → sent → delivered → read. The WS
-// echo ("delivered") and read_receipts ("read") often land BEFORE the HTTP send
-// ack, so an ack must never knock a message back down to "sent". `bestStatus`
+// Receipt progression is monotonic — waiting → delivered → read. The WS echo
+// and read receipts often land BEFORE the HTTP send ack, so an ack must never
+// knock a message back down to waiting. `bestStatus`
 // keeps whichever status is further along.
 const STATUS_RANK: Record<MessageStatus, number> = {
   failed: -1,
   pending: 0,
+  resolving: 0,
+  retry_wait: 0,
+  retrying: 0,
+  challenge: 0,
   sent: 1,
-  delivered: 2,
-  read: 3,
+  partially_delivered: 2,
+  delivered: 3,
+  partially_read: 4,
+  read: 5,
 };
 function bestStatus(
   a: MessageStatus | undefined,
@@ -287,6 +528,11 @@ function bestStatus(
   return STATUS_RANK[a] >= STATUS_RANK[b] ? a : b;
 }
 
+function serverDeliveryStatus(event: Event): MessageStatus {
+  return event.delivery?.state ?? "sent";
+}
+
+/* eslint-disable react-hooks/preserve-manual-memoization -- RoomView is explicitly opted out of compiler memoization until its durable journal/socket/viewport state is split into smaller components. */
 export function RoomView({
   room,
   allRooms,
@@ -294,11 +540,46 @@ export function RoomView({
   contacts,
   onContactsChanged,
   connectionStatePending = false,
+  onReadThrough,
 }: Props) {
+  "use no memo";
+  // RoomView intentionally coordinates multiple durable journals, websocket
+  // projections, and viewport anchors. Keep the React Compiler out until these
+  // independently stateful surfaces are split into smaller components.
   const router = useRouter();
+  const {
+    ready: socketReady,
+    state: socketState,
+    send: socketSend,
+    subscribe: socketSubscribe,
+  } = socket;
   const { carbon } = useAuth();
   const myUsername = carbon?.username ?? null;
+  const timelineOwner = carbon?.carbon_id ?? "session";
+  const timelineDevice = authStore.getBoundDeviceId() ?? deviceId();
+  const reportHistoryFailure = React.useCallback((error: unknown) => {
+    const owner = carbon?.carbon_id;
+    if (!owner) return;
+    const decision = classifySyncFailure(error, "history");
+    void reportSyncRecovery(owner, {
+      phase: "degraded",
+      reason: decision.reason,
+      stream: "history",
+      details: { ...decision.details, roomId: room.room_id },
+    });
+  }, [carbon?.carbon_id, room.room_id]);
+  const reportHistoryHealthy = React.useCallback(() => {
+    const owner = carbon?.carbon_id;
+    if (!owner) return;
+    void syncRecoveryState(owner).then((record) => {
+      if (record?.phase !== "recovered" && record?.stream === "history") {
+        return reportSyncRecovered(owner, record, ["history"]);
+      }
+      return null;
+    }).catch(() => undefined);
+  }, [carbon?.carbon_id]);
   const display = roomDisplay(room);
+  const plaintextSendAllowed = canSendPlaintextToRoom(room.security_mode);
   const voiceSession = useVoiceRecordingSession();
   const recordingRoomId = voiceSession.roomId;
   const recordingOrigin = React.useMemo(
@@ -316,15 +597,40 @@ export function RoomView({
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
   // header title (saved name vs @id), avatar, and the Save Contact button.
   const peer = room.kind === "direct" && peers.length === 1 ? peers[0] : null;
+  const carbonPresence = peer?.kind === "carbon" ? peer.presence : undefined;
+  const presenceOnline = presenceIsOnline(carbonPresence);
+  const lastSeen = carbonPresence?.last_seen_at
+    ? relativeTimeAgo(carbonPresence.last_seen_at)
+    : "";
+  const carbonPresenceLabel =
+    carbonPresence?.state === "hidden"
+      ? null
+      : presenceOnline
+        ? "online"
+        : lastSeen
+          ? `last seen ${lastSeen}`
+          : carbonPresence
+            ? "offline"
+            : null;
   const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
-  const [siliconConnectionState, setSiliconConnectionState] = React.useState(
-    peer?.kind === "silicon" ? peer.connection_state || "online" : "online",
-  );
-  React.useEffect(() => {
-    setSiliconConnectionState(
-      peer?.kind === "silicon" ? peer.connection_state || "online" : "online",
-    );
-  }, [peer?.id, peer?.kind, peer?.connection_state, room.room_id]);
+  const siliconConnectionKey =
+    peer?.kind === "silicon" ? `${room.room_id}:${peer.id}` : null;
+  const [polledSiliconConnection, setPolledSiliconConnection] = React.useState<{
+    key: string;
+    metadataState: string;
+    state: string;
+  } | null>(null);
+  // A poll result only applies to the exact room+peer it queried. Deriving the
+  // fallback directly from room metadata prevents a stale offline result from
+  // flashing when the user switches rooms, without an effect-driven reset.
+  const metadataSiliconConnectionState =
+    peer?.kind === "silicon" ? peer.connection_state || "online" : "online";
+  const siliconConnectionState =
+    siliconConnectionKey &&
+    polledSiliconConnection?.key === siliconConnectionKey &&
+    polledSiliconConnection.metadataState === metadataSiliconConnectionState
+      ? polledSiliconConnection.state
+      : metadataSiliconConnectionState;
   const siliconUnavailable =
     peer?.kind === "silicon" && !connectionStatePending && siliconConnectionState !== "online";
   const [saveOpen, setSaveOpen] = React.useState(false);
@@ -340,7 +646,6 @@ export function RoomView({
   // no read-receipts (I'm not a member, so the read POST would 403 anyway).
   const readOnly = !!room.observed;
   const showsProgressForReplies = !readOnly && peers.some((p) => p.kind === "silicon");
-
   React.useEffect(() => {
     if (peer?.kind !== "silicon" || connectionStatePending) return;
     let alive = true;
@@ -350,7 +655,11 @@ export function RoomView({
         const nextPeer =
           next.kind === "direct" ? next.peers.find((item) => item.kind === "silicon") : null;
         if (alive && nextPeer) {
-          setSiliconConnectionState(nextPeer.connection_state || "online");
+          setPolledSiliconConnection({
+            key: `${room.room_id}:${nextPeer.id}`,
+            metadataState: peer.connection_state || "online",
+            state: nextPeer.connection_state || "online",
+          });
         }
       } catch {
         /* keep the offline flag and retry on the next tick */
@@ -362,15 +671,34 @@ export function RoomView({
       alive = false;
       window.clearInterval(timer);
     };
-  }, [connectionStatePending, peer?.kind, room.room_id]);
+  }, [connectionStatePending, peer?.connection_state, peer?.kind, room.room_id]);
 
   const [events, setEvents] = React.useState<LocalEvent[]>([]);
+  // While a desired-state mutation is in flight, this projection wins over
+  // delayed/out-of-order WS echoes. Requests for the same reaction are chained
+  // so rapid cross-device-style toggles converge in click order.
+  const [reactionOverrides, setReactionOverrides] = React.useState<Record<string, boolean>>({});
+  const reactionGenerationRef = React.useRef(new Map<string, number>());
+  const reactionChainsRef = React.useRef(new Map<string, Promise<void>>());
+  const reactionRoomRef = React.useRef(room.room_id);
+  React.useEffect(() => {
+    reactionRoomRef.current = room.room_id;
+    reactionGenerationRef.current.clear();
+    reactionChainsRef.current.clear();
+    queueMicrotask(() => {
+      if (reactionRoomRef.current === room.room_id) setReactionOverrides({});
+    });
+  }, [room.room_id]);
   const [loading, setLoading] = React.useState(true);
+  const chatConnectionStatus = chatConnectingCopy(
+    socketState,
+    loading && events.length === 0,
+  );
   // §2.5 — true only once the live fetch resolves. Auto-read is gated on this so
   // we never clear unread for messages that are only in the localStorage cache.
   const [hydrated, setHydrated] = React.useState(false);
   const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
-  // Drives the "sent → read → (after a moment) real progress" sequence.
+  // Drives the "waiting → delivered → read" activity sequence.
   const receiptTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearReceiptTimer = React.useCallback(() => {
     if (receiptTimerRef.current) {
@@ -378,10 +706,10 @@ export function RoomView({
       receiptTimerRef.current = null;
     }
   }, []);
-  // Show a "message sent"/"message read" receipt line, then after a beat fall
-  // through to the actual silicon work progress.
+  // Show plain recipient activity, then after a beat fall through to the
+  // actual silicon work progress.
   const showReceipt = React.useCallback(
-    (kind: "sent" | "read") => {
+    (kind: ActivityReceipt) => {
       setActiveProgress({
         roomId: room.room_id,
         groupId: `receipt:${room.room_id}`,
@@ -410,16 +738,26 @@ export function RoomView({
   const [holdingMessage, setHoldingMessage] = React.useState(false);
   // The composer publishes its cancelQueued(clientId) here so deleting a held
   // message's bubble drops it from the send queue.
-  const cancelQueuedRef = React.useRef<((clientId: string) => void) | null>(null);
+  const cancelQueuedRef = React.useRef<
+    ((clientId: string) => Promise<CancelQueuedResult>) | null
+  >(null);
   const clearHeldClientRef = React.useRef<((clientId: string) => void) | null>(null);
   // §1.1 — a monotonically-advancing tick used to detect a progress line that
   // has gone stale (silicon crashed / backend restarted with no `done` frame).
   const [progressNow, setProgressNow] = React.useState(() => Date.now());
-  // §1.9 — a message arrived while scrolled up; show a "jump to latest" pill.
-  const [unseenBelow, setUnseenBelow] = React.useState(false);
+  // Messages received while the user is reading history are counted on the
+  // always-available jump-to-bottom control.
+  const [unseenBelow, setUnseenBelow] = React.useState(0);
+  const [timelineAtBottom, setTimelineAtBottom] = React.useState(true);
   // §2.7 — "load older" pagination past the latest 100-event window.
   const [hasMore, setHasMore] = React.useState(false);
+  const [historyCursor, setHistoryCursor] = React.useState<string | null>(null);
+  // The oldest raw event proven by `historyCursor`'s fixed traversal. This is
+  // intentionally separate from `events[0]`: a durable cache may contain a
+  // much older projection than the live page that issued the cursor.
+  const [historyBoundaryEventId, setHistoryBoundaryEventId] = React.useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = React.useState(false);
+  const loadingOlderRef = React.useRef(false);
   // §2.2 — deltas/finals that arrive before their creating `event` frame (a
   // reconnect gap or out-of-order delivery) are buffered by event_id and
   // flushed onto the event when it lands, so streamed text is never lost.
@@ -431,10 +769,166 @@ export function RoomView({
   // twice under StrictMode's double-invoked updater).
   const firstContactRef = React.useRef(false);
   const [profileOpen, setProfileOpen] = React.useState(false);
+  const [reportTarget, setReportTarget] = React.useState<Event | null>(null);
+  const [reportReason, setReportReason] = React.useState<ModerationReportReason>("spam");
+  const [reportDetails, setReportDetails] = React.useState("");
+  const [reportSubmitting, setReportSubmitting] = React.useState(false);
+  const reportsSendingRef = React.useRef(new Set<string>());
   const [focusSender, setFocusSender] = React.useState<{
     kind: "carbon" | "silicon";
     handle: string;
   } | null>(null);
+
+  const deliverModerationReport = React.useCallback(async (intent: ModerationReportIntent) => {
+    if (reportsSendingRef.current.has(intent.clientId) || intent.state === "accepted" || intent.state === "blocked") {
+      return intent.state;
+    }
+    reportsSendingRef.current.add(intent.clientId);
+    const attempt = intent.attempts + 1;
+    const sending: ModerationReportIntent = {
+      ...intent,
+      state: "sending",
+      attempts: attempt,
+      nextAttemptAt: null,
+      errorCode: null,
+      updatedAt: Date.now(),
+    };
+    try {
+      // Save the attempt before transport. A crash after the POST is repaired
+      // by replaying the exact client id, which Glass resolves idempotently.
+      await writeModerationReportIntent(sending);
+      const receipt = await api.reportMessage({
+        target_kind: sending.targetKind,
+        target_id: sending.targetId,
+        reason: sending.reason,
+        details: sending.details,
+        client_id: sending.clientId,
+        event_id: sending.eventId,
+      });
+      await writeModerationReportIntent({
+        ...sending,
+        state: "accepted",
+        reportId: receipt.report_id,
+        updatedAt: Date.now(),
+      });
+      return "accepted" as const;
+    } catch (error) {
+      const apiError = error instanceof ApiError ? error : null;
+      const permanent = apiError !== null && [400, 403, 404, 409, 422].includes(apiError.status);
+      const retryDelay = Math.min(
+        60 * 60 * 1000,
+        apiError?.retryAfterMs ?? Math.min(60_000, 1_000 * 2 ** Math.min(attempt - 1, 6)),
+      );
+      const failed: ModerationReportIntent = {
+        ...sending,
+        state: permanent ? "blocked" : "retry_wait",
+        nextAttemptAt: permanent ? null : Date.now() + Math.max(1_000, retryDelay),
+        errorCode: apiError ? `http_${apiError.status}` : "transport_unavailable",
+        updatedAt: Date.now(),
+      };
+      // If this write fails, the earlier durable `sending` state remains and
+      // restart recovery safely retries the same immutable request.
+      await writeModerationReportIntent(failed).catch(() => undefined);
+      return failed.state;
+    } finally {
+      reportsSendingRef.current.delete(intent.clientId);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const ownerId = carbon?.carbon_id;
+    if (!ownerId) return;
+    const scheduler = createModerationReportRecoveryScheduler({
+      recover: async () => {
+        if (typeof navigator !== "undefined" && !navigator.onLine) return null;
+        const rows = await listModerationReportIntents(ownerId).catch(() => []);
+        const now = Date.now();
+        const due = rows.filter(
+          (row) =>
+            row.state === "pending" ||
+            row.state === "sending" ||
+            (row.state === "retry_wait" && (row.nextAttemptAt ?? 0) <= now),
+        );
+        await Promise.all(due.map((row) => deliverModerationReport(row)));
+        const refreshed = await listModerationReportIntents(ownerId).catch(() => []);
+        return refreshed
+          .filter((row) => row.state === "retry_wait" && row.nextAttemptAt !== null)
+          .reduce<number | null>(
+            (earliest, row) => earliest === null
+              ? row.nextAttemptAt
+              : Math.min(earliest, row.nextAttemptAt!),
+            null,
+          );
+      },
+    });
+    const online = () => scheduler.wake();
+    const retryScheduled = (event: globalThis.Event) => {
+      const detail = (
+        event as CustomEvent<ModerationReportRetryScheduledDetail>
+      ).detail;
+      if (detail?.ownerId !== ownerId) return;
+      scheduler.schedule(detail.nextAttemptAt);
+    };
+    window.addEventListener("online", online);
+    window.addEventListener(
+      MODERATION_REPORT_RETRY_SCHEDULED_EVENT,
+      retryScheduled,
+    );
+    scheduler.wake();
+    return () => {
+      window.removeEventListener("online", online);
+      window.removeEventListener(
+        MODERATION_REPORT_RETRY_SCHEDULED_EVENT,
+        retryScheduled,
+      );
+      scheduler.cancel();
+    };
+  }, [carbon?.carbon_id, deliverModerationReport]);
+
+  const submitModerationReport = React.useCallback(async () => {
+    if (!reportTarget || !carbon?.carbon_id || reportSubmitting) return;
+    const targetId = reportTarget.sender_public_id ||
+      (reportTarget.sender_kind === "carbon" ? reportTarget.sender_handle : null);
+    if (!targetId || (reportTarget.sender_kind !== "carbon" && reportTarget.sender_kind !== "silicon")) {
+      toast.error("This older message cannot be safely identified. Refresh the chat and try again.");
+      return;
+    }
+    setReportSubmitting(true);
+    try {
+      const intent = createModerationReportIntent({
+        ownerId: carbon.carbon_id,
+        targetKind: reportTarget.sender_kind,
+        targetId,
+        eventId: reportTarget.event_id,
+        reason: reportReason,
+        details: reportDetails.trim(),
+      });
+      // The dialog is not dismissed until this exact report is owned by at
+      // least one durable browser store.
+      await writeModerationReportIntent(intent);
+      const state = await deliverModerationReport(intent);
+      setReportTarget(null);
+      setReportDetails("");
+      setReportReason("spam");
+      if (state === "accepted") toast.success("report received");
+      else if (state === "retry_wait") toast.info("Report saved. We’ll send it when connected.");
+      else toast.error("report saved, but it needs your attention");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "report could not be saved");
+    } finally {
+      setReportSubmitting(false);
+    }
+  }, [
+    carbon,
+    deliverModerationReport,
+    reportDetails,
+    reportReason,
+    reportSubmitting,
+    reportTarget,
+    setReportDetails,
+    setReportReason,
+    setReportTarget,
+  ]);
   const [replyTo, setReplyTo] = React.useState<Event | null>(null);
   const draftReply = useDraftReply(room.room_id);
   const restoredDraftReplyIdRef = React.useRef<string | null>(null);
@@ -458,7 +952,10 @@ export function RoomView({
     [room.room_id],
   );
   const [editingEvent, setEditingEvent] = React.useState<Event | null>(null);
-  const [restoreDraft, setRestoreDraft] = React.useState<ComposerRestoreDraft | null>(null);
+  const [composerCopy, setComposerCopy] = React.useState<ComposerCopyDraft | null>(null);
+  const [pendingTextCorrection, setPendingTextCorrection] =
+    React.useState<PendingTextCorrection | null>(null);
+  const [replacementTarget, setReplacementTarget] = React.useState<LocalEvent | null>(null);
   // A flattened annotation set handed off from the studio, staged into the
   // composer as a reply-linked draft (consumed by the composer, then cleared).
   const [pendingAnnotationDraft, setPendingAnnotationDraft] =
@@ -471,17 +968,27 @@ export function RoomView({
   const [searchResults, setSearchResults] = React.useState<Event[] | null>(null);
   const [searchLoading, setSearchLoading] = React.useState(false);
   const [searchHasMore, setSearchHasMore] = React.useState(false);
-  const searchBlockRef = React.useRef(0);
+  const [searchNotice, setSearchNotice] = React.useState<string | null>(null);
+  const searchCursorRef = React.useRef<string | null>(null);
+  const searchGenerationRef = React.useRef(0);
   const messageNodeRefs = React.useRef(new Map<string, HTMLDivElement>());
+  const unreadDividerNodeRef = React.useRef<HTMLDivElement | null>(null);
   const [highlightedEventId, setHighlightedEventId] = React.useState<string | null>(null);
   const highlightTimerRef = React.useRef<number | null>(null);
   const [pendingJumpEventId, setPendingJumpEventId] = React.useState<string | null>(null);
   const lookupTargetRef = React.useRef<string | null>(null);
   const lookupRunRef = React.useRef(0);
   const [replyJumpState, setReplyJumpState] = React.useState<
-    Record<string, { status: "loading" | "continue" | "error"; message?: string; cursor?: string }>
+    Record<string, {
+      status: "loading" | "continue" | "error";
+      message?: string;
+      cursor?: string;
+      throughEventId?: string | null;
+      oldestEventId?: string;
+    }>
   >({});
   const [cronOpen, setCronOpen] = React.useState(false);
+  const [browserOpen, setBrowserOpen] = React.useState(false);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
   // #5 — Per-handle activity state. Each entry expires after `until`.
@@ -489,11 +996,17 @@ export function RoomView({
     Record<string, { state: "typing" | "uploading" | "recording"; until: number }>
   >({});
   React.useEffect(() => {
-    lookupRunRef.current += 1;
+    const lookupRun = ++lookupRunRef.current;
     lookupTargetRef.current = null;
-    setLoadingOlder(false);
-    setPendingJumpEventId(null);
-    setReplyJumpState({});
+    loadingOlderRef.current = false;
+    queueMicrotask(() => {
+      if (lookupRunRef.current !== lookupRun) return;
+      setLoadingOlder(false);
+      setHistoryCursor(null);
+      setHistoryBoundaryEventId(null);
+      setPendingJumpEventId(null);
+      setReplyJumpState({});
+    });
   }, [room.room_id]);
   // Clear expired activity entries on a 2s interval.
   React.useEffect(() => {
@@ -511,16 +1024,8 @@ export function RoomView({
     }, 2000);
     return () => window.clearInterval(id);
   }, []);
-  // Build a (kind, id) → handle lookup so activity frames can name a sender.
-  const memberHandleLookup = React.useMemo(() => {
-    const m = new Map<string, string>();
-    for (const p of peers) {
-      m.set(`${p.kind}.${p.handle}`, p.handle);
-    }
-    return m;
-  }, [peers]);
   const handleFor = React.useCallback(
-    (kind: "carbon" | "silicon", id: number): string | null => {
+    (kind: "carbon" | "silicon"): string | null => {
       // We don't reliably know peer member_id ↔ handle on the client (Glass
       // doesn't expose Carbon.id). For 1-on-1 rooms there's exactly one
       // peer — assume it's them. For groups we'd need an extra projection;
@@ -529,37 +1034,126 @@ export function RoomView({
       // Fallback: any peer whose kind matches.
       return peers.find((p) => p.kind === kind)?.handle ?? null;
     },
-    // memberHandleLookup is used for future group lookups; kept in deps so
-    // a future projection refresh re-evaluates.
-    [peers, memberHandleLookup],
+    [peers],
   );
 
   const sectionRef = React.useRef<HTMLElement>(null);
-  // The main timeline is a plain scroll container (like WhatsApp/Slack/Telegram
-  // web): the browser's native scroll-anchoring keeps the viewport steady when
-  // content above it loads (images) or is prepended (older history), so nothing
-  // shifts — and there are no virtualization blank-flashes. The window is small
-  // (a page at a time), so the DOM node count stays bounded.
+  // Virtuoso owns the long timeline DOM. We still retain its concrete scroller
+  // for visibility geometry/read receipts and exact pixel-anchor correction.
   const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
+  const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
+  const timelineLengthRef = React.useRef(0);
+  // Native browser selection and a virtualized list normally fight each
+  // other: as the pointer auto-scrolls, Virtuoso recycles the DOM node that
+  // owns the selection anchor and the browser drops the highlight. While a
+  // timeline selection exists we retain the loaded window and pause structural
+  // history mutations/autoscrolls. This keeps selection native (including the
+  // platform copy menu) without making the full history expensive all the
+  // time.
+  const [textSelectionActive, setTextSelectionActive] = React.useState(false);
+  const textSelectionActiveRef = React.useRef(false);
+  const activeRoomIdRef = React.useRef(room.room_id);
+  React.useLayoutEffect(() => {
+    activeRoomIdRef.current = room.room_id;
+  }, [room.room_id]);
+  const selectionGestureRef = React.useRef(false);
+  const selectionEndWaitersRef = React.useRef(new Set<() => void>());
+  const updateTextSelectionActive = React.useCallback((active: boolean) => {
+    textSelectionActiveRef.current = active;
+    setTextSelectionActive((current) => (current === active ? current : active));
+    if (!active && selectionEndWaitersRef.current.size > 0) {
+      const waiters = [...selectionEndWaitersRef.current];
+      selectionEndWaitersRef.current.clear();
+      waiters.forEach((resolve) => resolve());
+    }
+  }, []);
+  const waitForTextSelectionEnd = React.useCallback(() => {
+    if (!textSelectionActiveRef.current) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      selectionEndWaitersRef.current.add(resolve);
+    });
+  }, []);
   // Tracks whether the user is parked at the bottom — gates "stick to bottom".
   const stickToBottomRef = React.useRef(true);
-  // Set just before older history is prepended; the layout effect reads it to
-  // restore the viewport so loading a page doesn't jump the user.
-  const pendingPrependRef = React.useRef<{ height: number; top: number } | null>(null);
+  // Stable event + exact viewport pixel captured before a prepend. After
+  // Virtuoso receives the older page, we find that event's new virtual index
+  // and restore the same pixel—not merely an approximate scrollTop.
+  const pendingPrependRef = React.useRef<{ eventId: string; offset: number } | null>(null);
 
   const scrollToBottom = React.useCallback((behavior: "auto" | "smooth" = "auto") => {
-    const el = scrollerRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior });
+    const index = timelineLengthRef.current - 1;
+    if (index >= 0) virtuosoRef.current?.scrollToIndex({ index, align: "end", behavior });
   }, []);
 
   const requestBottomStick = React.useCallback(
     (behavior: "auto" | "smooth" = "smooth") => {
+      if (textSelectionActiveRef.current) return;
       stickToBottomRef.current = true;
+      setTimelineAtBottom(true);
+      setUnseenBelow(0);
       requestAnimationFrame(() => scrollToBottom(behavior));
     },
     [scrollToBottom],
   );
+
+  // Keep all currently loaded message nodes mounted for the lifetime of a
+  // native selection. `selectstart` fires before the browser creates its
+  // range, so pin immediately; `selectionchange` then keeps the pin until the
+  // user actually clears/collapses that range. Pointer-up alone must not
+  // release it because the selected range is still live and copyable.
+  React.useEffect(() => {
+    const root = scrollerRef.current;
+    if (!root) return;
+
+    const selectionTouchesTimeline = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+      const anchor = selection.anchorNode;
+      const focus = selection.focusNode;
+      return Boolean((anchor && root.contains(anchor)) || (focus && root.contains(focus)));
+    };
+    const onSelectStart = (event: globalThis.Event) => {
+      const target = event.target;
+      if (!(target instanceof Node) || !root.contains(target)) return;
+      selectionGestureRef.current = true;
+      updateTextSelectionActive(true);
+    };
+    const onSelectionChange = () => {
+      if (selectionGestureRef.current) {
+        if (selectionTouchesTimeline()) updateTextSelectionActive(true);
+        return;
+      }
+      updateTextSelectionActive(selectionTouchesTimeline());
+    };
+    const onPointerEnd = () => {
+      selectionGestureRef.current = false;
+      requestAnimationFrame(onSelectionChange);
+    };
+
+    root.addEventListener("selectstart", onSelectStart);
+    document.addEventListener("selectionchange", onSelectionChange);
+    window.addEventListener("pointerup", onPointerEnd);
+    window.addEventListener("pointercancel", onPointerEnd);
+    return () => {
+      root.removeEventListener("selectstart", onSelectStart);
+      document.removeEventListener("selectionchange", onSelectionChange);
+      window.removeEventListener("pointerup", onPointerEnd);
+      window.removeEventListener("pointercancel", onPointerEnd);
+      selectionGestureRef.current = false;
+      updateTextSelectionActive(false);
+    };
+  }, [hydrated, room.room_id, search, updateTextSelectionActive]);
+
+  // A history page that finishes while the user is selecting must not prepend
+  // and regroup the first virtual row underneath the browser's live Range.
+  // Release any waiter on unmount/room change as well so no request is left
+  // suspended behind a selection that belongs to an obsolete timeline.
+  React.useEffect(() => () => {
+    const waiters = [...selectionEndWaitersRef.current];
+    selectionEndWaitersRef.current.clear();
+    waiters.forEach((resolve) => resolve());
+  }, [room.room_id]);
 
   // ----- Photo URL lookup per sender (for in-message avatars) -----
   const peerByHandle = React.useMemo(() => {
@@ -571,28 +1165,35 @@ export function RoomView({
   // already a peer in this room. Load the team roster when the room belongs to a
   // team; direct/Others chats fall back to the room peers alone.
   const ownerId = carbon?.carbon_id ?? null;
-  const [teamRoster, setTeamRoster] = React.useState<TeamMembership[]>(
-    () => loadCachedTeamRoster(ownerId, room.team_slug ?? null) ?? [],
+  const rosterSlug = room.team_slug ?? null;
+  const [teamRosterResult, setTeamRosterResult] = React.useState<{
+    ownerId: string | null;
+    slug: string | null;
+    rows: TeamMembership[];
+  }>(() => ({
+    ownerId,
+    slug: rosterSlug,
+    rows: loadCachedTeamRoster(ownerId, rosterSlug) ?? [],
+  }));
+  const teamRoster = React.useMemo(
+    () =>
+      teamRosterResult.ownerId === ownerId && teamRosterResult.slug === rosterSlug
+        ? teamRosterResult.rows
+        : loadCachedTeamRoster(ownerId, rosterSlug) ?? [],
+    [ownerId, rosterSlug, teamRosterResult],
   );
   React.useEffect(() => {
     const slug = room.team_slug;
-    if (!slug) {
-      setTeamRoster([]);
-      return;
-    }
-    const cached = loadCachedTeamRoster(ownerId, slug);
-    if (cached) setTeamRoster(cached);
+    if (!slug) return;
     let alive = true;
     api
       .teamMembers(slug)
       .then((rows) => {
         if (!alive) return;
-        setTeamRoster(rows);
+        setTeamRosterResult({ ownerId, slug, rows });
         saveCachedTeamRoster(ownerId, slug, rows);
       })
-      .catch(() => {
-        if (alive && !cached) setTeamRoster([]);
-      });
+      .catch(() => undefined);
     return () => {
       alive = false;
     };
@@ -728,6 +1329,7 @@ export function RoomView({
     let mounted = true;
     const roomId = room.room_id;
     const cachedEvents = readRoomEventSnippet(roomId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- room changes require one atomic pre-paint reset so stale timeline/outbox state never appears in the next room.
     setLoading(!cachedEvents?.some(isTimelineEvent));
     setHydrated(false);
     // Messages present when the chat opens are historical — force them final so
@@ -739,7 +1341,7 @@ export function RoomView({
         const cachedStatus = local._status;
         const fallbackStatus =
           !e.event_id.startsWith("temp-") && isMyEvent(e, myUsername)
-            ? ("delivered" as MessageStatus)
+            ? serverDeliveryStatus(e)
             : undefined;
         return {
           ...e,
@@ -757,39 +1359,194 @@ export function RoomView({
     restoredDraftReplyIdRef.current = null;
     setReplyTo(null);
     setEditingEvent(null);
-    setRestoreDraft(null);
+    setComposerCopy(null);
+    setPendingTextCorrection(null);
+    setReplacementTarget(null);
     setFocusSender(null);
     setProfileOpen(false);
-    setUnseenBelow(false);
+    setUnseenBelow(0);
+    setTimelineAtBottom(true);
     deltaBufferRef.current.clear();
     firstContactRef.current = false;
+    let durableCacheAvailable = false;
+    const cacheOwner = authStore.getCarbon()?.carbon_id;
+    if (cacheOwner) {
+      void Promise.all([listOutbox(cacheOwner), listHeldCancellations(cacheOwner)]).then(([entries, cancellations]) => {
+        if (!mounted || !myUsername) return;
+        const terminalCancellations = new Set(
+          cancellations
+            .filter(heldCancellationCanHide)
+            .map((row) => row.clientId),
+        );
+        const pendingCancellations = new Set(
+          cancellations
+            .filter((row) => row.state === "pending")
+            .map((row) => row.clientId),
+        );
+        const pending = entries
+          .filter(
+            (entry) =>
+              entry.roomId === roomId &&
+              !terminalCancellations.has(entry.clientId) &&
+              !(entry.operation === "media" && entry.media?.phase === "acquiring"),
+          )
+          .map((entry): LocalEvent => {
+            const timeoutMs = sendTimeoutMs();
+            const identity =
+              entry.localKey &&
+              typeof entry.localSequence === "number" &&
+              entry.originDevice &&
+              entry.localCreatedAt
+                ? identityFromPersistedFields(cacheOwner, entry.clientId, {
+                    localKey: entry.localKey,
+                    localSequence: entry.localSequence,
+                    originDevice: entry.originDevice,
+                    localCreatedAt: entry.localCreatedAt,
+                  })
+                : ensureTimelineIdentitySync(
+                    cacheOwner,
+                    entry.clientId,
+                    timelineDevice,
+                    entry.at,
+                  );
+            const placeholder: LocalEvent = {
+              event_id: TEMP_ID(entry.clientId),
+              room: 0,
+              sender_kind: "carbon",
+              sender_id: null,
+              sender_handle: myUsername,
+              type: (entry.type ?? "m.text") as Event["type"],
+              content:
+                entry.type && entry.type !== "m.text"
+                  ? { ...(entry.content ?? {}) }
+                  : { ...(entry.content ?? {}), body: entry.body },
+              reply_to_event_id: entry.replyTo ?? "",
+              is_final: true,
+              created_at: new Date(entry.at).toISOString(),
+              edited_at: null,
+              redacted_at: null,
+              redaction_reason: "",
+              _status: pendingCancellations.has(entry.clientId)
+                ? "retrying"
+                : restoredOutboxStatus(entry.state, entry.attempts ?? 0),
+              _clientId: entry.clientId,
+              _failure: entry.failure,
+              _nextAttemptAt: entry.nextAttemptAt,
+              _sendTimeoutMs: timeoutMs,
+              _sendTimeoutAt: new Date(
+                Math.max(Date.now() + 1_000, entry.at + timeoutMs),
+              ).toISOString(),
+            };
+            return applyTimelineIdentity(placeholder, identity);
+          });
+        if (!pending.length) return;
+        for (const row of pending) {
+          setPendingPreview(roomId, {
+            clientId: row._clientId as string,
+            text: outgoingPreviewText({
+              type: row.type,
+              content: row.content,
+              reply_to_event_id: row.reply_to_event_id || undefined,
+            }),
+            status:
+              row._status === "failed" || row._status === "challenge"
+                ? "failed"
+                : "waiting",
+          });
+        }
+        setEvents((prev) =>
+          mergeServerEvents(prev, pending, myUsername, timelineOwner, timelineDevice),
+        );
+        setLoading(false);
+      }).catch(() => undefined);
+      void loadStoredRoomEvents(cacheOwner, roomId, 100).then((stored) => {
+        if (!mounted || stored.length === 0) return;
+        durableCacheAvailable = true;
+        setEvents((prev) =>
+          mergeServerEvents(prev, stored, myUsername, timelineOwner, timelineDevice),
+        );
+        setLoading(false);
+      });
+    }
     loadTimelineWindow(roomId)
-      .then(({ events: evs, hasMore }) => {
+      .then(({ events: evs, hasMore, cursor, boundaryEventId }) => {
         if (!mounted) return;
-        // Room loads count as "seen" for the global resync cursor.
-        const owner = authStore.getCarbon()?.carbon_id;
-        if (owner) for (const e of evs) advanceEventCursor(owner, e.event_id);
+        reportHistoryHealthy();
         setEvents((prev) => {
           // Loaded history is complete — mark final so it doesn't replay
           // "streaming…" on open (live deltas still arrive via WS). Reconcile
           // the full cached set so read/delivered ticks survive hydration.
           const finalized = evs.map((e) => ({ ...e, is_final: true }));
-          return mergeServerEvents(prev, finalized, myUsername);
+          return mergeServerEvents(
+            prev,
+            finalized,
+            myUsername,
+            timelineOwner,
+            timelineDevice,
+          );
         });
         setHasMore(hasMore);
+        setHistoryCursor(cursor);
+        setHistoryBoundaryEventId(boundaryEventId);
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
         setLoading(false);
       })
       .catch((e) => {
         if (!mounted) return;
-        toast.error(e instanceof ApiError ? e.message : String(e));
+        reportHistoryFailure(e);
+        if (!cachedEvents?.some(isTimelineEvent) && !durableCacheAvailable) {
+          toast.error(e instanceof ApiError ? e.message : String(e));
+        }
         setLoading(false);
       });
     return () => {
       mounted = false;
       clearReceiptTimer();
     };
-  }, [room.room_id, myUsername, clearReceiptTimer]);
+  }, [
+    room.room_id,
+    myUsername,
+    clearReceiptTimer,
+    reportHistoryFailure,
+    reportHistoryHealthy,
+    timelineDevice,
+    timelineOwner,
+  ]);
+
+  // The page-level worker owns retries even when the originating composer is
+  // gone. Project each committed revision into the open room by rereading the
+  // durable row; raw `lastError` text is deliberately never rendered.
+  React.useEffect(() => {
+    const syncOutboxState = (event: globalThis.Event) => {
+      const detail = (event as CustomEvent<{ ownerId?: string; clientId?: string }>).detail;
+      if (!detail?.ownerId || detail.ownerId !== carbon?.carbon_id || !detail.clientId) return;
+      void listOutbox(detail.ownerId).then((rows) => {
+        const row = rows.find(
+          (candidate) =>
+            candidate.clientId === detail.clientId && candidate.roomId === room.room_id,
+        );
+        if (!row) return;
+        setEvents((current) =>
+          current.map((item) =>
+            item._clientId === row.clientId && item.event_id.startsWith("temp-")
+              ? {
+                  ...item,
+                  _status: restoredOutboxStatus(
+                    row.state,
+                    row.attempts ?? 0,
+                  ) as MessageStatus,
+                  _failure: row.failure,
+                  _nextAttemptAt: row.nextAttemptAt,
+                }
+              : item,
+          ),
+        );
+      }).catch(() => undefined);
+    };
+    window.addEventListener(OUTBOX_RETRY_SCHEDULED_EVENT, syncOutboxState);
+    return () =>
+      window.removeEventListener(OUTBOX_RETRY_SCHEDULED_EVENT, syncOutboxState);
+  }, [carbon?.carbon_id, room.room_id]);
 
   React.useEffect(() => {
     if (loading) return;
@@ -809,25 +1566,25 @@ export function RoomView({
 
   // ----- WS subscribe + frame handling -----
   React.useEffect(() => {
-    if (socket.ready) socket.send({ type: "subscribe", room_id: room.room_id });
-  }, [socket.ready, room.room_id, socket.send]);
+    if (socketReady) socketSend({ type: "subscribe", room_id: room.room_id });
+  }, [socketReady, room.room_id, socketSend]);
 
   // On reconnect, re-pull events for the open room — any frames delivered while
   // the socket was down (backend restart, tab asleep) are gone otherwise.
-  const prevReadyRef = React.useRef(socket.ready);
+  const prevReadyRef = React.useRef(socketReady);
   React.useEffect(() => {
-    if (socket.ready && !prevReadyRef.current) {
+    if (socketReady && !prevReadyRef.current) {
       // Same window as the initial load — this effect also fires on the FIRST
       // connect of a fresh page load, so refetching a larger window here would
       // reflow the just-rendered list ("loads again a few seconds in"). A
       // PAGE_SIZE window merges near-identically and still recovers frames
       // missed during a short drop.
-      api
-        .events(room.room_id, undefined, PAGE_SIZE)
-        .then((evs) => {
-          const owner = authStore.getCarbon()?.carbon_id;
-          if (owner) for (const e of evs) advanceEventCursor(owner, e.event_id);
-          setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
+      loadTimelineWindow(room.room_id)
+        .then(({ events: evs }) => {
+          reportHistoryHealthy();
+          setEvents((prev) =>
+            mergeServerEvents(prev, evs, myUsername, timelineOwner, timelineDevice),
+          );
           // §1.7 — after a (re)connect, resync the progress line from the cache
           // rather than blindly dropping it: this effect also fires on the first
           // connect of a fresh page load, and the cache (persisted across
@@ -838,41 +1595,106 @@ export function RoomView({
             p && p.source !== "server" ? p : getRoomProgress(room.room_id),
           );
         })
-        .catch(() => undefined);
+        .catch((error) => reportHistoryFailure(error));
     }
-    prevReadyRef.current = socket.ready;
-  }, [socket.ready, room.room_id, myUsername]);
+    prevReadyRef.current = socketReady;
+  }, [
+    socketReady,
+    room.room_id,
+    myUsername,
+    reportHistoryFailure,
+    reportHistoryHealthy,
+    timelineDevice,
+    timelineOwner,
+  ]);
 
-
+  const applyHeldSendFrameRef = React.useRef<(held: HeldSend) => void>(() => undefined);
+  const heldAckRef = React.useRef<(clientId: string, real: Event) => void>(() => undefined);
+  const heldClientBySentEventRef = React.useRef(new Map<string, string>());
+  const recentServerEventRef = React.useRef(new Map<string, Event>());
   const applyHeldSendFrame = (held: HeldSend) => {
     if (held.room_id !== room.room_id) return;
     const clientId = held.client_id;
     if (!clientId) return;
-    if (held.state === "cancelled") {
-      clearHeldClientRef.current?.(clientId);
-      clearPendingPreview(room.room_id, clientId);
-      setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
+    const ownsDevice = heldSendBelongsToDevice(held, timelineDevice);
+    const projectionKey = heldSendProjectionKey(held, timelineDevice);
+    const matchesProjection = (event: LocalEvent) =>
+      event._heldSendId === held.held_send_id ||
+      (ownsDevice &&
+        event._clientId === clientId &&
+        event._originDevice === timelineDevice);
+    const uiState = heldSendUiState(held);
+    const failure = sendFailureFromHeld(held);
+    const challengeUsable = heldChallengeUsableOnDevice(held, timelineDevice);
+    if (challengeUsable && carbon?.carbon_id) {
+      const challenge = challengeFromErrorBody({
+        code: "challenge_required",
+        challenge: held.challenge,
+      });
+      if (challenge) void rememberAbuseChallenge(carbon.carbon_id, challenge);
+    }
+    if (uiState === "cancelled") {
+      if (ownsDevice) {
+        clearHeldClientRef.current?.(clientId);
+        clearPendingPreview(room.room_id, clientId);
+      }
+      setEvents((prev) => prev.filter((event) => !matchesProjection(event)));
       return;
     }
-    if (held.state === "failed") {
-      clearHeldClientRef.current?.(clientId);
-      failPendingPreview(room.room_id, clientId);
+    if (uiState === "sent") {
+      if (ownsDevice) {
+        clearHeldClientRef.current?.(clientId);
+        clearPendingPreview(room.room_id, clientId);
+        if (held.sent_event_id) {
+          const accepted = events.find((event) => event.event_id === held.sent_event_id)
+            ?? recentServerEventRef.current.get(held.sent_event_id);
+          if (accepted) {
+            heldClientBySentEventRef.current.delete(held.sent_event_id);
+            heldAckRef.current(clientId, accepted);
+            return;
+          }
+          heldClientBySentEventRef.current.set(held.sent_event_id, clientId);
+        }
+      }
       setEvents((prev) =>
-        prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
+        ownsDevice
+          ? prev.map((event) =>
+              matchesProjection(event)
+                ? { ...event, _status: "sent" as MessageStatus }
+                : event,
+            )
+          : prev.filter((event) => !matchesProjection(event)),
       );
       return;
     }
-    if (held.state === "sent") {
-      clearHeldClientRef.current?.(clientId);
-      clearPendingPreview(room.room_id, clientId);
-      return;
+    if (uiState === "failed" || uiState === "challenge") {
+      // Stop composer-owned timers, but retain/project the server-owned body so
+      // a reload never hides an attention-state held send.
+      if (ownsDevice) {
+        clearHeldClientRef.current?.(clientId);
+        failPendingPreview(room.room_id, clientId);
+      }
     }
     if (!myUsername) return;
     const body = typeof held.content.body === "string" ? held.content.body : "";
+    const status: MessageStatus =
+      uiState === "failed"
+        ? "failed"
+        : uiState === "challenge"
+          ? "challenge"
+          : uiState === "retry_wait"
+            ? "retry_wait"
+            : uiState === "retrying"
+              ? "retrying"
+              : "pending";
+    const nextAttemptAtValue = held.next_attempt_at
+      ? Date.parse(held.next_attempt_at)
+      : Number.NaN;
+    const nextAttemptAt = Number.isFinite(nextAttemptAtValue)
+      ? nextAttemptAtValue
+      : failure?.nextAttemptAt;
     setEvents((prev) => {
-      const existingIndex = prev.findIndex(
-        (e) => e._clientId === clientId || e.content.client_id === clientId,
-      );
+      const existingIndex = prev.findIndex(matchesProjection);
       if (existingIndex >= 0) {
         const existing = prev[existingIndex];
         const currentReleaseAt =
@@ -882,32 +1704,42 @@ export function RoomView({
         const currentDeadline = currentReleaseAt ? Date.parse(currentReleaseAt) : Number.NaN;
         // Preserve a valid locally-anchored countdown. Only replace an absent
         // or visibly skewed deadline with a duration-based local projection.
-        if (
+        const preserveLocalDeadline =
+          status === "pending" &&
           Number.isFinite(currentDeadline) &&
-          currentDeadline <= Date.now() + MAX_EXTENDED_HELD_SEND_MS
-        ) {
-          return prev;
-        }
+          currentDeadline <= Date.now() + MAX_EXTENDED_HELD_SEND_MS;
         const next = [...prev];
         next[existingIndex] = {
           ...existing,
+          type: held.type,
           content: {
-            ...existing.content,
-            hold_release_at: localHeldReleaseAt(held),
+            ...held.content,
+            client_id: held.client_id,
+            hold_release_at: preserveLocalDeadline
+              ? currentReleaseAt
+              : localHeldReleaseAt(held),
           },
+          reply_to_event_id: held.reply_to_event_id || "",
+          _status: status,
+          _failure: failure ?? undefined,
+          _nextAttemptAt: nextAttemptAt,
+          _heldSendId: held.held_send_id,
+          _heldVersion: held.version,
+          _heldChallengeDeviceMismatch: uiState === "challenge" && !challengeUsable,
         };
         return next;
       }
-      const pending: LocalEvent = {
-        event_id: `temp-${clientId}`,
+      const pendingBase: LocalEvent = {
+        event_id: `temp-${projectionKey}`,
         room: 0,
         sender_kind: "carbon",
         sender_id: null,
         sender_handle: myUsername,
-        type: "m.text",
+        type: held.type,
         content: {
+          ...held.content,
           body,
-          client_id: clientId,
+          client_id: held.client_id,
           hold_release_at: localHeldReleaseAt(held),
         },
         reply_to_event_id: held.reply_to_event_id || "",
@@ -916,17 +1748,65 @@ export function RoomView({
         edited_at: null,
         redacted_at: null,
         redaction_reason: "",
-        _status: "pending",
-        _clientId: clientId,
+        _status: status,
+        _clientId: projectionKey,
+        _failure: failure ?? undefined,
+        _nextAttemptAt: nextAttemptAt,
+        _heldSendId: held.held_send_id,
+        _heldVersion: held.version,
+        _heldChallengeDeviceMismatch: uiState === "challenge" && !challengeUsable,
       };
+      const identity =
+        readTimelineIdentity(timelineOwner, projectionKey) ??
+        ensureTimelineIdentitySync(
+          timelineOwner,
+          projectionKey,
+          held.device_id || timelineDevice,
+          Number.isFinite(Date.parse(held.created_at))
+            ? Date.parse(held.created_at)
+            : Date.now(),
+        );
+      const pending = applyTimelineIdentity(pendingBase, identity);
       return [...prev, pending];
     });
-    setPendingPreview(room.room_id, {
-      clientId,
-      text: body || "Message pending",
-      status: "waiting",
-    });
+    if (ownsDevice) {
+      setPendingPreview(room.room_id, {
+        clientId,
+        text: body || "Message pending",
+        status: uiState === "failed" || uiState === "challenge" ? "failed" : "waiting",
+      });
+    }
   };
+  React.useEffect(() => {
+    applyHeldSendFrameRef.current = applyHeldSendFrame;
+  });
+
+  React.useEffect(() => {
+    const releaseSolvedHeldChallenges = () => {
+      void api.heldSends(room.room_id).then(async ({ held_sends }) => {
+        const candidates = held_sends.filter(
+          (held) =>
+            held.state === "challenge" &&
+            heldSendBelongsToDevice(held, timelineDevice),
+        );
+        for (const held of candidates) {
+          const released = await api.sendHeldNow(room.room_id, held.held_send_id);
+          applyHeldSendFrame(released);
+        }
+      }).catch(() => undefined);
+    };
+    window.addEventListener(
+      ABUSE_CHALLENGE_SOLVED_EVENT,
+      releaseSolvedHeldChallenges,
+    );
+    return () =>
+      window.removeEventListener(
+        ABUSE_CHALLENGE_SOLVED_EVENT,
+        releaseSolvedHeldChallenges,
+      );
+  // applyHeldSendFrame is render-local and intentionally reads current room UI.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room.room_id, timelineDevice]);
 
   // §2.1 — the per-frame handler, kept current via a deps-less effect so the
   // single subscription always runs the latest closure. Processes EVERY frame,
@@ -966,70 +1846,77 @@ export function RoomView({
         clearReceiptTimer();
         setActiveProgress(null);
       }
-      // §1.9 — a new message from someone else while scrolled up: surface a pill.
+      // Count genuinely new incoming messages while the user is reading
+      // history. Existing-event updates (edits/finalization) do not badge.
       if (!updatesExisting && !mine && PROGRESS_MESSAGE_TYPES.has(incoming.type) && !stickToBottomRef.current) {
-        setUnseenBelow(true);
+        setUnseenBelow((count) => count + 1);
       }
       // The received tone is played once, globally, by the chat page (so it
       // fires for any room, not just the open one).
+      // §2.2 — flush any deltas/final that arrived before this creating frame.
+      const buffered = deltaBufferRef.current.get(incoming.event_id);
+      let merged: Event = incoming;
+      if (buffered) {
+        deltaBufferRef.current.delete(incoming.event_id);
+        merged = {
+          ...incoming,
+          is_final: incoming.is_final || buffered.final,
+          content: {
+            ...incoming.content,
+            body: ((incoming.content.body as string) ?? "") + buffered.body,
+          },
+        };
+      }
+      recentServerEventRef.current.set(merged.event_id, merged);
+      if (recentServerEventRef.current.size > 256) {
+        const oldest = recentServerEventRef.current.keys().next().value;
+        if (oldest) recentServerEventRef.current.delete(oldest);
+      }
+      const heldClientId = heldClientBySentEventRef.current.get(merged.event_id);
+      if (heldClientId) {
+        heldClientBySentEventRef.current.delete(merged.event_id);
+        heldAckRef.current(heldClientId, merged);
+        return;
+      }
       setEvents((prev) => {
-        const existsIdx = prev.findIndex((e) => e.event_id === incoming.event_id);
-        if (existsIdx >= 0) {
-          const updated = [...prev];
-          const cur = updated[existsIdx];
-          updated[existsIdx] = {
-            ...incoming,
-            _clientId: cur._clientId,
-            _status: mine ? bestStatus(cur._status, "delivered") : cur._status,
-          };
-          return updated;
-        }
-        if (mine) {
-          // §2.3 — prefer matching the echo to its optimistic row by the
-          // client id the server echoes back (robust to server-side content
-          // enrichment: media_id, link_preview, whitespace, forward_from).
-          // Fall back to the old content-equality heuristic when absent.
-          const echoedClientId =
-            typeof incoming.content.client_id === "string" ? incoming.content.client_id : null;
-          // "failed" rows are candidates too: a background outbox flush (or a
-          // POST whose response was lost after the server stored it) can land
-          // the echo while the local row still says failed — the echo with our
-          // client id is authoritative, so claim it instead of duplicating.
-          const optIdx = prev.findIndex(
-            (e) =>
-              (e._status === "pending" || e._status === "failed") &&
-              (echoedClientId
-                ? e._clientId === echoedClientId
-                : e.sender_handle === incoming.sender_handle &&
-                  e.type === incoming.type &&
-                  JSON.stringify(e.content) === JSON.stringify(incoming.content)),
-          );
-          if (optIdx >= 0) {
-            const updated = [...prev];
-            updated[optIdx] = {
-              ...incoming,
-              _clientId: prev[optIdx]._clientId,
-              _status: "delivered",
-            };
-            return updated;
-          }
-        }
-        // §2.2 — flush any deltas/final that arrived before this creating frame.
-        const buffered = deltaBufferRef.current.get(incoming.event_id);
-        let merged: Event = incoming;
-        if (buffered) {
-          deltaBufferRef.current.delete(incoming.event_id);
-          merged = {
-            ...incoming,
-            is_final: incoming.is_final || buffered.final,
-            content: {
-              ...incoming.content,
-              body: ((incoming.content.body as string) ?? "") + buffered.body,
-            },
-          };
-        }
-        return [...prev, { ...merged, _status: mine ? "delivered" : undefined }];
+        // A generic socket frame may bind only through Glass' top-level,
+        // device-scoped transaction_id. Never infer identity from
+        // content.client_id or content equality: both collide across devices.
+        return mergeServerEvents(
+          prev,
+          [merged],
+          myUsername,
+          timelineOwner,
+          timelineDevice,
+        );
       });
+    } else if (f.type === "delivery_receipt") {
+      if (!f.member_handle || f.member_handle !== myUsername) {
+        const delivered = new Set(f.event_ids);
+        const receipt = activityReceiptFromDeliveries(f.deliveries);
+        setEvents((prev) =>
+          prev.map((event) => {
+            if (!delivered.has(event.event_id) || event.sender_handle !== myUsername) {
+              return event;
+            }
+            const incomingSummary = f.deliveries?.[event.event_id];
+            const summary = incomingSummary
+              ? normalizeDeliveryObject(incomingSummary)
+              : normalizeDeliverySummary(
+                  event.delivery?.recipient_count ?? 1,
+                  Math.max(event.delivery?.delivered_count ?? 0, 1),
+                  event.delivery?.read_count ?? 0,
+                );
+            const status = summary.state;
+            return {
+              ...event,
+              delivery: summary,
+              _status: bestStatus(event._status, status),
+            };
+          }),
+        );
+        if (receipt && activeProgress?.receipt) showReceipt(receipt);
+      }
     } else if (f.type === "event.delta") {
       setEvents((prev) => {
         const idx = prev.findIndex((e) => e.event_id === f.event_id);
@@ -1091,32 +1978,76 @@ export function RoomView({
       if (f.member_handle && f.member_handle === myUsername) return;
       // §2.6 — mark by POSITION, not string `<=`. String ordering is only valid
       // for fixed-width Crockford ULIDs; forwarded/UUID-fallback ids break it.
-      let didRead = false;
+      const receipt = activityReceiptFromDeliveries(f.deliveries);
       setEvents((prev) => {
         const cutoffIdx = prev.findIndex((e) => e.event_id === f.event_id);
-        if (cutoffIdx < 0) return prev; // cutoff outside our window — don't guess
         let changed = false;
         const updated = prev.map((e, i) => {
-          if (i <= cutoffIdx && e.sender_handle === myUsername && e._status !== "read") {
+          const incomingSummary = f.deliveries?.[e.event_id];
+          const covered = incomingSummary != null || (cutoffIdx >= 0 && i <= cutoffIdx);
+          if (covered && e.sender_handle === myUsername && e._status !== "read") {
+            const summary = incomingSummary
+              ? normalizeDeliveryObject(incomingSummary)
+              : normalizeDeliverySummary(
+                  e.delivery?.recipient_count ?? 1,
+                  e.delivery?.delivered_count ?? 0,
+                  Math.max(e.delivery?.read_count ?? 0, 1),
+                );
+            const status = summary.state;
             changed = true;
-            return { ...e, _status: "read" as MessageStatus };
+            return {
+              ...e,
+              delivery: summary,
+              _status: bestStatus(e._status, status),
+            };
           }
           return e;
         });
-        if (changed) didRead = true;
         return changed ? updated : prev;
       });
       // My just-sent message got read → upgrade the receipt line ("read"),
       // which restarts the brief hold before the real progress shows.
-      if (didRead && activeProgress?.receipt) showReceipt("read");
+      if (receipt && activeProgress?.receipt) showReceipt(receipt);
+    } else if (f.type === "thread_read_receipt") {
+      if (f.member_handle && f.member_handle === myUsername) {
+        return;
+      }
+      setEvents((previous) => {
+        let changed = false;
+        const next = previous.map((event) => {
+          const incoming = f.deliveries?.[event.event_id];
+          if (!incoming || event.sender_handle !== myUsername) return event;
+          const summary = normalizeDeliveryObject(incoming);
+          changed = true;
+          return {
+            ...event,
+            delivery: summary,
+            _status: bestStatus(event._status, summary.state),
+          };
+        });
+        return changed ? next : previous;
+      });
     } else if (f.type === "take_back") {
-      setEvents((prev) =>
-        prev.map((e) =>
-          f.event_ids.includes(e.event_id)
-            ? { ...e, redacted_at: new Date().toISOString(), redaction_reason: "redacted" }
-            : e,
-        ),
-      );
+      setEvents((prev) => {
+        const result = projectRedactedWindow(
+          prev,
+          f.event_ids,
+          new Date().toISOString(),
+          "redacted",
+        );
+        result.mediaIds.forEach(evictCachedMedia);
+        if (result.changed.length > 0) {
+          void storeEvents(
+            timelineOwner,
+            result.changed.map((event) => ({ roomId: room.room_id, event })),
+          ).catch(reportHistoryFailure);
+        }
+        return result.events;
+      });
+      for (const eventId of f.event_ids) {
+        removeNotificationByEvent(timelineOwner, eventId);
+        closeBrowserNotification(eventId);
+      }
     } else if (f.type === "progress") {
       if (f.state && f.progress_group_id) {
         clearReceiptTimer(); // real progress takes over from any receipt line
@@ -1149,7 +2080,7 @@ export function RoomView({
           f.member_handle ??
           (f.member_id !== undefined &&
           (f.member_kind === "carbon" || f.member_kind === "silicon")
-            ? handleFor(f.member_kind, f.member_id)
+            ? handleFor(f.member_kind)
             : null);
         if (handle && handle !== myUsername) {
           const active = f.is_typing !== false;
@@ -1167,8 +2098,8 @@ export function RoomView({
 
   // Subscribe once; the handler ref above carries the latest closure (§2.1).
   React.useEffect(() => {
-    return socket.subscribe((f) => frameHandlerRef.current(f));
-  }, [socket.subscribe]);
+    return socketSubscribe((f) => frameHandlerRef.current(f));
+  }, [socketSubscribe]);
 
   // §1.1 — while a progress line is showing, advance a 1s tick so we can detect
   // staleness (the silicon crashed / backend restarted with no `done` frame).
@@ -1179,38 +2110,99 @@ export function RoomView({
   }, [activeProgress]);
 
   // ----- Scroll + auto-read -----
-  // Reset bottom-stick when the room changes (we start at the bottom).
-  React.useEffect(() => {
-    stickToBottomRef.current = true;
-  }, [room.room_id]);
-
-  // Auto-read: derive the latest event from someone other than me, and only
-  // POST when *that event_id* changes. The previous version depended on the
-  // entire `events` array, which fires on every poll, every optimistic add,
-  // and every WS frame — flooding the server with idempotent reads.
-  const lastTheirsEventId = React.useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i];
-      if (e.sender_handle && e.sender_handle !== myUsername) return e.event_id;
+  // Opening a room consumes the room's current unread tail immediately. Later
+  // arrivals still require actual viewport exposure before advancing read.
+  const committedReadPositionRef = React.useRef(room.unread_boundary.last_read_stream_position);
+  const pendingReadPositionRef = React.useRef(0);
+  const openedReadRoomRef = React.useRef<string | null>(null);
+  const commitReadPosition = React.useCallback((
+    eventId: string | null,
+    streamPosition: number,
+    forceLocal = false,
+  ) => {
+    if (readOnly || !Number.isSafeInteger(streamPosition)) return;
+    if (!forceLocal && streamPosition <= Math.max(
+      committedReadPositionRef.current,
+      pendingReadPositionRef.current,
+    )) return;
+    pendingReadPositionRef.current = Math.max(pendingReadPositionRef.current, streamPosition);
+    // Reading is a local fact as soon as the room/viewport exposes the event.
+    // Do not leave the sidebar badge waiting on network round-trip latency.
+    onReadThrough?.(eventId ?? "", streamPosition);
+    if (!eventId) {
+      committedReadPositionRef.current = Math.max(
+        committedReadPositionRef.current,
+        streamPosition,
+      );
+      if (pendingReadPositionRef.current === streamPosition) pendingReadPositionRef.current = 0;
+      return;
     }
-    return null;
-  }, [events, myUsername]);
+    void api.read(room.room_id, eventId).then(() => {
+      committedReadPositionRef.current = Math.max(
+        committedReadPositionRef.current,
+        streamPosition,
+      );
+      if (pendingReadPositionRef.current === streamPosition) pendingReadPositionRef.current = 0;
+    }).catch(() => {
+      if (pendingReadPositionRef.current === streamPosition) pendingReadPositionRef.current = 0;
+    });
+  }, [onReadThrough, readOnly, room.room_id]);
 
-  // Auto-read requires the user to actually be present (visible tab; in the
-  // desktop wrapper: visible AND focused window). A minimized/hidden app with
-  // this room open must NOT silently read incoming messages — they'd never
-  // notify. `present` flips true on return, re-running the effect to catch up.
-  const present = usePresence();
+  const commitReadTarget = React.useCallback((target: Event) => {
+    if (!hasAuthoritativeEventId(target) || !Number.isSafeInteger(target.stream_position)) return;
+    commitReadPosition(target.event_id, Number(target.stream_position));
+  }, [commitReadPosition]);
+
+  React.useLayoutEffect(() => {
+    if (openedReadRoomRef.current === room.room_id || readOnly) return;
+    openedReadRoomRef.current = room.room_id;
+    const target = roomOpenReadTarget(room);
+    if (target) commitReadPosition(target.eventId, target.streamPosition, true);
+  }, [commitReadPosition, readOnly, room]);
+
+  const markVisibleRead = React.useCallback(() => {
+    if (readOnly || !hydrated) return;
+    if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const viewport = scroller.getBoundingClientRect();
+    const candidates: Array<{ event: Event; top: number; bottom: number; height: number }> = [];
+    for (const event of events) {
+      if (
+        !hasAuthoritativeEventId(event) ||
+        !isUnreadEligibleEvent(event)
+      ) continue;
+      const node = messageNodeRefs.current.get(event.event_id);
+      if (!node) continue;
+      const rect = node.getBoundingClientRect();
+      candidates.push({ event, top: rect.top, bottom: rect.bottom, height: rect.height });
+    }
+    const target = selectVisibleReadTarget(
+      candidates,
+      viewport,
+      myUsername,
+      Math.max(committedReadPositionRef.current, pendingReadPositionRef.current),
+    );
+    if (!target) return;
+    commitReadTarget(target);
+  }, [commitReadTarget, events, hydrated, myUsername, readOnly]);
+
   React.useEffect(() => {
-    if (readOnly) return; // observers don't mark read — they aren't members
-    if (!hydrated) return; // §2.5 — don't mark cached-but-unseen messages read
-    if (!lastTheirsEventId) return;
-    if (!present) return;
-    api.read(room.room_id, lastTheirsEventId).catch(() => undefined);
-  }, [lastTheirsEventId, room.room_id, readOnly, hydrated, present]);
+    const run = () => requestAnimationFrame(markVisibleRead);
+    run();
+    window.addEventListener("focus", run);
+    window.addEventListener("resize", run);
+    document.addEventListener("visibilitychange", run);
+    return () => {
+      window.removeEventListener("focus", run);
+      window.removeEventListener("resize", run);
+      document.removeEventListener("visibilitychange", run);
+    };
+  }, [markVisibleRead]);
 
   // ----- Take-back / self-delete / react / reply / forward -----
   const onTakeBack = async (eventId: string, force = false) => {
+    if (!eventId || eventId.startsWith("temp-")) return;
     try {
       const r = await api.takeBack(eventId, "manual", force);
       if (r && "detail" in r) toast.error(r.detail);
@@ -1220,54 +2212,109 @@ export function RoomView({
     }
   };
 
-  const restoreFromEvent = React.useCallback((ev: Event, attachments: Event[] = []) => {
-    const content = ev.content as Record<string, unknown>;
+  const copyEventToComposer = React.useCallback((event: Event, attachments: Event[] = []) => {
+    const content = event.content as Record<string, unknown>;
     const text =
-      ev.type === "m.text"
+      event.type === "m.text"
         ? String(content.body ?? "")
-        : ev.type === "m.image" || ev.type === "m.file"
+        : event.type === "m.image" || event.type === "m.file"
           ? String(content.caption ?? "")
-          : ev.type === "m.voice"
+          : event.type === "m.voice"
             ? String(content.transcript ?? "")
             : "";
     const mediaEvents =
-      ev.type === "m.image" || ev.type === "m.file" ? [ev, ...attachments] : attachments;
-    const restoredAttachments = mediaEvents
+      event.type === "m.image" || event.type === "m.file"
+        ? [event, ...attachments]
+        : attachments;
+    const copiedAttachments = mediaEvents
       .map((item) => {
-        const c = item.content as Record<string, unknown>;
-        const mediaId = typeof c.media_id === "string" ? c.media_id : "";
+        const itemContent = item.content as Record<string, unknown>;
+        const mediaId = typeof itemContent.media_id === "string" ? itemContent.media_id : "";
         if (!mediaId) return null;
         return {
           mediaId,
-          mime: String(c.mime || item.media_meta?.mime || "application/octet-stream"),
-          name: String(c.filename || c.caption || item.type.replace("m.", "") || "attachment"),
-          size: typeof c.size === "number" ? c.size : 0,
+          mime: String(itemContent.mime || item.media_meta?.mime || "application/octet-stream"),
+          name: String(
+            itemContent.filename || itemContent.caption || item.type.replace("m.", "") || "attachment",
+          ),
+          size: typeof itemContent.size === "number" ? itemContent.size : 0,
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-    setRestoreDraft({
-      id: `${ev.event_id}:${Date.now()}`,
+    setComposerCopy({
+      id: `${event.event_id}:${Date.now()}`,
       text,
-      attachments: restoredAttachments,
+      attachments: copiedAttachments,
     });
   }, []);
 
-  // Unsend is two-step for persisted events: clicking stages the target; the
-  // confirm dialog performs backend redaction and then restores the draft.
+  // A redaction can collapse a large row to a tiny tombstone. Virtuoso learns
+  // that new height on the next measurement pass; if the reader was already at
+  // the bottom, settle only after that pass so the viewport never flashes at a
+  // stale offset. Readers scrolled into history are left exactly where they are.
+  const settleTimelineAfterUnsend = React.useCallback(() => {
+    if (!stickToBottomRef.current || textSelectionActiveRef.current) return;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (!stickToBottomRef.current || textSelectionActiveRef.current) return;
+        virtuosoRef.current?.autoscrollToBottom();
+      });
+    });
+  }, []);
+
+  // Unsend is two-step for persisted events: clicking stages the target and
+  // the confirm dialog performs backend redaction. Deleted content is never
+  // copied back into the draft/composer.
   const [pendingDelete, setPendingDelete] = React.useState<PendingUnsend | null>(null);
-  const onSelfDelete = (ev: Event, attachments: Event[] = []) => {
+  const onSelfDelete = async (ev: Event, attachments: Event[] = []) => {
     // A held/optimistic message that never reached the server: cancel the
     // queued send and drop the bubble — nothing to redact, no confirm needed.
     const clientId = (ev as LocalEvent)._clientId;
     if (ev.event_id.startsWith("temp-") && clientId) {
-      cancelQueuedRef.current?.(clientId);
+      const cancel = cancelQueuedRef.current;
+      if (!cancel) return;
+      const previousStatus = (ev as LocalEvent)._status;
+      setEvents((prev) =>
+        prev.map((event) =>
+          event._clientId === clientId
+            ? { ...event, _status: "retrying" as MessageStatus }
+            : event,
+        ),
+      );
+      const result = await cancel(clientId);
+      if (result === "not-held" || result === "failed") {
+        setEvents((prev) =>
+          prev.map((event) =>
+            event._clientId === clientId
+              ? { ...event, _status: previousStatus }
+              : event,
+          ),
+        );
+        return;
+      }
+      if (result === "sent") {
+        // The server won the release race. Replace the temp row from
+        // authoritative history instead of pretending the delete succeeded.
+        void loadTimelineWindow(room.room_id).then(({ events: authoritative }) => {
+          setEvents((prev) =>
+            mergeServerEvents(
+              prev,
+              authoritative,
+              myUsername,
+              timelineOwner,
+              timelineDevice,
+            ),
+          );
+        }).catch(() => undefined);
+        return;
+      }
+      if (result !== "cancelled") return;
       setHoldingMessage(false);
       setEditingEvent((cur) => (cur?.event_id === ev.event_id ? null : cur));
       setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
-      restoreFromEvent(ev, attachments);
+      settleTimelineAfterUnsend();
       return;
     }
-    if (ev.event_id === latestVisibleEventId) requestBottomStick();
     setPendingDelete({ event: ev, attachments });
   };
 
@@ -1284,92 +2331,115 @@ export function RoomView({
       .map((target) => events.find((e) => e.event_id === target.event_id))
       .filter((item): item is LocalEvent => Boolean(item));
     // Optimistically mark redacted so the bubble updates instantly.
-    setEvents((prev) =>
-      prev.map((e) =>
-        targets.some((target) => target.event_id === e.event_id)
-          ? {
-              ...e,
-              redacted_at: new Date().toISOString(),
-              redaction_reason: "unsend",
-              content: { redacted: true, reason: "unsend" },
-            }
-          : e,
-      ),
-    );
-    const rollback = () => {
+    const marker = new Date().toISOString();
+    const targetIds = new Set(targets.map((target) => target.event_id));
+    setEvents((prev) => projectRedactedWindow(prev, targetIds, marker, "unsend").events);
+    settleTimelineAfterUnsend();
+    const confirmed = new Set<string>();
+    const rollbackUnconfirmed = () => {
       if (!snapshots.length) return;
       const byId = new Map(snapshots.map((item) => [item.event_id, item]));
-      setEvents((prev) => prev.map((e) => byId.get(e.event_id) ?? e));
+      setEvents((prev) => prev.map((e) => {
+        if (confirmed.has(e.event_id) || e.redacted_at !== marker) return e;
+        return byId.get(e.event_id) ?? e;
+      }));
+      settleTimelineAfterUnsend();
     };
     try {
       for (const target of deleteTargets) {
         const r = await api.deleteEvent(target.event_id);
         if (r && "detail" in r) {
-          rollback();
+          rollbackUnconfirmed();
           toast.error(r.detail);
           return;
         }
+        confirmed.add(target.event_id);
+        const snapshot = snapshots.find((item) => item.event_id === target.event_id);
+        if (snapshot) {
+          const projected = projectRedactedEvent(snapshot, marker, "unsend");
+          projected.mediaIds.forEach(evictCachedMedia);
+          void storeEvents(timelineOwner, [{ roomId: room.room_id, event: projected.event }])
+            .catch(reportHistoryFailure);
+        }
+        removeNotificationByEvent(timelineOwner, target.event_id);
+        closeBrowserNotification(target.event_id);
       }
-      restoreFromEvent(ev, attachments);
       toast.success("unsent");
     } catch (e) {
-      rollback();
+      rollbackUnconfirmed();
       toast.error(e instanceof ApiError ? e.message : String(e));
     }
   };
 
-  const onReact = async (ev: Event, emoji: string) => {
+  const onReact = (ev: Event, rawEmoji: string) => {
+    if (!hasAuthoritativeEventId(ev) || !myUsername) return;
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
-    // Toggle: if I already reacted to this message with this emoji, remove that
-    // reaction; otherwise add one. Reactions are m.reaction events keyed to the
-    // target via reply_to_event_id; the WS echo / take_back folds the change
-    // into the reaction map below.
-    const existing = events.find(
-      (e) =>
-        e.type === "m.reaction" &&
-        !e.redacted_at &&
-        e.reply_to_event_id === ev.event_id &&
-        e.sender_handle === myUsername &&
-        String((e.content as { emoji?: unknown }).emoji ?? "") === emoji,
+    const emoji = normalizeReactionEmoji(rawEmoji);
+    const key = reactionIntentKey(ev.event_id, emoji);
+    const desired = !ownReactionIsActive(
+      events,
+      ev.event_id,
+      emoji,
+      myUsername,
+      reactionOverrides[key],
     );
-    if (existing) {
-      // Optimistically drop my reaction, then redact it server-side.
-      const snapshot = existing; // §2.4 — restore the reaction if the redact fails
-      setEvents((prev) =>
-        prev.map((e) =>
-          e.event_id === existing.event_id
-            ? { ...e, redacted_at: new Date().toISOString(), redaction_reason: "unreact" }
-            : e,
-        ),
-      );
-      const rollback = () =>
-        setEvents((prev) =>
-          prev.map((e) => (e.event_id === snapshot.event_id ? snapshot : e)),
+    setReactionOverrides((previous) => ({ ...previous, [key]: desired }));
+
+    const generation = (reactionGenerationRef.current.get(key) ?? 0) + 1;
+    reactionGenerationRef.current.set(key, generation);
+    const roomId = room.room_id;
+    const clientId = desired ? newClientId() : undefined;
+    const previous = reactionChainsRef.current.get(key) ?? Promise.resolve();
+    const task = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const result = await retryReactionMutation(
+          () => api.setReaction(ev.event_id, emoji, desired, clientId),
+          {
+            shouldRetry: (error) =>
+              !(error instanceof ApiError) ||
+              error.status === 408 ||
+              error.status === 425 ||
+              error.status === 429 ||
+              error.status >= 500,
+          },
         );
-      try {
-        const r = await api.deleteEvent(existing.event_id);
-        if (r && "detail" in r) {
-          rollback();
-          toast.error(r.detail);
+        if (reactionRoomRef.current !== roomId) return;
+        setEvents((current) =>
+          reconcileReactionResult(
+            current, ev.event_id, emoji, myUsername, desired, result,
+          ),
+        );
+        if (reactionGenerationRef.current.get(key) === generation) {
+          setReactionOverrides((current) => {
+            const next = { ...current };
+            delete next[key];
+            return next;
+          });
         }
-      } catch (e) {
-        rollback();
-        toast.error(e instanceof ApiError ? e.message : String(e));
-      }
-      return;
-    }
-    try {
-      await api.sendEvent(room.room_id, {
-        type: "m.reaction",
-        content: { emoji },
-        reply_to_event_id: ev.event_id,
+      })
+      .catch((error) => {
+        if (
+          reactionRoomRef.current !== roomId ||
+          reactionGenerationRef.current.get(key) !== generation
+        ) return;
+        setReactionOverrides((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+        toast.error(error instanceof ApiError ? error.message : String(error));
+      })
+      .finally(() => {
+        if (reactionChainsRef.current.get(key) === task) {
+          reactionChainsRef.current.delete(key);
+        }
       });
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : String(e));
-    }
+    reactionChainsRef.current.set(key, task);
   };
 
   const onReply = (ev: Event) => {
+    if (!hasAuthoritativeEventId(ev)) return;
     setEditingEvent(null);
     updateReplyDraft(ev);
     if (ev.event_id === latestVisibleEventId) requestBottomStick();
@@ -1391,13 +2461,11 @@ export function RoomView({
   );
   const canEditMessage = React.useCallback(
     (ev: LocalEvent | Event) => {
-      if (!isMyEvent(ev, myUsername)) return false;
-      if (ev.redacted_at || ev.is_final === false) return false;
-      if (editableTextForEvent(ev) === null) return false;
-      if (roomIncludesSilicon) {
-        return ev.event_id.startsWith("temp-") && Boolean((ev as LocalEvent)._clientId);
-      }
-      return true;
+      return canEditAuthoritativeTimelineEvent(ev, {
+        isMine: isMyEvent(ev, myUsername),
+        roomIncludesSilicon,
+        hasEditableText: editableTextForEvent(ev) !== null,
+      });
     },
     [myUsername, roomIncludesSilicon],
   );
@@ -1408,11 +2476,14 @@ export function RoomView({
       updateReplyDraft(null);
       setEditingEvent(ev);
     },
-    [canEditMessage, updateReplyDraft],
+    [canEditMessage, setEditingEvent, updateReplyDraft],
   );
 
   const persistEdit = React.useCallback(
     async (ev: Event, body: string) => {
+      if (!hasAuthoritativeEventId(ev)) {
+        throw new Error("message is still pending and cannot be edited yet");
+      }
       const editedAt = new Date().toISOString();
       const snapshot = events.find((item) => item.event_id === ev.event_id);
       setEvents((prev) =>
@@ -1421,7 +2492,7 @@ export function RoomView({
         ),
       );
       try {
-        const real = await api.editEvent(ev.event_id, body);
+        const real = await api.editEvent(ev.event_id, body, ev.edit_version ?? 0);
         setEvents((prev) =>
           prev.map((item) =>
             item.event_id === real.event_id
@@ -1434,20 +2505,36 @@ export function RoomView({
           ),
         );
       } catch (e) {
-        if (snapshot) {
-          setEvents((prev) => prev.map((item) => (item.event_id === snapshot?.event_id ? snapshot : item)));
+        const authoritative = authoritativeEditConflict(e, ev.event_id);
+        if (authoritative) {
+          setEvents((prev) => prev.map((item) =>
+            item.event_id === authoritative.event_id
+              ? { ...authoritative, _clientId: item._clientId, _status: item._status }
+              : item,
+          ));
+          // Keep the replacement text in the composer, but advance the base
+          // snapshot so a deliberate retry compares against the current row.
+          setEditingEvent(authoritative);
+          toast.error("This message changed on another device. Your edit is still here; review and save again.");
+        } else if (snapshot) {
+          setEvents((prev) => prev.map((item) => (item.event_id === snapshot.event_id ? snapshot : item)));
+          toast.error(e instanceof ApiError ? e.message : String(e));
+        } else {
+          toast.error(e instanceof ApiError ? e.message : String(e));
         }
-        toast.error(e instanceof ApiError ? e.message : String(e));
         throw e;
       }
     },
-    [events],
+    [events, setEditingEvent, setEvents],
   );
 
   // #17 — Forward picker. Setting `forwardingEvent` opens the dialog; the
   // dialog handles room selection and re-posting with forward_from metadata.
   const [forwardingEvent, setForwardingEvent] = React.useState<Event | null>(null);
-  const onForward = (ev: Event) => setForwardingEvent(ev);
+  const onForward = (ev: Event) => {
+    if (!hasAuthoritativeEventId(ev)) return;
+    setForwardingEvent(ev);
+  };
 
   // Dope #79 — multi-select → mass forward. `selectMode` swaps the composer for
   // a selection action bar; `selectedEventIds` holds the chosen source events.
@@ -1460,10 +2547,12 @@ export function RoomView({
 
   // 'select' options-menu action: enter select-mode with this message chosen.
   const onSelect = (ev: Event) => {
+    if (!hasAuthoritativeEventId(ev)) return;
     setSelectMode(true);
     setSelectedEventIds(new Set([ev.event_id]));
   };
   const toggleSelect = (ev: Event) => {
+    if (!hasAuthoritativeEventId(ev)) return;
     const already = selectedEventIds.has(ev.event_id);
     // Cap the set; a toggle that would exceed the cap is a no-op with a hint.
     if (!already && selectedEventIds.size >= MAX_FORWARD) {
@@ -1507,37 +2596,32 @@ export function RoomView({
 
   // Aggregate reactions: target_event_id → { emoji → [sender_handle] }
   const reactionsByTarget = React.useMemo(() => {
-    const map = new Map<string, Record<string, string[]>>();
-    for (const e of events) {
-      if (e.type !== "m.reaction") continue;
-      if (e.redacted_at) continue;
-      const target = e.reply_to_event_id;
-      const emoji = String((e.content as { emoji?: unknown }).emoji ?? "");
-      if (!target || !emoji) continue;
-      const bucket = map.get(target) ?? {};
-      const who = bucket[emoji] ?? [];
-      if (e.sender_handle && !who.includes(e.sender_handle)) {
-        who.push(e.sender_handle);
+    const map = aggregateReactions(events);
+    if (myUsername) {
+      for (const [key, desired] of Object.entries(reactionOverrides)) {
+        const separator = key.indexOf("\u0000");
+        if (separator < 1) continue;
+        const target = key.slice(0, separator);
+        const emoji = key.slice(separator + 1);
+        const bucket = map.get(target) ?? {};
+        const who = applyOwnReactionOverride(bucket[emoji] ?? [], myUsername, desired);
+        if (who.length) bucket[emoji] = who;
+        else delete bucket[emoji];
+        if (Object.keys(bucket).length) map.set(target, bucket);
+        else map.delete(target);
       }
-      bucket[emoji] = who;
-      map.set(target, bucket);
     }
     return map;
-  }, [events]);
+  }, [events, myUsername, reactionOverrides]);
 
   // Visible events drop reactions (they render as chips under the target) and
   // deleted/redacted messages (hidden entirely — no "message deleted" row).
-  const visibleEvents = React.useMemo(
-    // ALL progress events stay out of the timeline (live ones render as the
-    // transient ProgressLine instead). Letting done-progress through used to
-    // render a "Silicon finished" row — and, worse, it sat between two of a
-    // silicon's messages and broke the (sender, minute) run, so avatars showed
-    // on some of its messages and not others.
-    () => events.filter(isTimelineEvent),
-    [events],
-  );
+  // ALL progress events stay out of the timeline (live ones render as the
+  // transient ProgressLine instead). Letting done-progress through used to
+  // break the (sender, minute) run.
+  const visibleEvents = events.filter(isTimelineEvent);
 
-  const requestEditLast = React.useCallback(() => {
+  const requestEditLast = () => {
     for (let i = visibleEvents.length - 1; i >= 0; i--) {
       const event = visibleEvents[i];
       if (canEditMessage(event)) {
@@ -1545,7 +2629,7 @@ export function RoomView({
         return;
       }
     }
-  }, [beginEdit, canEditMessage, visibleEvents]);
+  };
 
   // Lookup so a reply can render the message it's quoting.
   const eventById = React.useMemo(() => {
@@ -1558,22 +2642,29 @@ export function RoomView({
     if (!draftReply?.event_id) {
       if (restoredDraftReplyIdRef.current && replyTo?.event_id === restoredDraftReplyIdRef.current) {
         restoredDraftReplyIdRef.current = null;
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing reply state restored from a draft tombstone.
         setReplyTo(null);
       }
       return;
     }
-    if (replyTo?.event_id === draftReply.event_id) return;
     const loaded = eventById.get(draftReply.event_id);
-    if (loaded && !loaded.redacted_at) {
+    if (replyTo?.event_id === draftReply.event_id) {
+      // Reply state must follow edits/redaction from live sync. Holding the
+      // original object would let a now-deleted target pass the composer's
+      // pre-send guard and unnecessarily enter the failed outbox flow.
+      const reconciled = reconcileReplyTarget(replyTo, loaded);
+      if (reconciled !== replyTo) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- reconcile active reply to authoritative timeline state.
+        setReplyTo(reconciled);
+      }
+      return;
+    }
+    if (loaded) {
       restoredDraftReplyIdRef.current = draftReply.event_id;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring persisted draft reply into RoomView state.
       setReplyTo(loaded);
       return;
     }
     const preview = draftReply.preview || "original message unavailable";
     restoredDraftReplyIdRef.current = draftReply.event_id;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring persisted draft reply into RoomView state.
     setReplyTo({
       event_id: draftReply.event_id,
       room: 0,
@@ -1664,13 +2755,6 @@ export function RoomView({
     async (eventId: string) => {
       const loaded = eventById.get(eventId);
       if (loaded) {
-        if (loaded.redacted_at) {
-          setReplyJumpState((prev) => ({
-            ...prev,
-            [eventId]: { status: "error", message: "Original message is no longer available." },
-          }));
-          return;
-        }
         setReplyJumpState((prev) => {
           const next = { ...prev };
           delete next[eventId];
@@ -1687,56 +2771,119 @@ export function RoomView({
       setReplyJumpState((prev) => ({ ...prev, [eventId]: { status: "loading" } }));
       setLoadingOlder(true);
       try {
-        let cursor =
+        const loadedOldest = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+        let cursor: string | undefined =
           priorState?.status === "continue" && priorState.cursor
             ? priorState.cursor
-            : events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+            : "";
+        let anchor: string | undefined = cursor ? undefined : loadedOldest;
+        let traversal: HistoryTraversal = {
+          throughEventId:
+            priorState?.status === "continue"
+              ? priorState.throughEventId
+              : undefined,
+          seenEventIds: new Set<string>(),
+          oldestEventId:
+            priorState?.status === "continue"
+              ? priorState.oldestEventId
+              : anchor,
+        };
         let found: Event | null = null;
         const seenCursors = new Set<string>();
         const deadline = Date.now() + 5000;
         let pages = 0;
-        while (cursor && pages < 15 && Date.now() < deadline) {
-          if (seenCursors.has(cursor)) {
-            cursor = undefined;
-            break;
+        let recoveredExpiredCursor = false;
+        let recoveredRejectedAnchor = false;
+        while ((cursor !== undefined || anchor) && pages < 15 && Date.now() < deadline) {
+          if (cursor && seenCursors.has(cursor)) {
+            throw new SyncIntegrityError(
+              "history",
+              "page_invariant",
+              "We couldn’t open that message. Try again.",
+              { roomId: room.room_id },
+            );
           }
-          seenCursors.add(cursor);
-          const older = await api.events(room.room_id, cursor, PAGE_SIZE);
+          if (cursor) seenCursors.add(cursor);
+          let page;
+          try {
+            page = await api.historyPage(
+              room.room_id,
+              cursor ?? "",
+              PAGE_SIZE,
+              "backward",
+              cursor ? undefined : anchor,
+            );
+          } catch (error) {
+            const code =
+              error instanceof ApiError && error.body && typeof error.body === "object" &&
+              "code" in error.body
+                ? String((error.body as { code?: unknown }).code ?? "")
+                : "";
+            if (
+              !recoveredRejectedAnchor &&
+              !cursor &&
+              anchor &&
+              error instanceof ApiError &&
+              error.status === 400
+            ) {
+              recoveredRejectedAnchor = true;
+              anchor = undefined;
+              traversal = {
+                throughEventId: undefined,
+                seenEventIds: new Set<string>(),
+              };
+              continue;
+            }
+            if (
+              recoveredExpiredCursor ||
+              !(error instanceof ApiError) ||
+              error.status !== 410 ||
+              code !== "cursor_expired"
+            ) {
+              throw error;
+            }
+            recoveredExpiredCursor = true;
+            cursor = "";
+            anchor = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+            traversal = {
+              throughEventId: undefined,
+              seenEventIds: new Set<string>(),
+              oldestEventId: anchor,
+            };
+            seenCursors.clear();
+            continue;
+          }
           if (runId !== lookupRunRef.current) return;
           pages += 1;
-          if (older.length === 0) {
+          traversal = validateHistoryPage(page, traversal, room.room_id);
+          const older = page.events;
+          if (older.length === 0 && !page.has_more) {
             setHasMore(false);
             cursor = undefined;
             break;
           }
           setEvents((prev) => {
-            const known = new Set(prev.map((e) => e.event_id));
-            const fresh: LocalEvent[] = older
-              .filter((e) => !known.has(e.event_id))
-              .map((e) => ({
-                ...e,
-                is_final: true,
-                _status: e.sender_handle === myUsername ? ("delivered" as MessageStatus) : undefined,
-              }));
-            return [...fresh, ...prev];
+            const finalized = older.map((event) => ({ ...event, is_final: true }));
+            return mergeServerEvents(
+              prev,
+              finalized,
+              myUsername,
+              timelineOwner,
+              timelineDevice,
+            );
           });
           found = older.find((e) => e.event_id === eventId) ?? null;
           if (found) break;
-          if (older.length < PAGE_SIZE) {
+          if (!page.has_more || !page.cursor) {
             setHasMore(false);
             cursor = undefined;
             break;
           }
-          cursor = older.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+          cursor = page.cursor;
+          anchor = undefined;
         }
+        reportHistoryHealthy();
 
-        if (found?.redacted_at) {
-          setReplyJumpState((prev) => ({
-            ...prev,
-            [eventId]: { status: "error", message: "Original message is no longer available." },
-          }));
-          return;
-        }
         if (found) {
           setReplyJumpState((prev) => {
             const next = { ...prev };
@@ -1751,12 +2898,15 @@ export function RoomView({
               ? {
                   status: "continue",
                   cursor,
+                  throughEventId: traversal.throughEventId,
+                  oldestEventId: traversal.oldestEventId,
                   message: "Still looking farther back. Click to continue.",
                 }
               : { status: "error", message: "Couldn’t find the original message." },
           }));
         }
       } catch (e) {
+        reportHistoryFailure(e);
         const message =
           e instanceof ApiError && (e.status === 401 || e.status === 403)
             ? "You don’t have access to that message."
@@ -1769,11 +2919,22 @@ export function RoomView({
         }
       }
     },
-    [eventById, events, myUsername, queueJumpToEvent, replyJumpState, room.room_id],
+    [
+      eventById,
+      events,
+      myUsername,
+      queueJumpToEvent,
+      replyJumpState,
+      room.room_id,
+      timelineDevice,
+      timelineOwner,
+      reportHistoryFailure,
+      reportHistoryHealthy,
+    ],
   );
 
   // The studio hands off a flattened annotation set here: reply to the original
-  // file message (so the thread + silicon have a clear reference) and stage the
+  // file message (so replies + the silicon have a clear reference) and stage the
   // draft into the composer for the user to add a message before sending.
   const onAttachAnnotations = React.useCallback(
     (draft: AnnotationDraft) => {
@@ -1783,11 +2944,11 @@ export function RoomView({
       }
       setPendingAnnotationDraft(draft);
     },
-    [eventById, updateReplyDraft],
+    [eventById, setPendingAnnotationDraft, updateReplyDraft],
   );
   const onOpenAnnotation = React.useCallback((request: AnnotationOpenRequest) => {
     setAnnotationSource(request);
-  }, []);
+  }, [setAnnotationSource]);
 
   // ----- Optimistic send plumbing -----
   const onOptimisticAdd = React.useCallback(
@@ -1797,9 +2958,10 @@ export function RoomView({
       options?: { timeoutMs?: number },
     ) => {
       if (!myUsername) return;
-      const now = new Date().toISOString();
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
       const timeoutMs = options?.timeoutMs ?? sendTimeoutMs();
-      const placeholder: LocalEvent = {
+      const placeholderBase: LocalEvent = {
         event_id: TEMP_ID(clientId),
         room: 0,
         sender_kind: "carbon",
@@ -1818,6 +2980,13 @@ export function RoomView({
         _sendTimeoutMs: timeoutMs,
         _sendTimeoutAt: new Date(Date.now() + timeoutMs).toISOString(),
       };
+      const identity = ensureTimelineIdentitySync(
+        timelineOwner,
+        clientId,
+        timelineDevice,
+        nowMs,
+      );
+      const placeholder = applyTimelineIdentity(placeholderBase, identity);
       // Persist before React commits so switching chats immediately after send
       // still paints the outgoing message without waiting on the network.
       appendRoomEventSnippet(room.room_id, placeholder);
@@ -1862,61 +3031,61 @@ export function RoomView({
         });
       }
     },
-    [myUsername, room.room_id, showsProgressForReplies, requestBottomStick],
+    [
+      myUsername,
+      room.room_id,
+      requestBottomStick,
+      timelineDevice,
+      timelineOwner,
+    ],
   );
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
     requestBottomStick("smooth");
     // Sent — the sidebar's last_event will reflect it; drop the pending preview.
     clearPendingPreview(room.room_id, clientId);
+    let identity = bindAcceptedTimelineEvent(timelineOwner, clientId, real);
+    if (!identity) {
+      identity = ensureTimelineIdentitySync(
+        timelineOwner,
+        clientId,
+        timelineDevice,
+        Date.now(),
+      );
+      identity = bindAcceptedTimelineEvent(timelineOwner, clientId, real) ?? identity;
+    }
+    const accepted = applyTimelineIdentity(real, identity, true) as LocalEvent;
     appendRoomEventSnippet(room.room_id, {
-      ...real,
-      _clientId: clientId,
+      ...accepted,
       _status: "sent",
     } as LocalEvent);
     playAckTick(); // §3b — the confirm half of "send → delivered"
-    setEvents((prev) => {
-      const optIdx = prev.findIndex((e) => e._clientId === clientId);
-      const dupIdx = prev.findIndex(
-        (e) => e.event_id === real.event_id && e._clientId !== clientId,
-      );
-      if (optIdx >= 0 && dupIdx < 0) {
-        const updated = [...prev];
-        // Don't downgrade: the WS echo / read_receipt may have already advanced
-        // this row past "sent" before the HTTP ack landed.
-        updated[optIdx] = {
-          ...real,
-          _clientId: clientId,
-          _status: bestStatus(prev[optIdx]._status, "sent"),
-        };
-        return updated;
-      }
-      if (optIdx >= 0 && dupIdx >= 0) {
-        const updated = [...prev];
-        const dup = updated[dupIdx];
-        updated[dupIdx] = {
-          ...dup,
-          _clientId: clientId,
-          _status: bestStatus(dup._status, "sent"),
-        };
-        updated.splice(optIdx, 1);
-        return updated;
-      }
-      if (dupIdx >= 0) {
-        const updated = [...prev];
-        updated[dupIdx] = {
-          ...updated[dupIdx],
-          _status: bestStatus(updated[dupIdx]._status, "sent"),
-        };
-        return updated;
-      }
-      return prev;
-    });
-    // Message is now actually sent → begin the receipt sequence ("sent" → …).
+    // A direct response is the one additional trusted binding source when an
+    // older Glass server omits transaction_id. The reconciler collapses a WS
+    // echo that raced ahead of this response into the original local row.
+    setEvents((prev) =>
+      mergeServerEvents(
+        prev,
+        [accepted],
+        myUsername,
+        timelineOwner,
+        timelineDevice,
+        clientId,
+      ),
+    );
+    // Server acceptance is still waiting; a recipient receipt upgrades it.
     if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(real.type)) {
-      showReceipt("sent");
+      showReceipt("waiting");
     }
-  }, [requestBottomStick, showsProgressForReplies, showReceipt, room.room_id]);
+  }, [
+    showsProgressForReplies,
+    showReceipt,
+    room.room_id,
+    myUsername,
+    requestBottomStick,
+    timelineDevice,
+    timelineOwner,
+  ]);
 
   const onOptimisticUpdate = React.useCallback(
     (clientId: string, payload: OptimisticPayload) => {
@@ -1940,20 +3109,56 @@ export function RoomView({
 
   const onFail = React.useCallback(
     (clientId: string, err: unknown) => {
+      const owner = authStore.getCarbon()?.carbon_id;
+      if (owner) void persistOutboxFailure(owner, clientId, err).catch(() => false);
+      const current = events.find((event) => event._clientId === clientId);
+      const classified = classifySendFailure(err, {
+        attempt: (current?._failure?.attempt ?? 0) + 1,
+        now: Date.now(),
+      });
+      const challenge =
+        err instanceof ApiError ? challengeFromErrorBody(err.body) : null;
+      const status: "failed" | "resolving" | "retry_wait" | "challenge" = challenge
+        ? "challenge"
+        : isAmbiguousSendFailure(classified.failure.httpStatus)
+            ? "resolving"
+            : classified.phase === "blocked"
+              ? "failed"
+              : "retry_wait";
+      const failureChangesVisibleState =
+        !current ||
+        statusAfterSendFailure(current._status, status, current.event_id) !== current._status;
       setEvents((prev) =>
-        prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
+        prev.map((event) =>
+          event._clientId === clientId
+            ? {
+                ...event,
+                _status: statusAfterSendFailure(
+                  event._status,
+                  status,
+                  event.event_id,
+                ) as MessageStatus | undefined,
+                _failure: classified.failure,
+                _nextAttemptAt: classified.failure.nextAttemptAt,
+              }
+            : event,
+        ),
       );
-      failPendingPreview(room.room_id, clientId);
+      if ((status === "failed" || status === "challenge") && failureChangesVisibleState) {
+        failPendingPreview(room.room_id, clientId);
+      }
       setActiveProgress((prev) => (prev?.groupId === `local:${clientId}` ? null : prev));
-      toast.error(err instanceof ApiError ? err.message : String(err));
+      if (status === "failed" && failureChangesVisibleState) {
+        toast.error(sendFailureMessage(classified.failure));
+      }
     },
-    [room.room_id],
+    [events, room.room_id],
   );
 
   // A lost response, stalled upload, dead worker, or sleeping tab must not
-  // leave a bubble saying "sending" forever. Deadlines live on the optimistic
-  // row so room switches preserve them. A late ack is still allowed to replace
-  // the failed row, and retry reuses the client id, making both races safe.
+  // leave a bubble saying "sending" forever. Silence is ambiguous: the durable
+  // outbox keeps automatic ownership, so the UI moves to retrying (never a
+  // terminal manual-retry affordance) and wakes central recovery.
   React.useEffect(() => {
     const pending = events.filter(
       (event) => event._status === "pending" && Boolean(event._clientId),
@@ -1985,18 +3190,21 @@ export function RoomView({
           event._status === "pending" &&
           event._clientId &&
           expiredClientIds.has(event._clientId)
-            ? { ...event, _status: "failed" as MessageStatus }
+            ? {
+                ...event,
+                _status: statusAfterSendTimeout(event._status) as MessageStatus,
+              }
             : event,
         ),
       );
+      const owner = authStore.getCarbon()?.carbon_id;
       for (const clientId of expiredClientIds) {
-        failPendingPreview(room.room_id, clientId);
+        if (owner) wakeOutboxRecovery(owner, clientId);
       }
     }, Math.max(0, nextDeadline - Date.now()) + 25);
     return () => window.clearTimeout(timer);
   }, [events, room.room_id]);
 
-  const heldAckRef = React.useRef(onAck);
   React.useEffect(() => {
     heldAckRef.current = onAck;
   }, [onAck]);
@@ -2004,7 +3212,7 @@ export function RoomView({
   React.useEffect(() => {
     let cancelled = false;
     const timers = new Set<number>();
-    const clientIds = new Map<string, string>();
+    const heldById = new Map<string, HeldSend>();
 
     const schedule = (heldSendId: string, delay: number) => {
       const timer = window.setTimeout(() => {
@@ -2014,6 +3222,16 @@ export function RoomView({
       timers.add(timer);
     };
 
+    const projectSent = async (held: HeldSend): Promise<boolean> => {
+      if (held.state !== "sent" || !held.sent_event_id) return false;
+      const { events: recent } = await loadTimelineWindow(room.room_id);
+      if (cancelled) return false;
+      const event = eventForSentHeld(held, recent);
+      if (!event) return false;
+      heldAckRef.current(held.client_id, event);
+      return true;
+    };
+
     const recover = async (heldSendId: string) => {
       if (cancelled) return;
       try {
@@ -2021,18 +3239,42 @@ export function RoomView({
         if (cancelled) return;
         const held = latest.held_sends.find((item) => item.held_send_id === heldSendId);
         if (!held) {
-          // The hold may already have reached a terminal state while its WS
-          // frame was missed. Reconcile the optimistic row from event history.
-          const recent = await api.events(room.room_id, undefined, 50);
-          const clientId = clientIds.get(heldSendId);
-          const sent = clientId
-            ? recent.find((event) => event.content.client_id === clientId)
-            : undefined;
-          if (sent && clientId) heldAckRef.current(clientId, sent);
+          // The pending-list endpoint may stop returning a terminal hold before
+          // its WS frame arrives. Resolve the *held_send* ledger (never POST an
+          // event_send with the same client id: those are distinct namespaces),
+          // then project only its exact sent_event_id.
+          const known = heldById.get(heldSendId);
+          if (!known) return;
+          let terminal = known;
+          if (terminal.state !== "sent") {
+            const status = await api.clientOperation(
+              room.room_id,
+              "held_send",
+              known.client_id,
+            );
+            const resolved = acceptedHeldSend(
+              status,
+              room.room_id,
+              known.client_id,
+              authStore.getBoundDeviceId(),
+            );
+            if (!resolved) return;
+            terminal = resolved;
+            heldById.set(heldSendId, terminal);
+            applyHeldSendFrame(terminal);
+          }
+          if (terminal.state === "sent" && !(await projectSent(terminal))) {
+            schedule(heldSendId, 1_000);
+          }
           return;
         }
-        clientIds.set(held.held_send_id, held.client_id);
+        heldById.set(held.held_send_id, held);
         applyHeldSendFrame(held);
+        if (held.state === "sent") {
+          if (!(await projectSent(held))) schedule(heldSendId, 1_000);
+          return;
+        }
+        if (!heldSendMaySchedule(held)) return;
         if (held.state === "releasing") {
           schedule(heldSendId, 1_000);
           return;
@@ -2040,23 +3282,22 @@ export function RoomView({
         // This recovery callback was already scheduled from the server's
         // relative hold duration. Do not compare its absolute timestamp to the
         // browser clock again or skew can add another minute here.
-        const released = await api.sendHeldNow(room.room_id, held.held_send_id);
+        const owner = authStore.getCarbon()?.carbon_id ?? null;
+        const release = async (): Promise<HeldSend | null> => {
+          if (owner && !(await maySendHeldOutbox(owner, held.client_id))) return null;
+          return api.sendHeldNow(room.room_id, held.held_send_id);
+        };
+        const released = owner
+          ? await withOutboxClientLock(owner, held.client_id, release)
+          : await release();
         if (cancelled) return;
+        if (!released) return;
+        heldById.set(released.held_send_id, released);
         applyHeldSendFrame(released);
         if (released.state === "sent") {
-          // The send-now endpoint returns the hold projection, not the Event.
-          // An idempotent event POST retrieves the already-created Event so the
-          // optimistic bubble resolves even if its WebSocket echo was missed.
-          const event = await api.sendEvent(
-            room.room_id,
-            {
-              type: held.type,
-              content: held.content,
-              reply_to_event_id: held.reply_to_event_id || undefined,
-            },
-            held.client_id,
-          );
-          if (!cancelled) heldAckRef.current(held.client_id, event);
+          if (!(await projectSent(released))) schedule(heldSendId, 1_000);
+        } else if (released.state === "releasing") {
+          schedule(heldSendId, 1_000);
         }
       } catch {
         // The server ETA task + beat sweep remain authoritative. Retry once
@@ -2067,10 +3308,13 @@ export function RoomView({
     void api.heldSends(room.room_id).then((res) => {
       if (cancelled) return;
       for (const held of res.held_sends) {
-        clientIds.set(held.held_send_id, held.client_id);
+        heldById.set(held.held_send_id, held);
         applyHeldSendFrame(held);
+        if (!heldSendMaySchedule(held)) continue;
         const serverHoldMs =
-          Date.parse(held.release_at) - Date.parse(held.updated_at || held.created_at) + 100;
+          Date.parse(heldSendDeadline(held)) -
+          Date.parse(held.updated_at || held.created_at) +
+          100;
         const delay = Number.isFinite(serverHoldMs)
           ? Math.min(
               HELD_SEND_RECOVERY_MAX_DELAY_MS,
@@ -2106,34 +3350,407 @@ export function RoomView({
         content: ev.content,
         reply_to_event_id: ev.reply_to_event_id || undefined,
       };
-      setEvents((prev) =>
-        prev.map((e) =>
-          e._clientId === clientId
+      void (async () => {
+        const owner = authStore.getCarbon()?.carbon_id;
+        let preparedOperation: "event" | "held" | "media" = "event";
+        try {
+          if (owner) {
+            const heldReleaseAt =
+              typeof payload.content?.hold_release_at === "string"
+                ? payload.content.hold_release_at
+                : undefined;
+            const prepared = await prepareManualOutboxRetry(owner, {
+              roomId: room.room_id,
+              clientId,
+              operation: heldReleaseAt ? "held" : "event",
+              type: payload.type,
+              body: String(payload.content?.body ?? ""),
+              content: payload.content ?? {},
+              replyTo: payload.reply_to_event_id,
+              releaseAt: heldReleaseAt,
+              at: Number.isFinite(Date.parse(ev.created_at))
+                ? Date.parse(ev.created_at)
+                : Date.now(),
+            });
+            preparedOperation = prepared.operation ?? "event";
+          }
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "saved message could not be released");
+          return;
+        }
+
+        // Only show a new pending attempt after the blocked row is durably
+        // queued. A crash from this point is recoverable before any POST.
+        setEvents((prev) =>
+          prev.map((e) =>
+            e._clientId === clientId
+              ? {
+                  ...e,
+                  _status: "pending" as MessageStatus,
+                  _sendTimeoutAt: new Date(
+                    Date.now() + (e._sendTimeoutMs ?? sendTimeoutMs()),
+                  ).toISOString(),
+                }
+              : e,
+          ),
+        );
+        setPendingPreview(room.room_id, {
+          clientId,
+          text: outgoingPreviewText(payload),
+          status: "waiting",
+        });
+        if (preparedOperation === "held" || preparedOperation === "media") {
+          // prepareManualOutboxRetry woke the central durable flusher. It will
+          // retry the operation-aware namespace and preserve held deadlines or
+          // staged media; this UI must never reinterpret either as a plain POST.
+          setEvents((prev) =>
+            prev.map((event) =>
+              event._clientId === clientId
+                ? { ...event, _status: "retrying" as MessageStatus }
+                : event,
+            ),
+          );
+          return;
+        }
+        try {
+          const real = await api.sendEvent(room.room_id, payload, clientId);
+          // Authoritative acceptance updates UX first; local tombstone cleanup
+          // is best-effort and cannot turn a sent message back into failure.
+          onAck(clientId, real);
+          if (owner) {
+            void ackOutbox(owner, clientId, { roomId: room.room_id, event: real });
+          }
+        } catch (error) {
+          onFail(clientId, error);
+        }
+      })();
+    },
+    [room.room_id, onAck, onFail],
+  );
+
+  const projectOutboxRevision = React.useCallback(
+    (row: OutboxEntry, extraContent?: Record<string, unknown>) => {
+      setEvents((current) =>
+        current.map((item) =>
+          item._clientId === row.clientId && item.event_id.startsWith("temp-")
             ? {
-                ...e,
-                _status: "pending" as MessageStatus,
-                _sendTimeoutAt: new Date(
-                  Date.now() + (e._sendTimeoutMs ?? sendTimeoutMs()),
-                ).toISOString(),
+                ...item,
+                type: (row.type ?? "m.text") as Event["type"],
+                content:
+                  row.type && row.type !== "m.text"
+                    ? { ...(row.content ?? {}), ...(extraContent ?? {}) }
+                    : { ...(row.content ?? {}), body: row.body, ...(extraContent ?? {}) },
+                reply_to_event_id: row.replyTo ?? "",
+                _status: restoredOutboxStatus(
+                  row.state,
+                  row.attempts ?? 0,
+                ) as MessageStatus,
+                _failure: row.failure,
+                _nextAttemptAt: row.nextAttemptAt,
               }
-            : e,
+            : item,
         ),
       );
       setPendingPreview(room.room_id, {
-        clientId,
-        text: outgoingPreviewText(payload),
-        status: "waiting",
+        clientId: row.clientId,
+        text: outgoingPreviewText({
+          type: (row.type ?? "m.text") as Event["type"],
+          content:
+            row.type && row.type !== "m.text"
+              ? row.content
+              : { ...(row.content ?? {}), body: row.body },
+          reply_to_event_id: row.replyTo,
+        }),
+        status: row.state === "blocked" || row.state === "challenge" ? "failed" : "waiting",
       });
-      api
-        .sendEvent(room.room_id, payload, clientId)
-        .then((real) => {
-          const owner = authStore.getCarbon()?.carbon_id;
-          if (owner) ackOutbox(owner, clientId);
-          onAck(clientId, real);
-        })
-        .catch((err) => onFail(clientId, err));
     },
-    [room.room_id, onAck, onFail],
+    [room.room_id],
+  );
+
+  const releaseCorrection = React.useCallback(
+    async (event: LocalEvent, action: CorrectionAction, patch: Parameters<typeof commitOutboxCorrection>[3] = {}) => {
+      const owner = authStore.getCarbon()?.carbon_id;
+      if (!owner || !event._clientId) throw new Error("The saved message is unavailable");
+      const row = await commitOutboxCorrection(owner, event._clientId, action, {
+        ...patch,
+        state: "queued",
+        nextAttemptAt: Date.now(),
+        failure: undefined,
+        challenge: undefined,
+        lastError: undefined,
+      });
+      projectOutboxRevision(row);
+      wakeOutboxRecovery(owner, row.clientId);
+      return row;
+    },
+    [projectOutboxRevision],
+  );
+
+  const onCorrection = React.useCallback(
+    (source: Event, action: CorrectionAction) => {
+      const event = source as LocalEvent;
+      const owner = authStore.getCarbon()?.carbon_id;
+      const clientId = event._clientId;
+      if (!owner || !clientId || !event.event_id.startsWith("temp-")) return;
+      void (async () => {
+        const durableRow = (await listOutbox(owner))
+          .find((item) => item.clientId === clientId);
+        if (!durableRow && event._heldSendId) {
+          if (action === "discard_local") {
+            const cancelled = await api.cancelHeldSend(room.room_id, event._heldSendId);
+            applyHeldSendFrameRef.current(cancelled);
+            return;
+          }
+          if (action === "remove_reply") {
+            if (event._heldVersion == null) {
+              throw new Error("The saved message version is unavailable");
+            }
+            const updated = await api.updateHeldSend(
+              room.room_id,
+              event._heldSendId,
+              {
+                base_version: event._heldVersion,
+                reply_to_event_id: "",
+              },
+            );
+            applyHeldSendFrameRef.current(updated);
+            return;
+          }
+          if (action === "edit_message" || action === "review_input") {
+            setPendingTextCorrection({
+              event,
+              action,
+              text: String(event.content.body ?? ""),
+            });
+            return;
+          }
+          if (action === "copy_to_composer") {
+            const text = String(event.content.body ?? event.content.caption ?? "");
+            if (!(await setDraft(room.room_id, text))) {
+              throw new Error("The composer copy could not be saved");
+            }
+            copyEventToComposer(event);
+            toast.success("saved message copied to the composer");
+            return;
+          }
+          if (action === "repair_session") {
+            router.push("/auth/login?notice=session-expired");
+            return;
+          }
+          if (action === "repair_device" && !(await ensureDeviceRegistration())) {
+            toast.error("This device could not be repaired yet.");
+            return;
+          }
+          if (action === "try_later" || action === "repair_device") {
+            const released = await api.sendHeldNow(room.room_id, event._heldSendId);
+            applyHeldSendFrameRef.current(released);
+            return;
+          }
+          if (action === "request_access") {
+            toast.info("Ask a room owner to restore your access. Your message stays saved here.");
+            return;
+          }
+          if (action === "solve_challenge") {
+            toast.info("Complete the verification panel on this device to release the saved message.");
+            return;
+          }
+          if (action === "show_details" && event._failure) {
+            toast.info(sendFailureMessage(event._failure));
+            return;
+          }
+          throw new Error("That held-message correction is not available yet");
+        }
+        if (action === "discard_local") {
+          const discarded = durableRow?.operation === "media"
+            ? await discardMediaSend(owner, durableRow)
+            : await discardOutbox(owner, clientId);
+          if (!discarded) throw new Error("The discard could not be saved");
+          clearPendingPreview(room.room_id, clientId);
+          setEvents((current) => current.filter((item) => item._clientId !== clientId));
+          return;
+        }
+
+        if (action === "remove_reply") {
+          await releaseCorrection(event, action, { replyTo: undefined });
+          return;
+        }
+
+        if (
+          action === "try_later" ||
+          action === "retry_transcription" ||
+          action === "resume_upload"
+        ) {
+          await releaseCorrection(event, action);
+          return;
+        }
+
+        if (action === "restart_upload") {
+          const row = (await listOutbox(owner)).find((item) => item.clientId === clientId);
+          if (!row?.media) throw new Error("The retained attachment is unavailable");
+          const committed = await restartMediaUploadGeneration(owner, row);
+          projectOutboxRevision(committed);
+          wakeOutboxRecovery(owner, clientId);
+          return;
+        }
+
+        // Marker-only actions still commit before opening another surface.
+        await commitOutboxCorrection(owner, clientId, action);
+        if (action === "edit_message" || action === "review_input") {
+          setPendingTextCorrection({
+            event,
+            action,
+            text: String(event.content.body ?? event.content.caption ?? ""),
+          });
+          return;
+        }
+        if (action === "replace_attachment") {
+          setReplacementTarget(event);
+          return;
+        }
+        if (action === "copy_to_composer") {
+          const text = String(event.content.body ?? event.content.caption ?? "");
+          if (!(await setDraft(room.room_id, text))) {
+            throw new Error("The composer copy could not be saved");
+          }
+          copyEventToComposer(event);
+          toast.success("saved message copied to the composer");
+          return;
+        }
+        if (action === "repair_device") {
+          if (await ensureDeviceRegistration()) {
+            await releaseCorrection(event, action);
+          } else {
+            toast.error("This device could not be repaired yet.");
+          }
+          return;
+        }
+        if (action === "repair_session") {
+          router.push("/auth/login?notice=session-expired");
+          return;
+        }
+        if (action === "request_access") {
+          toast.info("Ask a room owner to restore your access. Your message stays saved here.");
+          return;
+        }
+        if (action === "upgrade_client") {
+          toast.info("Update or reload this app, then return to release the saved message.");
+          return;
+        }
+        if (action === "solve_challenge") {
+          toast.info("Complete the verification panel to release this saved message.");
+          return;
+        }
+        if (action === "show_details" && event._failure) {
+          toast.info(sendFailureMessage(event._failure));
+        }
+      })().catch(() => {
+        toast.error("That recovery action could not be saved. The message is still here.");
+      });
+    },
+    [
+      projectOutboxRevision,
+      releaseCorrection,
+      copyEventToComposer,
+      room.room_id,
+      router,
+      setPendingTextCorrection,
+      setReplacementTarget,
+    ],
+  );
+
+  const confirmTextCorrection = React.useCallback(() => {
+    const pending = pendingTextCorrection;
+    if (!pending) return;
+    void (async () => {
+      const owner = authStore.getCarbon()?.carbon_id;
+      const clientId = pending.event._clientId;
+      if (!owner || !clientId) throw new Error("The saved message is unavailable");
+      const current = (await listOutbox(owner)).find((row) => row.clientId === clientId);
+      if (!current && pending.event._heldSendId && pending.event._heldVersion != null) {
+        const content: Record<string, unknown> = {
+          ...pending.event.content,
+          body: pending.text,
+          client_id: clientId,
+        };
+        delete content.hold_release_at;
+        const updated = await api.updateHeldSend(
+          room.room_id,
+          pending.event._heldSendId,
+          {
+            base_version: pending.event._heldVersion,
+            client_id: clientId,
+            content,
+          },
+        );
+        applyHeldSendFrameRef.current(updated);
+        setPendingTextCorrection(null);
+        return;
+      }
+      if (!current) throw new Error("The saved message is unavailable");
+      const committed = await releaseCorrection(
+        pending.event,
+        pending.action,
+        current.operation === "media" && current.media
+          ? {
+              body: pending.text,
+              content: { ...(current.content ?? {}), caption: pending.text },
+              media: {
+                ...current.media,
+                eventContent: {
+                  ...(current.media.eventContent ?? {}),
+                  caption: pending.text,
+                },
+              },
+            }
+          : {
+              body: pending.text,
+              content: { ...(current.content ?? {}), body: pending.text },
+            },
+      );
+      projectOutboxRevision(committed);
+      setPendingTextCorrection(null);
+    })().catch(() => {
+      toast.error("The edit could not be saved. The original message is still here.");
+    });
+  }, [
+    pendingTextCorrection,
+    projectOutboxRevision,
+    releaseCorrection,
+    room.room_id,
+    setPendingTextCorrection,
+  ]);
+
+  const replaceAttachment = React.useCallback(
+    (file: File | null) => {
+      const event = replacementTarget;
+      if (!event || !file) return;
+      void (async () => {
+        if (file.size <= 0) throw new Error("Choose a file that is not empty");
+        const owner = authStore.getCarbon()?.carbon_id;
+        const clientId = event._clientId;
+        if (!owner || !clientId) throw new Error("The saved attachment is unavailable");
+        const current = (await listOutbox(owner)).find((row) => row.clientId === clientId);
+        if (!current?.media) throw new Error("The saved attachment is unavailable");
+        const mime = file.type || "application/octet-stream";
+        const kind = current.media.kind === "voice"
+          ? "voice"
+          : mime.startsWith("image/")
+            ? "image"
+            : "file";
+        const committed = await replaceMediaOutboxSource(owner, current, {
+          blob: file,
+          filename: file.name,
+          mime,
+          kind,
+        });
+        projectOutboxRevision(committed, { local_url: URL.createObjectURL(file) });
+        wakeOutboxRecovery(owner, clientId);
+        setReplacementTarget(null);
+      })().catch(() => {
+        toast.error("The replacement could not be saved. The original attachment is still retained.");
+      });
+    },
+    [projectOutboxRevision, replacementTarget, setReplacementTarget],
   );
 
   // Empty-room "Say Hi" — sends a plain "hi" using the optimistic send flow.
@@ -2144,12 +3761,33 @@ export function RoomView({
     const clientId =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `c_${Date.now()}`;
     const payload: OptimisticPayload = { type: "m.text", content: { body: "hi" } };
-    onOptimisticAdd(clientId, payload);
+    const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+    let optimisticAdded = false;
     try {
+      if (outboxOwner) {
+        await enqueueOutbox(outboxOwner, {
+          roomId: room.room_id,
+          clientId,
+          body: "hi",
+          content: payload.content,
+          at: Date.now(),
+        });
+        onOptimisticAdd(clientId, payload);
+        optimisticAdded = true;
+      }
       const real = await api.sendEvent(room.room_id, payload, clientId);
+      if (!optimisticAdded) {
+        // Sessions without a local account namespace wait for authoritative
+        // server acceptance before introducing a timeline row.
+        onOptimisticAdd(clientId, payload);
+      }
       onAck(clientId, real);
+      if (outboxOwner) {
+        void ackOutbox(outboxOwner, clientId, { roomId: room.room_id, event: real });
+      }
     } catch (e) {
-      onFail(clientId, e);
+      if (optimisticAdded) onFail(clientId, e);
+      else toast.error(e instanceof Error ? e.message : "Message couldn’t be saved");
     } finally {
       setSayingHi(false);
     }
@@ -2164,24 +3802,29 @@ export function RoomView({
         content: { body },
         reply_to_event_id: options?.replyToEventId,
       };
-      onOptimisticAdd(clientId, payload);
       const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
-      if (outboxOwner) {
-        enqueueOutbox(outboxOwner, {
-          roomId: room.room_id,
-          clientId,
-          body,
-          replyTo: options?.replyToEventId,
-          at: Date.now(),
-        });
-      }
+      let optimisticAdded = false;
       try {
+        if (outboxOwner) {
+          await enqueueOutbox(outboxOwner, {
+            roomId: room.room_id,
+            clientId,
+            body,
+            replyTo: options?.replyToEventId,
+            at: Date.now(),
+          });
+          onOptimisticAdd(clientId, payload);
+          optimisticAdded = true;
+        }
         const real = await api.sendEvent(room.room_id, payload, clientId);
-        if (outboxOwner) ackOutbox(outboxOwner, clientId);
+        if (!optimisticAdded) onOptimisticAdd(clientId, payload);
         onAck(clientId, real);
+        if (outboxOwner) {
+          void ackOutbox(outboxOwner, clientId, { roomId: room.room_id, event: real });
+        }
         track.messageSent({ room_id: room.room_id, message_type: "m.text", is_reply: Boolean(options?.replyToEventId) });
       } catch (e) {
-        onFail(clientId, e);
+        if (optimisticAdded) onFail(clientId, e);
         throw e;
       }
     },
@@ -2217,7 +3860,7 @@ export function RoomView({
   };
 
   // ----- Search filter -----
-  const filteredEvents = React.useMemo(() => {
+  const filteredEvents = (() => {
     // No active query (closed, or open-but-empty) → the normal loaded window.
     if (!search?.trim()) return visibleEvents;
     // Active query → server search results across the whole history, sorted
@@ -2225,73 +3868,103 @@ export function RoomView({
     return ([...(searchResults ?? [])] as LocalEvent[]).sort((a, b) =>
       a.created_at.localeCompare(b.created_at),
     );
-  }, [visibleEvents, search, searchResults]);
+  })();
 
-  // Fire the backend search (debounced) whenever the query changes.
+  // Paint the durable local window immediately, then replace it with the
+  // authoritative whole-history result when Glass responds.
   React.useEffect(() => {
     const q = search?.trim() ?? "";
-    if (!q) {
-      setSearchResults(null);
-      setSearchHasMore(false);
-      setSearchLoading(false);
-      searchBlockRef.current = 0;
-      return;
-    }
+    const generation = ++searchGenerationRef.current;
     let alive = true;
-    setSearchLoading(true);
+    if (!q) {
+      searchCursorRef.current = null;
+      queueMicrotask(() => {
+        if (!alive || generation !== searchGenerationRef.current) return;
+        setSearchResults(null);
+        setSearchHasMore(false);
+        setSearchLoading(false);
+        setSearchNotice(null);
+      });
+      return () => {
+        alive = false;
+      };
+    }
+    searchCursorRef.current = null;
+    queueMicrotask(() => {
+      if (!alive || generation !== searchGenerationRef.current) return;
+      setSearchResults(recentLocalSearch(events, q));
+      setSearchHasMore(false);
+      setSearchNotice(null);
+      setSearchLoading(true);
+    });
     const t = window.setTimeout(() => {
-      searchBlockRef.current = 0;
       api
-        .search({ q, room: room.room_id, block: 0, interval: SEARCH_INTERVAL })
+        .search({ q, room: room.room_id, limit: SEARCH_INTERVAL })
         .then((r) => {
-          if (!alive) return;
+          if (!alive || generation !== searchGenerationRef.current) return;
           setSearchResults(r.results);
           setSearchHasMore(r.has_more);
+          searchCursorRef.current = r.cursor;
+          setSearchNotice(null);
         })
-        .catch(() => {
-          if (alive) {
+        .catch((error: unknown) => {
+          if (!alive || generation !== searchGenerationRef.current) return;
+          setSearchHasMore(false);
+          searchCursorRef.current = null;
+          if (error instanceof ApiError && error.status === 400) {
             setSearchResults([]);
-            setSearchHasMore(false);
+            setSearchNotice("This search contains unsupported characters.");
+          } else if (error instanceof ApiError && [429, 503].includes(error.status)) {
+            setSearchNotice("Full-history search is temporarily busy. Recent saved matches remain available.");
+          } else {
+            setSearchNotice("Showing recent saved messages. Full-history search needs a connection.");
           }
         })
         .finally(() => {
-          if (alive) setSearchLoading(false);
+          if (alive && generation === searchGenerationRef.current) setSearchLoading(false);
         });
     }, SEARCH_DEBOUNCE_MS);
     return () => {
       alive = false;
       window.clearTimeout(t);
     };
+    // Search is intentionally restarted only for a new query/room. Live event
+    // changes arrive in the next authoritative request and must not cause a
+    // request storm while the user is typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, room.room_id]);
 
-  // Page in the next block of search hits.
+  // Page through the signed keyset cursor. Repeating a cursor is harmless:
+  // mergeSearchPage removes overlap by authoritative event identity.
   const loadMoreSearch = React.useCallback(async () => {
-    const q = search?.trim() ?? "";
-    if (!q || searchLoading || !searchHasMore) return;
+    const cursor = searchCursorRef.current;
+    const generation = searchGenerationRef.current;
+    if (!cursor || searchLoading || !searchHasMore) return;
     setSearchLoading(true);
+    setSearchNotice(null);
     try {
-      const next = searchBlockRef.current + 1;
-      const r = await api.search({ q, room: room.room_id, block: next, interval: SEARCH_INTERVAL });
-      searchBlockRef.current = next;
-      setSearchResults((prev) => {
-        const seen = new Set((prev ?? []).map((e) => e.event_id));
-        const merged = [...(prev ?? [])];
-        for (const e of r.results) if (!seen.has(e.event_id)) merged.push(e);
-        return merged;
-      });
+      const r = await api.search({ cursor });
+      if (generation !== searchGenerationRef.current) return;
+      searchCursorRef.current = r.cursor;
+      setSearchResults((prev) => mergeSearchPage(prev ?? [], r.results));
       setSearchHasMore(r.has_more);
-    } catch {
-      /* leave existing results in place */
+    } catch (error: unknown) {
+      if (generation !== searchGenerationRef.current) return;
+      setSearchNotice(
+        error instanceof ApiError && error.status === 410
+          ? "This search expired. Reopen it to refresh the full result set."
+          : "Could not load more results. Your current results are still available.",
+      );
     } finally {
-      setSearchLoading(false);
+      if (generation === searchGenerationRef.current) setSearchLoading(false);
     }
-  }, [search, room.room_id, searchLoading, searchHasMore]);
+  }, [searchLoading, searchHasMore]);
   // §2 — collapse attachment+text bundles: attachments sharing a `bundle_id`
   // with a text message are pinned onto that bubble instead of rendered as their
   // own rows. `displayRows` is the timeline minus those folded-in attachments;
   // `pinsByKey` maps the text bubble's render key to its attachment events.
   const { displayRows, pinsByKey } = React.useMemo(() => {
-    const keyOf = (e: Event) => (e as LocalEvent)._clientId ?? e.event_id;
+    const keyOf = (e: Event) => timelineRenderKey(e);
     const bundles = new Map<string, { text?: Event; atts: Event[] }>();
     for (const e of filteredEvents) {
       const bid = (e.content as { bundle_id?: unknown }).bundle_id;
@@ -2314,15 +3987,24 @@ export function RoomView({
       pinsByKey: pins,
     };
   }, [filteredEvents]);
-  const cancelLatestHeld = React.useCallback(() => {
+  // Freeze this anchor for the lifetime of the mounted room. Receipt refreshes
+  // may advance the live boundary, but the visual divider must not jump while
+  // the reader is paging. If the exact anchor was redacted, stream position is
+  // the durable fallback.
+  const [unreadBoundary] = React.useState(() => room.unread_boundary);
+  const unreadDividerEventId = React.useMemo(
+    () => selectUnreadDividerEventId(displayRows, unreadBoundary),
+    [displayRows, unreadBoundary],
+  );
+  const cancelLatestHeld = () => {
     for (let i = visibleEvents.length - 1; i >= 0; i--) {
       const event = visibleEvents[i] as LocalEvent;
       if (!isMyEvent(event, myUsername)) continue;
       if (!event.event_id.startsWith("temp-") || !event._clientId) continue;
-      onSelfDelete(event, pinsByKey.get(event._clientId ?? event.event_id) ?? []);
+      void onSelfDelete(event, pinsByKey.get(timelineRenderKey(event)) ?? []);
       return;
     }
-  }, [myUsername, pinsByKey, visibleEvents]);
+  };
   const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;
   const latestVisibleEventId = latestVisibleEvent?.event_id ?? null;
   // Show the progress line whenever there's active progress for this room. We
@@ -2351,29 +4033,36 @@ export function RoomView({
   }, [progressAvatarHandle, photoFor, headerPhoto]);
 
   // §1 — anchor the active run's status to the message that started it. A
-  // message's key (_clientId/event_id) is stable across the optimistic→server
+  // message's immutable local key is stable across the optimistic→server
   // swap, so identity beats timestamps here (wall-clock skew put the status
   // above the latest message). Record the newest message's key when a run
   // begins.
   const lastRowKey = displayRows.length
-    ? ((displayRows[displayRows.length - 1] as LocalEvent)._clientId ??
-        displayRows[displayRows.length - 1].event_id)
+    ? timelineRenderKey(displayRows[displayRows.length - 1])
     : null;
-  const lastRowKeyRef = React.useRef<string | null>(lastRowKey);
-  lastRowKeyRef.current = lastRowKey;
   const [runAnchorKey, setRunAnchorKey] = React.useState<string | null>(null);
   // Capture the anchor ONCE, on the rising edge of "a run is active" — the
   // message that was latest when the silicon began working. Messages sent while
   // the run stays active must NOT move the anchor (a later message just creates
   // a new progress group-id); they fall below the status as a fresh turn.
   const runActiveNow = !search && shouldShowActiveProgress && !holdingMessage;
+  const runAnchorGenerationRef = React.useRef(0);
   React.useEffect(() => {
-    if (!runActiveNow) {
-      setRunAnchorKey(null);
-      return;
-    }
-    setRunAnchorKey((prev) => prev ?? lastRowKeyRef.current);
-  }, [runActiveNow]);
+    const generation = ++runAnchorGenerationRef.current;
+    queueMicrotask(() => {
+      if (runAnchorGenerationRef.current !== generation) return;
+      if (!runActiveNow) {
+        setRunAnchorKey(null);
+        return;
+      }
+      setRunAnchorKey((prev) => prev ?? lastRowKey);
+    });
+    return () => {
+      if (runAnchorGenerationRef.current === generation) {
+        runAnchorGenerationRef.current += 1;
+      }
+    };
+  }, [runActiveNow, lastRowKey]);
 
   // The active run's server-stamped anchor (the carbon message it's working on),
   // when present — preferred over the client rising-edge guess.
@@ -2388,7 +4077,7 @@ export function RoomView({
       | { kind: "panel"; party: Party; events: Row[]; key: string; dayLabel: string | null }
       | { kind: "system"; event: Row; key: string; dayLabel: string | null }
       | { kind: "progress"; key: string; dayLabel: string | null };
-    const keyOf = (e: Row) => (e as LocalEvent)._clientId ?? e.event_id;
+    const keyOf = (e: Row) => timelineRenderKey(e);
     const isSystem = (e: Row) => e.type === "m.system" || e.type === "m.session_marker";
     const partyOf = (e: Row): Party => (e.sender_kind === "silicon" ? "silicon" : "carbon");
     const dayKey = (iso: string) => {
@@ -2396,32 +4085,20 @@ export function RoomView({
       return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     };
 
-    // §run-grouping — move each silicon reply that carries a run_anchor_event_id
-    // to sit right after the carbon message it answers, so a reply lands under
-    // its question even when newer messages were sent during the run. (No
-    // anchors → unchanged chronological order.)
+    // Run anchors control progress placement only. Message rows always retain
+    // Glass' chronological order; moving a late reply beside an older prompt
+    // makes the newest message appear in the middle of the conversation.
     const present = new Set(displayRows.map((e) => e.event_id));
     const repliesByAnchor = new Map<string, Row[]>();
-    const moved = new Set<Row>();
     for (const e of displayRows) {
       const anchor = e.run_anchor_event_id;
       if (e.sender_kind === "silicon" && anchor && present.has(anchor)) {
         const list = repliesByAnchor.get(anchor) ?? [];
         list.push(e);
         repliesByAnchor.set(anchor, list);
-        moved.add(e);
       }
     }
-    let rows: Row[] = displayRows;
-    if (moved.size) {
-      rows = [];
-      for (const e of displayRows) {
-        if (moved.has(e)) continue;
-        rows.push(e);
-        const replies = repliesByAnchor.get(e.event_id);
-        if (replies) rows.push(...replies);
-      }
-    }
+    const rows: Row[] = displayRows;
 
     const runActiveRaw = !search && shouldShowActiveProgress && !holdingMessage;
     let lastReal: Row | null = null;
@@ -2479,7 +4156,8 @@ export function RoomView({
         raw.push({ item: { kind: "system", event: e, key: keyOf(e), dayLabel: null }, iso: e.created_at });
       } else {
         const p = partyOf(e);
-        if (!cur || cur.party !== p) {
+        const previous = cur?.events[cur.events.length - 1];
+        if (!cur || cur.party !== p || !previous || !belongsToSameTimelinePanel(previous, e)) {
           flush();
           cur = { party: p, events: [] };
         }
@@ -2516,29 +4194,48 @@ export function RoomView({
     room.observed,
     activeAnchorId,
   ]);
-
-  // Keep the viewport pinned to the bottom across content changes when the user
-  // is parked there. Native scroll-anchoring handles content ABOVE the viewport
-  // (images loading, older history prepended) — but appending below it doesn't
-  // move the anchor, so we explicitly stick to the bottom for new messages /
-  // progress. Runs as a layout effect so there's no flash before the scroll.
   React.useLayoutEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    // Older history was just prepended → keep the same content under the
-    // viewport (new height was added above, so shift scrollTop by the delta).
+    timelineLengthRef.current = timelineItems.length;
+  }, [timelineItems.length]);
+
+  // Restore the exact event/pixel captured before a prepend. Stable keys alone
+  // are insufficient when a page boundary merges two sender groups into one
+  // virtual row, so the correction anchors to the actual event DOM node.
+  React.useLayoutEffect(() => {
     const p = pendingPrependRef.current;
     if (p) {
       pendingPrependRef.current = null;
-      el.scrollTop = el.scrollHeight - p.height + p.top;
+      const index = findVirtualAnchorIndex(
+        timelineItems,
+        p.eventId,
+        (item) => item.kind === "panel"
+          ? item.events.map((event) => event.event_id)
+          : item.kind === "system"
+            ? [item.event.event_id]
+            : [],
+      );
+      if (index < 0) return;
+      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "auto" });
+      requestAnimationFrame(() => {
+        const scroller = scrollerRef.current;
+        const node = messageNodeRefs.current.get(p.eventId);
+        if (!scroller || !node) return;
+        const actual = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+        virtuosoRef.current?.scrollBy({
+          top: anchorPixelCorrection(actual, p.offset),
+          behavior: "auto",
+        });
+      });
       return;
     }
-    // Otherwise, if parked at the bottom, follow new messages / progress.
-    if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    if (!textSelectionActiveRef.current && stickToBottomRef.current) {
+      virtuosoRef.current?.autoscrollToBottom();
+    }
   }, [timelineItems]);
 
-  // Land at the bottom once per room, after the server load settles, then a few
-  // re-snaps as late content (images / pdf thumbs) grows the layout.
+  // Every room opens at the latest message. Repeating the snap across the first
+  // few layout passes absorbs late font/media measurement without briefly
+  // leaving the viewport stranded in the middle of the virtual list.
   const didInitialBottomRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!hydrated || timelineItems.length === 0) return;
@@ -2546,8 +4243,9 @@ export function RoomView({
     didInitialBottomRef.current = room.room_id;
     stickToBottomRef.current = true;
     const jump = () => {
-      const el = scrollerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (textSelectionActiveRef.current) return;
+      const index = timelineLengthRef.current - 1;
+      if (index >= 0) virtuosoRef.current?.scrollToIndex({ index, align: "end", behavior: "auto" });
     };
     const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
     const timers = [80, 250, 600].map((ms) => window.setTimeout(jump, ms));
@@ -2556,6 +4254,33 @@ export function RoomView({
       timers.forEach((t) => window.clearTimeout(t));
     };
   }, [room.room_id, hydrated, timelineItems.length]);
+
+  // Composer/reply/attachment banners resize the timeline viewport. Preserve
+  // bottom-follow intent across those resizes; scrolling history disables it.
+  React.useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || typeof ResizeObserver === "undefined") return;
+    let height = scroller.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = scroller.clientHeight;
+      if (nextHeight === height) return;
+      height = nextHeight;
+      if (stickToBottomRef.current && !textSelectionActiveRef.current) {
+        requestAnimationFrame(() => scrollToBottom("auto"));
+      }
+    });
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [hydrated, room.room_id, scrollToBottom]);
+
+  const updateTimelineBottomState = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 120;
+    stickToBottomRef.current = atBottom;
+    setTimelineAtBottom(atBottom);
+    if (atBottom) setUnseenBelow(0);
+  }, []);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -2593,55 +4318,154 @@ export function RoomView({
           ),
       );
       const destination = existing ?? (await api.directRoom(target.kind, target.handle));
+      if (!allowDraftNavigation(room.room_id)) return;
       setProfileOpen(false);
       setFocusSender(null);
       router.push(`/chat?room=${encodeURIComponent(destination.room_id)}`);
     },
-    [allRooms, router],
+    [allRooms, room.room_id, router],
   );
 
   // §2.7 — load the previous page of history (the API supports a `before`
   // cursor). Prepends older events; Virtuoso's firstItemIndex keeps the
   // viewport anchored (see the prepend effect above).
   const loadOlder = React.useCallback(async () => {
-    if (loadingOlder || !hasMore) return;
-    const oldest = events.find((e) => !e.event_id.startsWith("temp-"));
-    if (!oldest) return;
+    if (loadingOlderRef.current || !hasMore) return;
+    if (!historyCursor) return;
+    if (!historyBoundaryEventId) return;
+    loadingOlderRef.current = true;
     setLoadingOlder(true);
+    const requestedRoomId = room.room_id;
     try {
-      const { events: older, hasMore: olderHasMore } = await loadTimelineWindow(
-        room.room_id,
-        oldest.event_id,
+      const knownEventIds = new Set(
+        events
+          .filter((event) => !event.event_id.startsWith("temp-"))
+          .map((event) => event.event_id),
       );
+      let result: Awaited<ReturnType<typeof loadTimelineWindow>>;
+      try {
+        result = await loadTimelineWindow(
+          room.room_id,
+          historyCursor,
+          undefined,
+          historyBoundaryEventId,
+          knownEventIds,
+        );
+      } catch (error) {
+        const code =
+          error instanceof ApiError && error.body && typeof error.body === "object" &&
+          "code" in error.body
+            ? String((error.body as { code?: unknown }).code ?? "")
+            : "";
+        if (!(error instanceof ApiError) || error.status !== 410 || code !== "cursor_expired") {
+          throw error;
+        }
+        try {
+          // A cursor TTL expiry is not a global retention gap. Restart this
+          // room traversal immediately before the cursor's proven boundary,
+          // without touching drafts, outbox, media, or sync cursors.
+          result = await loadTimelineWindow(
+            room.room_id,
+            null,
+            historyBoundaryEventId,
+            undefined,
+            knownEventIds,
+          );
+        } catch (anchorError) {
+          if (!(anchorError instanceof ApiError) || anchorError.status !== 400) {
+            throw anchorError;
+          }
+          // The anchor may have been redacted or access-filtered since it was
+          // cached. Re-establish a fresh fixed traversal; stable event IDs make
+          // the overlap idempotent and the next scroll reaches older rows.
+          result = await loadTimelineWindow(
+            room.room_id,
+            null,
+            undefined,
+            undefined,
+            knownEventIds,
+          );
+        }
+      }
+      const {
+        events: older,
+        hasMore: olderHasMore,
+        cursor: olderCursor,
+        boundaryEventId: olderBoundaryEventId,
+      } = result;
+      // Preserve the native Range if this request began before selection.
+      // Applying the prepend after selection clears is lossless and avoids a
+      // virtual-row re-key underneath the browser.
+      await waitForTextSelectionEnd();
+      if (activeRoomIdRef.current !== requestedRoomId) return;
       if (older.length === 0) {
         setHasMore(false);
+        setHistoryCursor(null);
+        setHistoryBoundaryEventId(null);
         return;
       }
       // Snapshot scroll metrics right before the prepend so the layout effect
       // can restore the exact viewport (older messages add height ABOVE).
+      const addsTimelineRows = hasNovelHistoryRows(older, knownEventIds, isTimelineEvent);
       const el = scrollerRef.current;
-      pendingPrependRef.current = el
-        ? { height: el.scrollHeight, top: el.scrollTop }
-        : null;
+      if (el && addsTimelineRows) {
+        const viewportTop = el.getBoundingClientRect().top;
+        const anchor = [...messageNodeRefs.current.entries()]
+          .map(([eventId, node]) => ({
+            eventId,
+            top: node.getBoundingClientRect().top,
+            bottom: node.getBoundingClientRect().bottom,
+          }))
+          .filter((item) => item.bottom > viewportTop)
+          .sort((a, b) => a.top - b.top)[0];
+        pendingPrependRef.current = anchor
+          ? { eventId: anchor.eventId, offset: anchor.top - viewportTop }
+          : null;
+      }
       setEvents((prev) => {
-        const known = new Set(prev.map((e) => e.event_id));
-        const fresh: LocalEvent[] = older
-          .filter((e) => !known.has(e.event_id))
-          // Loaded history is complete — mark final (matches the initial load).
-          .map((e) => ({
-            ...e,
-            is_final: true,
-            _status: e.sender_handle === myUsername ? ("delivered" as MessageStatus) : undefined,
-          }));
-        return [...fresh, ...prev];
+        const finalized = older.map((event) => ({ ...event, is_final: true }));
+        return mergeServerEvents(
+          prev,
+          finalized,
+          myUsername,
+          timelineOwner,
+          timelineDevice,
+        );
       });
       setHasMore(olderHasMore);
+      setHistoryCursor(olderCursor);
+      setHistoryBoundaryEventId(olderBoundaryEventId);
+      reportHistoryHealthy();
     } catch (e) {
+      reportHistoryFailure(e);
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
+      loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [loadingOlder, hasMore, events, room.room_id, myUsername]);
+  }, [
+    hasMore,
+    historyCursor,
+    historyBoundaryEventId,
+    events,
+    room.room_id,
+    myUsername,
+    timelineDevice,
+    timelineOwner,
+    reportHistoryFailure,
+    reportHistoryHealthy,
+    waitForTextSelectionEnd,
+  ]);
+
+  // `rangeChanged` can fire while the initial live request is still resolving,
+  // when `hasMore` is false. If the cursor then appears while the viewport is
+  // already parked at the top, Virtuoso has no range transition left to emit.
+  // Recheck that edge whenever pagination becomes ready.
+  React.useEffect(() => {
+    if (!hydrated || textSelectionActive || !hasMore || loadingOlderRef.current) return;
+    const scroller = scrollerRef.current;
+    if (scroller && scroller.scrollTop <= 160) void loadOlder();
+  }, [hasMore, hydrated, historyCursor, loadOlder, textSelectionActive]);
 
   // One timeline item's content (day band + body). Shared by the virtualized
   // main list (Virtuoso itemContent) and the non-virtualized search list.
@@ -2702,20 +4526,35 @@ export function RoomView({
               a.sender_handle === e.sender_handle &&
               a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
             const renderedId = e.event_id;
+            const authoritative = hasAuthoritativeEventId(e);
             return (
-              <div
-                key={e._clientId ?? e.event_id}
-                ref={(node) => {
-                  if (node) messageNodeRefs.current.set(renderedId, node);
-                  else messageNodeRefs.current.delete(renderedId);
-                }}
-                data-event-id={renderedId}
-                tabIndex={-1}
-                className={cn(
-                  "scroll-mt-24 rounded-sm transition-[background-color,box-shadow] duration-300 focus:outline-none",
-                  highlightedEventId === renderedId && "bg-primary/5 ring-2 ring-primary/40",
-                )}
-              >
+              <React.Fragment key={timelineRenderKey(e)}>
+                {renderedId === unreadDividerEventId ? (
+                  <div
+                    ref={unreadDividerNodeRef}
+                    data-unread-divider="true"
+                    role="separator"
+                    aria-label="Unread messages"
+                    className="my-3 flex items-center gap-3 text-[10px] font-medium uppercase tracking-[0.14em] text-primary"
+                  >
+                    <span className="h-px flex-1 bg-primary/50" />
+                    <span>Unread messages</span>
+                    <span className="h-px flex-1 bg-primary/50" />
+                  </div>
+                ) : null}
+                <div
+                  ref={(node) => {
+                    if (node) messageNodeRefs.current.set(renderedId, node);
+                    else messageNodeRefs.current.delete(renderedId);
+                  }}
+                  data-event-id={renderedId}
+                  data-stream-position={e.stream_position}
+                  tabIndex={-1}
+                  className={cn(
+                    "scroll-mt-24 rounded-sm transition-[background-color,box-shadow] duration-300 focus:outline-none",
+                    highlightedEventId === renderedId && "bg-primary/5 ring-2 ring-primary/40",
+                  )}
+                >
                 <MessageBubble
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
@@ -2728,36 +4567,59 @@ export function RoomView({
                   replyJumpState={e.reply_to_event_id ? replyJumpState[e.reply_to_event_id] : undefined}
                   isDirect={room.kind === "direct"}
                   status={e._status}
+                  failure={e._failure}
+                  failureMessage={
+                    e._heldChallengeDeviceMismatch
+                      ? "continue on the original device"
+                      : undefined
+                  }
+                  onCorrection={
+                    readOnly || e._heldChallengeDeviceMismatch
+                      ? undefined
+                      : onCorrection
+                  }
                   holdCountdownPaused={holdingMessage}
                   senderPhotoUrl={photoFor(e.sender_kind, e.sender_handle)}
                   senderAsciiUrl={asciiFor(e.sender_kind, e.sender_handle)}
                   senderAvatarKind={e.sender_kind}
                   senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
                   onSenderClick={openSenderProfile}
-                  onTakeBack={readOnly ? undefined : onTakeBack}
+                  onTakeBack={readOnly || !authoritative ? undefined : onTakeBack}
                   showSender={!sameAs(prev)}
                   showTime={!sameAs(next)}
                   reactions={reactionsByTarget.get(e.event_id) ?? undefined}
-                  onReply={readOnly ? undefined : onReply}
-                  onReact={readOnly ? undefined : onReact}
-                  onForward={readOnly ? undefined : onForward}
-                  onSelect={readOnly ? undefined : onSelect}
+                  onReply={readOnly || !authoritative ? undefined : onReply}
+                  onReact={readOnly || !authoritative ? undefined : onReact}
+                  onForward={readOnly || !authoritative ? undefined : onForward}
+                  onReport={
+                    !authoritative || isMyEvent(e, myUsername) ||
+                    (e.sender_kind !== "carbon" && e.sender_kind !== "silicon") ||
+                    !(e.sender_public_id || (e.sender_kind === "carbon" && e.sender_handle))
+                      ? undefined
+                      : (target) => {
+                          setReportReason("spam");
+                          setReportDetails("");
+                          setReportTarget(target);
+                        }
+                  }
+                  onSelect={readOnly || !authoritative ? undefined : onSelect}
                   onEdit={readOnly || !canEditMessage(e) ? undefined : beginEdit}
                   selectMode={selectMode}
-                  selected={selectedEventIds.has(e.event_id)}
-                  onToggleSelect={readOnly ? undefined : toggleSelect}
+                  selected={authoritative && selectedEventIds.has(e.event_id)}
+                  onToggleSelect={readOnly || !authoritative ? undefined : toggleSelect}
                   onRetry={readOnly ? undefined : retrySend}
                   onDelete={
                     readOnly || !canUnsendMessage(e)
                       ? undefined
                       : (target) =>
-                          onSelfDelete(target, pinsByKey.get(e._clientId ?? e.event_id) ?? [])
+                          void onSelfDelete(target, pinsByKey.get(timelineRenderKey(e)) ?? [])
                   }
-                  pinnedAttachments={pinsByKey.get(e._clientId ?? e.event_id)}
+                  pinnedAttachments={pinsByKey.get(timelineRenderKey(e))}
                   mentionTargets={messageMentionTargets}
                   onMentionClick={openSenderProfile}
                 />
-              </div>
+                </div>
+              </React.Fragment>
             );
           })}
         </div>
@@ -2791,7 +4653,10 @@ export function RoomView({
     <button
       type="button"
       aria-live="polite"
-      onClick={() => router.push(`/chat?room=${encodeURIComponent(recordingRoomId)}`)}
+      onClick={() => {
+        if (!allowDraftNavigation(room.room_id)) return;
+        router.push(`/chat?room=${encodeURIComponent(recordingRoomId)}`);
+      }}
       className="flex w-full items-center justify-center gap-2 border-t border-input bg-card px-4 py-2 text-xs text-foreground transition-colors hover:bg-accent"
     >
       <Microphone className="h-3.5 w-3.5 animate-pulse" />
@@ -2843,7 +4708,9 @@ export function RoomView({
               {readOnly && <Eye className="h-3 w-3 shrink-0" />}
               {readOnly
                 ? "observing · read-only"
-                : (formatActivities(activities) ?? display.subtitle)}
+                : chatConnectionStatus
+                  ? chatConnectionStatus
+                  : (formatActivities(activities) ?? carbonPresenceLabel ?? display.subtitle)}
             </p>
           </div>
         </button>
@@ -2869,6 +4736,18 @@ export function RoomView({
           >
             <NotePencil className="h-3.5 w-3.5" />
             Edit
+          </Button>
+        )}
+        {/* Browser — open (or join) this silicon's cloud browser, left of crons. */}
+        {peer?.kind === "silicon" && search === null && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setBrowserOpen(true)}
+            aria-label="open this silicon's browser"
+            title="open this silicon's browser"
+          >
+            <SiliconBrowserMark className="h-4 w-4" />
           </Button>
         )}
         {/* Crons — only in a 1-on-1 silicon chat, left of search. */}
@@ -2907,6 +4786,15 @@ export function RoomView({
         />
       )}
 
+      {peer?.kind === "silicon" && (
+        <SiliconBrowserDialog
+          siliconId={peer.id}
+          siliconName={contact?.name ?? peer.name}
+          open={browserOpen}
+          onOpenChange={setBrowserOpen}
+        />
+      )}
+
       {peer && (
         <SaveContactDialog
           open={saveOpen}
@@ -2939,11 +4827,24 @@ export function RoomView({
 
       {/* data-private masks all message text out of PostHog session replays
           (see instrumentation-client.ts maskTextSelector). */}
+      <div
+        className="relative flex min-h-0 min-w-0 flex-1"
+        data-timeline-selection-active={textSelectionActive ? "true" : undefined}
+      >
       {searching ? (
         // Search results are a small, bounded set — a plain scroll area is fine
         // (no virtualization needed).
         <ScrollArea ref={scrollRootRef} className="flex-1" data-private>
           <div className="w-full px-6 py-4">
+            {searchNotice ? (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mb-3 border border-amber-500/30 bg-amber-500/10 px-3 py-2 font-mono text-[11px] text-muted-foreground"
+              >
+                {searchNotice}
+              </div>
+            ) : null}
             {searchHasMore && filteredEvents.length > 0 ? (
               <div className="flex justify-center pb-3">
                 <button
@@ -2976,7 +4877,7 @@ export function RoomView({
           </div>
         </ScrollArea>
       ) : loading && filteredEvents.length === 0 ? (
-        <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">loading messages…</div>
+        <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">Connecting…</div>
       ) : filteredEvents.length === 0 ? (
         <div className="flex-1 px-6 py-4">
           {/* §2b — first-contact prompt with a one-click Say Hi. */}
@@ -2992,53 +4893,89 @@ export function RoomView({
           </div>
         </div>
       ) : (
-        // Virtualized main timeline — only the visible rows are in the DOM, so it
-        // scales to very long histories. Virtuoso handles dynamic heights,
-        // stick-to-bottom (followOutput), and prepend anchoring (firstItemIndex).
-        // Plain scroll container — native scroll-anchoring (overflowAnchor)
-        // keeps the viewport steady when content above loads or is prepended,
-        // so nothing shifts and there are no virtualization blank-flashes.
-        <div
+        <Virtuoso
           key={room.room_id}
-          ref={scrollerRef}
-          data-private
-          className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden [overflow-anchor:auto]"
-          onScroll={() => {
-            const el = scrollerRef.current;
-            if (!el) return;
-            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-            stickToBottomRef.current = atBottom;
-            if (atBottom) setUnseenBelow(false);
-            // Prefetch older history a buffer BEFORE the top, so the prepend
-            // lands while there's still content above to anchor against.
-            if (el.scrollTop < 600 && hasMore && !loadingOlder) void loadOlder();
+          ref={virtuosoRef}
+          data={timelineItems}
+          computeItemKey={(_index, item) => item.key}
+          defaultItemHeight={96}
+          increaseViewportBy={timelineViewportPadding(textSelectionActive)}
+          alignToBottom
+          initialTopMostItemIndex={{ index: "LAST", align: "end" }}
+          followOutput={(isAtBottom) => isAtBottom ? "auto" : false}
+          atBottomThreshold={120}
+          atBottomStateChange={(atBottom) => {
+            if (atBottom) {
+              stickToBottomRef.current = true;
+              setTimelineAtBottom(true);
+              setUnseenBelow(0);
+            }
           }}
-        >
-          <ChatListHeader loadingOlder={loadingOlder} />
-          {timelineItems.map((item) => (
-            <div key={item.key} className="px-6" style={{ display: "flow-root" }}>
+          rangeChanged={({ startIndex }) => {
+            if (shouldLoadOlderDuringRangeChange({
+              selectionActive: textSelectionActive,
+              startIndex,
+              hasMore,
+              loadingOlder,
+            })) {
+              void loadOlder();
+            }
+            markVisibleRead();
+          }}
+          scrollerRef={(ref) => {
+            scrollerRef.current = ref instanceof HTMLElement ? ref as HTMLDivElement : null;
+          }}
+          data-private
+          className="min-h-0 min-w-0 flex-1"
+          onScroll={() => {
+            updateTimelineBottomState();
+            markVisibleRead();
+          }}
+          components={{
+            Header: () => <ChatListHeader loadingOlder={loadingOlder} />,
+            Footer: () => (
+              <>
+                {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
+                <div className="h-4" />
+              </>
+            ),
+          }}
+          itemContent={(_index, item) => (
+            <div className="px-6" style={{ display: "flow-root" }}>
               {renderTimelineItem(item)}
             </div>
-          ))}
-          {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
-          <div className="h-4" />
-        </div>
+          )}
+        />
       )}
 
-      {/* §1.9 — when a message arrives while scrolled up, surface a pill to
-          jump back to the latest instead of silently appending below the fold. */}
-      {unseenBelow && !readOnly ? (
+      {/* Keep the affordance mounted so both its entrance and exit ease. */}
+      <div
+        className={cn(
+          "absolute bottom-4 right-6 z-10 transition-all duration-200 ease-out",
+          !timelineAtBottom && !searching
+            ? "translate-y-0 scale-100 opacity-100"
+            : "pointer-events-none translate-y-2 scale-95 opacity-0",
+        )}
+      >
         <button
           type="button"
           onClick={() => {
-            setUnseenBelow(false);
             requestBottomStick("smooth");
           }}
-          className="absolute bottom-24 left-1/2 z-10 -translate-x-1/2 border border-foreground bg-foreground px-3 py-1.5 text-xs font-medium text-background shadow-none transition-opacity hover:opacity-90"
+          aria-label={unseenBelow > 0
+            ? `go to bottom, ${unseenBelow} new ${unseenBelow === 1 ? "message" : "messages"}`
+            : "go to bottom"}
+          className="relative grid h-10 w-10 place-items-center border border-foreground bg-foreground text-background shadow-sm transition-transform duration-200 ease-out hover:-translate-y-0.5"
         >
-          ↓ new messages
+          <ArrowDown className="h-4 w-4" weight="bold" />
+          {unseenBelow > 0 ? (
+            <span className="absolute -right-2 -top-2 grid min-h-5 min-w-5 place-items-center border border-background bg-destructive px-1 text-[10px] font-semibold leading-none text-destructive-foreground">
+              {unseenBelow > 99 ? "99+" : unseenBelow}
+            </span>
+          ) : null}
         </button>
-      ) : null}
+      </div>
+      </div>
 
       {selectMode && voiceSession.phase === "idle" ? (
         // Dope #79 — selection action bar, shown in place of the composer while
@@ -3074,6 +5011,15 @@ export function RoomView({
         </>
       ) : (
         <>
+          {!plaintextSendAllowed && (
+            <div className="flex items-center justify-center gap-2 border-t border-input bg-muted/40 px-6 py-3 text-xs text-muted-foreground">
+              <WarningCircle className="h-3.5 w-3.5 text-destructive" />
+              <span>
+                This private encrypted room needs a newer E2EE-capable client. Your draft stays
+                saved here, but plaintext sending is disabled.
+              </span>
+            </div>
+          )}
           {siliconUnavailable && (
             <div className="flex items-center justify-center gap-2 border-t border-input bg-muted/40 px-6 py-3 text-xs text-muted-foreground">
               <WarningCircle className="h-3.5 w-3.5 text-destructive" />
@@ -3100,16 +5046,21 @@ export function RoomView({
             onHoldStateChange={setHoldingMessage}
             cancelQueuedRef={cancelQueuedRef}
             clearHeldClientRef={clearHeldClientRef}
+            onHeldSendUpdate={(held) => applyHeldSendFrameRef.current(held)}
             mentionCandidates={mentionCandidates}
             editingEvent={editingEvent}
             onEditComplete={() => setEditingEvent(null)}
             onPersistedEdit={persistEdit}
             onRequestEditLast={requestEditLast}
-            restoreDraft={restoreDraft}
-            onRestoreDraftConsumed={() => setRestoreDraft(null)}
+            copyDraft={composerCopy}
+            onComposerCopyConsumed={() => setComposerCopy(null)}
             onCancelHeldLast={cancelLatestHeld}
-            sendDisabled={siliconUnavailable}
-            sendDisabledReason="This silicon is not available right now."
+            sendDisabled={siliconUnavailable || !plaintextSendAllowed}
+            sendDisabledReason={
+              !plaintextSendAllowed
+                ? "Update to an E2EE-capable client before sending in this private room."
+                : "This silicon is not available right now."
+            }
           />
         </>
       )}
@@ -3151,6 +5102,130 @@ export function RoomView({
       />
 
       <Dialog
+        open={!!reportTarget}
+        onOpenChange={(open) => {
+          if (!open && !reportSubmitting) setReportTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Report this message?</DialogTitle>
+            <DialogDescription>
+              The message and its sender are attached as private evidence. They are not notified
+              that you submitted the report.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="space-y-2 text-sm">
+            <span className="font-medium">Reason</span>
+            <select
+              value={reportReason}
+              onChange={(event) => setReportReason(event.target.value as ModerationReportReason)}
+              disabled={reportSubmitting}
+              className="w-full border border-input bg-background px-3 py-2 outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="spam">Spam</option>
+              <option value="harassment">Harassment</option>
+              <option value="inappropriate">Inappropriate content</option>
+              <option value="other">Something else</option>
+            </select>
+          </label>
+          <label className="space-y-2 text-sm">
+            <span className="font-medium">Details (optional)</span>
+            <textarea
+              value={reportDetails}
+              onChange={(event) => setReportDetails(event.target.value.slice(0, 1000))}
+              disabled={reportSubmitting}
+              rows={4}
+              maxLength={1000}
+              placeholder="Tell the safety team what happened."
+              className="w-full resize-y border border-input bg-background px-3 py-2 outline-none focus:ring-2 focus:ring-ring"
+            />
+            <span className="block text-right text-xs text-muted-foreground">
+              {reportDetails.length}/1000
+            </span>
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              disabled={reportSubmitting}
+              onClick={() => setReportTarget(null)}
+            >
+              cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={reportSubmitting}
+              onClick={() => void submitModerationReport()}
+            >
+              {reportSubmitting ? "saving report…" : "submit report"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!pendingTextCorrection}
+        onOpenChange={(open) => !open && setPendingTextCorrection(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Fix saved message</DialogTitle>
+            <DialogDescription>
+              Your original stays saved until this corrected version commits to the same send.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="space-y-2 text-sm">
+            <span className="font-medium">Message</span>
+            <textarea
+              value={pendingTextCorrection?.text ?? ""}
+              onChange={(event) =>
+                setPendingTextCorrection((current) =>
+                  current ? { ...current, text: event.target.value } : current,
+                )
+              }
+              rows={5}
+              autoFocus
+              className="w-full resize-y border border-input bg-background px-3 py-2 outline-none focus:ring-2 focus:ring-ring"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setPendingTextCorrection(null)}>
+              cancel
+            </Button>
+            <Button onClick={confirmTextCorrection}>save and retry</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!replacementTarget}
+        onOpenChange={(open) => !open && setReplacementTarget(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Replace saved attachment</DialogTitle>
+            <DialogDescription>
+              The replacement is copied into protected browser storage before this send resumes.
+            </DialogDescription>
+          </DialogHeader>
+          <input
+            type="file"
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0] ?? null;
+              event.currentTarget.value = "";
+              replaceAttachment(file);
+            }}
+            className="block w-full border border-input bg-background p-2 text-sm file:mr-3 file:border-0 file:bg-primary file:px-3 file:py-1.5 file:text-primary-foreground"
+          />
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={() => setReplacementTarget(null)}>
+              cancel
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={!!pendingDelete}
         onOpenChange={(v) => !v && setPendingDelete(null)}
       >
@@ -3158,7 +5233,7 @@ export function RoomView({
           <DialogHeader>
             <DialogTitle>Unsend message?</DialogTitle>
             <DialogDescription>
-              This removes it for everyone and brings it back to your composer.
+              This removes it for everyone. It won’t be copied back into your draft.
             </DialogDescription>
           </DialogHeader>
           <div className="flex justify-end gap-2">
@@ -3178,6 +5253,7 @@ export function RoomView({
     </RoomSendProvider>
   );
 }
+/* eslint-enable react-hooks/preserve-manual-memoization */
 
 function ProgressLine({
   entry,
@@ -3194,12 +5270,17 @@ function ProgressLine({
   staleMs?: number;
   onDismiss?: () => void;
 }) {
-  // Receipt phase: "message sent" / "message read" before the actual work
-  // progress kicks in. Rendered with the same activity-line markup as the live
-  // progress line (mono uppercase copy + the pixel core) so it shares the
-  // "WORKING" styling and transitions seamlessly into real progress.
+  // Activity matches the sidebar: clock while waiting, one tick when delivered,
+  // and two ticks only when read.
   if (entry.receipt) {
-    const read = entry.receipt === "read";
+    const presentation = messageReceiptPresentation(
+      entry.receipt === "waiting" ? "sent" : entry.receipt,
+    );
+    const receiptIcon = presentation.visual === "read"
+      ? <Checks className="h-4 w-4 text-[#1A1A1A]" weight="bold" aria-hidden />
+      : presentation.visual === "delivered" || presentation.visual === "sent"
+        ? <Check className="h-4 w-4" weight="bold" aria-hidden />
+        : <Clock className="h-4 w-4 opacity-60" aria-hidden />;
     return (
       <div className="my-2 flex w-full items-center justify-start gap-2">
         <div className="w-7 shrink-0">
@@ -3208,13 +5289,13 @@ function ProgressLine({
         <div className="min-w-0 max-w-[70%]">
           <span className="silicon-activity-line flex min-h-7 items-center text-sm">
             <span className="inline-flex min-w-0 max-w-full items-center gap-3 overflow-hidden">
-              <span className="silicon-activity-copy">
-                {read ? "message read" : "message sent"}
-              </span>
-              <span className="silicon-activity-core" aria-hidden="true">
-                {Array.from({ length: 16 }, (_, i) => (
-                  <span key={i} />
-                ))}
+              <span
+                className="inline-flex items-center gap-1.5"
+                role="status"
+                aria-label={presentation.label}
+              >
+                {receiptIcon}
+                <span className="silicon-activity-copy">{presentation.label}</span>
               </span>
             </span>
           </span>
@@ -3262,19 +5343,21 @@ function ProgressLineLive({
   avatarSrc?: string | null;
   avatarFamily?: "carbon" | "silicon";
 }) {
-  const initialTickRef = React.useRef<number | null>(null);
-  if (initialTickRef.current === null) {
-    initialTickRef.current = randomProgressTick(progressLineOptions(entry).length, -1);
-  }
-  const [tick, setTick] = React.useState(initialTickRef.current);
+  const [initialTick] = React.useState(() =>
+    randomProgressTick(progressLineOptions(entry.state, entry.note).length, -1),
+  );
+  const tickRef = React.useRef(initialTick);
   const [typed, setTyped] = React.useState("");
   const typedRef = React.useRef("");
   const pendingTargetRef = React.useRef<string | null>(null);
-  const [target, setTarget] = React.useState(() => formatProgressLine(entry, initialTickRef.current ?? 0));
+  const [target, setTarget] = React.useState(() =>
+    formatProgressLine(entry.state, entry.note, initialTick),
+  );
   const targetRef = React.useRef(target);
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
   const typedDoneAtRef = React.useRef(0);
+  const transitionGenerationRef = React.useRef(0);
 
   React.useEffect(() => {
     typedRef.current = typed;
@@ -3285,40 +5368,52 @@ function ProgressLineLive({
   }, [target]);
 
   React.useEffect(() => {
-    const nextTick = randomProgressTick(progressLineOptions(entry).length, tick);
-    const next = formatProgressLine(entry, nextTick);
+    const generation = ++transitionGenerationRef.current;
+    const nextTick = randomProgressTick(
+      progressLineOptions(entry.state, entry.note).length,
+      tickRef.current,
+    );
+    tickRef.current = nextTick;
+    const next = formatProgressLine(entry.state, entry.note, nextTick);
     const currentTyped = typedRef.current;
     const currentTarget = targetRef.current;
     const currentComplete = currentTyped === currentTarget && currentTarget.length > 0;
-    setTick(nextTick);
+    let transition: (() => void) | null = null;
 
     if (currentTyped === next) {
       pendingTargetRef.current = null;
-      return;
-    }
-
-    if (currentTyped) {
+    } else if (currentTyped) {
       pendingTargetRef.current = next;
-      if (!currentComplete) return;
-
-      const typedDoneAt = typedDoneAtRef.current || Date.now();
-      const remainingHold = MIN_PROGRESS_STATUS_MS - (Date.now() - typedDoneAt);
-      if (remainingHold > 0) {
-        holdMsRef.current = remainingHold;
-        setPhase("holding");
-      } else {
-        setPhase("erasing");
+      if (currentComplete) {
+        const typedDoneAt = typedDoneAtRef.current || Date.now();
+        const remainingHold = MIN_PROGRESS_STATUS_MS - (Date.now() - typedDoneAt);
+        if (remainingHold > 0) {
+          holdMsRef.current = remainingHold;
+          transition = () => setPhase("holding");
+        } else {
+          transition = () => setPhase("erasing");
+        }
       }
-      return;
+    } else {
+      pendingTargetRef.current = null;
+      typedDoneAtRef.current = 0;
+      transition = () => {
+        if (currentTarget !== next) setTarget(next);
+        setTyped("");
+        setPhase("typing");
+      };
     }
 
-    pendingTargetRef.current = null;
-    typedDoneAtRef.current = 0;
-    if (currentTarget !== next) {
-      setTarget(next);
+    if (transition) {
+      queueMicrotask(() => {
+        if (transitionGenerationRef.current === generation) transition();
+      });
     }
-    setTyped("");
-    setPhase("typing");
+    return () => {
+      if (transitionGenerationRef.current === generation) {
+        transitionGenerationRef.current += 1;
+      }
+    };
   }, [entry.groupId, entry.state, entry.note, entry.source]);
 
   React.useEffect(() => {
@@ -3357,16 +5452,19 @@ function ProgressLineLive({
         setPhase("typing");
         return;
       }
-      const nextTick = randomProgressTick(progressLineOptions(entry).length, tick);
-      setTick(nextTick);
+      const nextTick = randomProgressTick(
+        progressLineOptions(entry.state, entry.note).length,
+        tickRef.current,
+      );
+      tickRef.current = nextTick;
       typedDoneAtRef.current = 0;
-      setTarget(formatProgressLine(entry, nextTick));
+      setTarget(formatProgressLine(entry.state, entry.note, nextTick));
       setPhase("typing");
     }
     return () => {
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [phase, typed, target, entry, tick]);
+  }, [phase, typed, target, entry.state, entry.note]);
 
   return (
     <div className="my-2 flex w-full items-center justify-start gap-2">
@@ -3391,11 +5489,11 @@ function ProgressLineLive({
   );
 }
 
-function progressLineOptions(entry: ProgressEntry): string[] {
+function progressLineOptions(state: ProgressState, noteValue: string): string[] {
   // The actual flow: the silicon's note if it sent one, else the real state.
-  const note = meaningfulProgressNote(entry.note, entry.state);
+  const note = meaningfulProgressNote(noteValue, state);
   if (note) return [sentenceCase(note)];
-  return [progressStateLabel(entry.state)];
+  return [progressStateLabel(state)];
 }
 
 function randomProgressTick(length: number, previous: number): number {
@@ -3407,8 +5505,8 @@ function randomProgressTick(length: number, previous: number): number {
   return next;
 }
 
-function formatProgressLine(entry: ProgressEntry, tick = 0): string {
-  const lines = progressLineOptions(entry);
+function formatProgressLine(state: ProgressState, note: string, tick = 0): string {
+  const lines = progressLineOptions(state, note);
   return truncateProgressLine(lines[tick % lines.length]);
 }
 
@@ -3598,45 +5696,35 @@ function mergeServerEvents(
   prev: LocalEvent[],
   server: Event[],
   myUsername: string | null,
+  ownerId: string,
+  currentDevice: string | null,
+  directClientId?: string,
 ): LocalEvent[] {
-  const serverIds = new Set(server.map((e) => e.event_id));
-  const byPrev = new Map(prev.map((e) => [e.event_id, e] as const));
-  const byClient = new Map<string, LocalEvent>();
-  for (const event of prev) {
-    const clientId = localClientId(event);
-    if (clientId) byClient.set(clientId, event);
-  }
-  const consumedLocalIds = new Set<string>();
-  const merged: LocalEvent[] = server.map((ev) => {
-    const clientId = localClientId(ev);
-    const existing = byPrev.get(ev.event_id) ?? (clientId ? byClient.get(clientId) : undefined);
-    if (existing) {
-      if (existing.event_id !== ev.event_id) consumedLocalIds.add(existing.event_id);
-      const mine = Boolean(ev.sender_handle && ev.sender_handle === myUsername);
+  const reconciled = reconcileTimelineEvents(prev, server, {
+    ownerId,
+    currentDevice,
+    directClientId,
+    merge: (existing, incoming) => {
+      const mine = Boolean(incoming.sender_handle && incoming.sender_handle === myUsername);
       return {
-        ...ev,
-        _status: mine ? bestStatus(existing._status, "delivered") : existing._status,
-        _clientId: existing._clientId ?? clientId ?? undefined,
+        ...incoming,
+        _status: mine
+          ? bestStatus(existing._status, serverDeliveryStatus(incoming))
+          : existing._status,
+        _sendTimeoutAt: existing._sendTimeoutAt,
+        _sendTimeoutMs: existing._sendTimeoutMs,
       };
-    }
-    const mine = ev.sender_handle && ev.sender_handle === myUsername;
-    return { ...ev, _status: mine ? ("delivered" as MessageStatus) : undefined };
+    },
   });
-  const localOnly = prev.filter(
-    (e) => !serverIds.has(e.event_id) && !consumedLocalIds.has(e.event_id),
-  );
-  // Keep strict chronological order. Appending localOnly (e.g. older history
-  // loaded via loadOlder, or optimistic temps) to the end scrambled the array,
-  // which broke loadOlder's "oldest = events[0]" cursor and stalled pagination.
-  // ULID / ISO created_at sorts lexicographically = chronologically.
-  return [...merged, ...localOnly].sort((a, b) =>
-    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
-  );
-}
-
-function localClientId(event: Event | LocalEvent): string | null {
-  const local = (event as LocalEvent)._clientId;
-  if (typeof local === "string" && local) return local;
-  const content = event.content?.client_id;
-  return typeof content === "string" && content ? content : null;
+  return reconciled.map((event) => {
+    if (
+      event._status == null &&
+      hasAuthoritativeEventId(event) &&
+      event.sender_handle &&
+      event.sender_handle === myUsername
+    ) {
+      return { ...event, _status: serverDeliveryStatus(event) };
+    }
+    return event;
+  });
 }

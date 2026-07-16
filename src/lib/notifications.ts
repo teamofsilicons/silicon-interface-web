@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { desktopBridge } from "./desktop-bridge";
+
 const VERSION = 2;
 const MAX_NOTIFICATIONS = 80;
 const PREFIX = "silicon-interface:notifications";
@@ -171,6 +173,14 @@ export function clearNotifications(ownerId: string) {
   persist(ownerId, [], 0);
 }
 
+/** Remove a retracted event without marking unrelated room notifications read. */
+export function removeNotificationByEvent(ownerId: string, eventId: string) {
+  if (!ownerId || !eventId) return;
+  const store = read(ownerId);
+  const items = store.items.filter((item) => item.eventId !== eventId);
+  if (items.length !== store.items.length) persist(ownerId, items, store.unreadExtra);
+}
+
 // ---- Desktop-wrapper awareness ---------------------------------------------
 // The native desktop apps (WKWebView / WebView2 shells) inject a bridge that
 // marks itself via `__siliconBridge`, and — on hosts that support it — mirrors
@@ -182,6 +192,8 @@ interface WrapperWindowState {
   focused: boolean;
   visible: boolean;
 }
+
+let desktopWindowState: WrapperWindowState | undefined;
 
 declare global {
   interface Window {
@@ -202,7 +214,12 @@ export const WINDOW_STATE_EVENT = "silicon-interface:window-state";
  */
 export function userPresent(): boolean {
   if (typeof document === "undefined") return true;
-  const ws = typeof window !== "undefined" ? window.__siliconWindowState : undefined;
+  const bridge = desktopBridge();
+  // Until the native state arrives, prefer suppressing an OS notification over
+  // risking both an in-app toast and an OS banner for the same message.
+  if (bridge && !desktopWindowState) return true;
+  const ws = desktopWindowState
+    ?? (typeof window !== "undefined" ? window.__siliconWindowState : undefined);
   if (ws) return ws.visible && ws.focused;
   return document.visibilityState === "visible";
 }
@@ -210,9 +227,21 @@ export function userPresent(): boolean {
 /** Subscribe to presence flips (tab visibility or wrapper window state). */
 export function onPresenceChange(cb: () => void): () => void {
   if (typeof window === "undefined") return () => undefined;
+  const bridge = desktopBridge();
+  const unsubscribe = bridge?.window.onStateChanged((state) => {
+    desktopWindowState = state;
+    cb();
+  });
+  if (bridge) {
+    void bridge.window.getState().then((state) => {
+      desktopWindowState = state;
+      cb();
+    }).catch(() => undefined);
+  }
   window.addEventListener(WINDOW_STATE_EVENT, cb);
   document.addEventListener("visibilitychange", cb);
   return () => {
+    unsubscribe?.();
     window.removeEventListener(WINDOW_STATE_EVENT, cb);
     document.removeEventListener("visibilitychange", cb);
   };
@@ -220,12 +249,7 @@ export function onPresenceChange(cb: () => void): () => void {
 
 /** React hook over userPresent(). */
 export function usePresence(): boolean {
-  const [present, setPresent] = React.useState(true);
-  React.useEffect(() => {
-    setPresent(userPresent());
-    return onPresenceChange(() => setPresent(userPresent()));
-  }, []);
-  return present;
+  return React.useSyncExternalStore(onPresenceChange, userPresent, () => true);
 }
 
 /**
@@ -236,6 +260,11 @@ export function usePresence(): boolean {
 export function reportUnreadBadge(count: number) {
   if (typeof window === "undefined") return;
   try {
+    const bridge = desktopBridge();
+    if (bridge) {
+      bridge.window.setBadgeCount(count);
+      return;
+    }
     window.__siliconSetBadge?.(count);
   } catch {
     /* wrapper hook misbehaved — never let it break the app */
@@ -294,19 +323,39 @@ export function showBrowserNotification(
       badge: "/icon.png",
       ...options,
     });
+    const eventId = typeof options.tag === "string" ? options.tag : "";
+    if (eventId) activeBrowserNotifications.set(eventId, notification);
+    notification.onclose = () => {
+      if (eventId && activeBrowserNotifications.get(eventId) === notification) {
+        activeBrowserNotifications.delete(eventId);
+      }
+    };
     notification.onclick = () => {
+      desktopBridge()?.window.show();
       window.focus();
       // Soft client-side navigation: ask a subscriber (the chat page) to open
       // the room instead of a hard window.location.href, which would
       // cold-reload the SPA and drop the live socket.
       if (options.roomId) {
-        window.dispatchEvent(
-          new CustomEvent(NOTIFICATION_NAVIGATE_EVENT, { detail: { roomId: options.roomId } }),
-        );
+        window.dispatchEvent(new CustomEvent(NOTIFICATION_NAVIGATE_EVENT, {
+          detail: {
+            roomId: options.roomId,
+          },
+        }));
       }
       notification.close();
     };
   } catch {
     /* Some browsers still reject Notification construction despite permission. */
   }
+}
+
+const activeBrowserNotifications = new Map<string, Notification>();
+
+/** Close an already displayed foreground Notification for one exact event. */
+export function closeBrowserNotification(eventId: string) {
+  const notification = activeBrowserNotifications.get(eventId);
+  if (!notification) return;
+  activeBrowserNotifications.delete(eventId);
+  try { notification.close(); } catch { /* browser disposed it already */ }
 }

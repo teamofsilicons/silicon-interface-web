@@ -134,3 +134,35 @@ pnpm build                # production build
 pnpm exec tsc --noEmit    # type check
 pnpm lint
 ```
+
+## Production deploy
+
+Run the complete local preflight without changing Vercel:
+
+```bash
+pnpm deploy:dry-run
+```
+
+Deploy the verified frozen source to `interface.teamofsilicons.com`:
+
+```bash
+pnpm deploy:production
+```
+
+The production command builds an immutable candidate without moving the domain,
+tests that candidate, then promotes its exact deployment ID. It refuses to
+overwrite a concurrent deployment and safely restores the prior deployment if
+its own promoted candidate fails verification. Every run records the source
+manifest, gates, deployment identity, and outcome under
+`~/.silicon/releases/<release-id>/deployment-evidence.json`. See
+[DEPLOYMENT.md](./DEPLOYMENT.md) for the full contract.
+
+## Desktop applications
+
+The shared hardened Electron shell, native build commands, release gates, and
+signing/publishing runbook for macOS, Windows, and Linux are documented in
+[`desktop/README.md`](./desktop/README.md). See the
+[`desktop master plan`](./DESKTOP_APPLICATION_MASTER_PLAN.md) for the complete
+architecture and platform analysis, and
+[`desktop verification record`](./desktop/VERIFICATION.md) for the current
+evidence and remaining external release gates.

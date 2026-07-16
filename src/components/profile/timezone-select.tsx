@@ -37,9 +37,6 @@ export function TimezoneSelect({ value, onChange }: Props) {
   // expensive listZones() only re-runs on open (not every second). The trigger
   // label below still uses live `now`, so the closed chip stays a live clock.
   const [openedAt, setOpenedAt] = React.useState<Date>(() => new Date());
-  React.useEffect(() => {
-    if (open) setOpenedAt(new Date());
-  }, [open]);
 
   const zones = React.useMemo(() => listZones(openedAt), [openedAt]);
 
@@ -53,9 +50,6 @@ export function TimezoneSelect({ value, onChange }: Props) {
   // whenever the query changes or the popover opens so it never points past the
   // end of the (re-filtered) list.
   const [active, setActive] = React.useState(0);
-  React.useEffect(() => {
-    setActive(0);
-  }, [q, open]);
 
   const listId = React.useId();
   const optionId = (i: number) => `${listId}-opt-${i}`;
@@ -108,7 +102,9 @@ export function TimezoneSelect({ value, onChange }: Props) {
       open={open}
       onOpenChange={(o) => {
         setOpen(o);
-        if (!o) setQ("");
+        setActive(0);
+        if (o) setOpenedAt(new Date());
+        else setQ("");
       }}
     >
       <PopoverTrigger
@@ -135,7 +131,10 @@ export function TimezoneSelect({ value, onChange }: Props) {
           <input
             autoFocus
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setActive(0);
+            }}
             onKeyDown={onSearchKeyDown}
             placeholder="search by city, country, or GMT offset"
             className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"

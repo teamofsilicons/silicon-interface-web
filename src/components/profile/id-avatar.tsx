@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { identiconSvg, identiconAscii, type MarkFamily } from "@/lib/avatar";
+import { identiconDataUrl, identiconAscii, type MarkFamily } from "@/lib/avatar";
 import { cn } from "@/lib/utils";
 
 /** Square avatar: uploaded photo if present, else a deterministic MarkSystem glyph. */
@@ -26,7 +26,10 @@ export function IdAvatar({
   variant?: "mark" | "ascii";
   className?: string;
 }) {
-  const svg = React.useMemo(() => identiconSvg(seed || "?", size, family), [seed, size, family]);
+  const markSrc = React.useMemo(
+    () => identiconDataUrl(seed || "?", size, family),
+    [seed, size, family],
+  );
   const ascii = React.useMemo(
     () => (variant === "ascii" ? identiconAscii(seed || "?", family) : ""),
     [variant, seed, family],
@@ -40,12 +43,10 @@ export function IdAvatar({
   // QA §7.6: presigned S3 photo URLs expire. Without an onError handler an
   // expired (or otherwise broken) URL renders the browser's broken-image icon
   // instead of the deterministic glyph we already computed. Track load failure
-  // and fall back to the glyph. Reset whenever the src changes so a fresh URL
-  // gets another chance.
-  const [failed, setFailed] = React.useState(false);
-  React.useEffect(() => {
-    setFailed(false);
-  }, [effective]);
+  // and fall back to the glyph. Key the failure by URL so a fresh presigned URL
+  // always gets its own load attempt without synchronizing state in an effect.
+  const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
+  const failed = effective === failedSrc;
 
   if (effective && !failed) {
     return (
@@ -58,7 +59,7 @@ export function IdAvatar({
         height={size}
         style={style}
         className={cn("sdr-media shrink-0 border object-cover", className)}
-        onError={() => setFailed(true)}
+        onError={() => setFailedSrc(effective)}
       />
     );
   }
@@ -77,16 +78,23 @@ export function IdAvatar({
     );
   }
   return (
-    <span
+    // A generated logo is an immutable, self-contained image. Rendering its
+    // SVG markup directly in the page allowed duplicate SVG IDs to interfere
+    // across repeated instances of the same team.
+    // eslint-disable-next-line @next/next/no-img-element -- generated data URL; no network optimization applies
+    <img
+      src={markSrc}
+      alt=""
       aria-hidden
+      width={size}
+      height={size}
       style={style}
       // §0e — a subtle "breathe" on hover. transform-only (no reflow); stilled
       // under reduced-motion.
       className={cn(
-        "inline-block shrink-0 overflow-hidden border motion-safe:transition-transform motion-safe:duration-300 motion-safe:hover:scale-[1.06]",
+        "block shrink-0 overflow-hidden border motion-safe:transition-transform motion-safe:duration-300 motion-safe:hover:scale-[1.06]",
         className,
       )}
-      dangerouslySetInnerHTML={{ __html: svg }}
     />
   );
 }

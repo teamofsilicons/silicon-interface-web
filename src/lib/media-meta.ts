@@ -23,6 +23,14 @@ const META_TIMEOUT_MS = 8000;
 const PEAKS_MAX_BYTES = 25 * 1024 * 1024; // 25 MB compressed
 const PEAKS_MAX_DURATION_MS = 20 * 60 * 1000; // 20 minutes
 
+/** Identify a GIF from canonical MIME, with a filename fallback for legacy
+ * events that predate the mime field. */
+export function isGifMedia(mime: unknown, filename?: unknown): boolean {
+  const normalizedMime = typeof mime === "string" ? mime.split(";", 1)[0].trim().toLowerCase() : "";
+  if (normalizedMime === "image/gif") return true;
+  return typeof filename === "string" && /\.gif$/i.test(filename.trim());
+}
+
 /** Decode an image enough to read its natural dimensions. */
 export async function measureImage(
   file: File | Blob,

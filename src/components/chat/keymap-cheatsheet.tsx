@@ -1,6 +1,10 @@
 "use client";
 
 import * as React from "react";
+import {
+  readComposerEnterBehavior,
+  subscribeComposerEnterBehavior,
+} from "@/lib/composer-preferences";
 
 // Delights §7d — a mono shortcut cheatsheet on Shift+? (a "?" keypress). Reads
 // like a terminal man page.
@@ -8,7 +12,6 @@ const KEYS: [string, string][] = [
   ["⌘K / ctrl K", "jump to a room, person, or dev"],
   ["j / k", "move through the room list"],
   ["esc", "close the open conversation"],
-  ["enter", "send a message"],
   ["/shrug", "¯\\_(ツ)_/¯"],
   ["/me <action>", "send an action line"],
   ["/clear", "empty the draft"],
@@ -17,6 +20,11 @@ const KEYS: [string, string][] = [
 
 export function KeymapCheatsheet() {
   const [open, setOpen] = React.useState(false);
+  const enterBehavior = React.useSyncExternalStore(
+    subscribeComposerEnterBehavior,
+    readComposerEnterBehavior,
+    () => "send",
+  );
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -52,7 +60,13 @@ export function KeymapCheatsheet() {
         </div>
         <table className="w-full font-mono text-xs">
           <tbody>
-            {KEYS.map(([k, v]) => (
+            {[
+              ...KEYS.slice(0, 3),
+              enterBehavior === "send"
+                ? (["enter", "send a message"] as [string, string])
+                : (["⌘↵ / ctrl ↵", "send a message"] as [string, string]),
+              ...KEYS.slice(3),
+            ].map(([k, v]) => (
               <tr key={k} className="border-b last:border-b-0">
                 <td className="w-40 whitespace-nowrap px-4 py-2 text-foreground">{k}</td>
                 <td className="px-4 py-2 text-muted-foreground">{v}</td>

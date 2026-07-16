@@ -50,14 +50,23 @@ export function SiliconInviteDialog({
   const qrRef = React.useRef<HTMLCanvasElement>(null);
 
   React.useEffect(() => {
-    if (!open) {
-      setInvite(null);
-      setError("");
-      return;
-    }
     let alive = true;
-    setLoading(true);
-    setError("");
+    if (!open) {
+      queueMicrotask(() => {
+        if (!alive) return;
+        setInvite(null);
+        setError("");
+      });
+      return () => {
+        alive = false;
+      };
+    }
+    queueMicrotask(() => {
+      if (!alive) return;
+      setInvite(null);
+      setLoading(true);
+      setError("");
+    });
     api
       .createInvite(teamSlug, { scope: "silicon", silicon_id: siliconId, channel: "link" })
       .then((inv) => {

@@ -9,8 +9,15 @@ import {
   giphyConfigured,
   type GifResult,
 } from "@/lib/giphy";
+import { cn } from "@/lib/utils";
 
-export function GifPicker({ onPick }: { onPick: (gif: GifResult) => void }) {
+export function GifPicker({
+  onPick,
+  className,
+}: {
+  onPick: (gif: GifResult) => void;
+  className?: string;
+}) {
   const [query, setQuery] = React.useState("");
   const [results, setResults] = React.useState<GifResult[]>([]);
   const [loading, setLoading] = React.useState(giphyConfigured());
@@ -100,7 +107,12 @@ export function GifPicker({ onPick }: { onPick: (gif: GifResult) => void }) {
   );
 
   return (
-    <div className="flex h-[min(70dvh,430px)] w-[min(92vw,420px)] flex-col bg-background">
+    <div
+      className={cn(
+        "flex h-[min(70dvh,430px)] w-[min(92vw,420px)] flex-col bg-background",
+        className,
+      )}
+    >
       <div className="flex items-center gap-2 border-b px-3 py-2">
         <MagnifyingGlass className="h-4 w-4 shrink-0" />
         <input

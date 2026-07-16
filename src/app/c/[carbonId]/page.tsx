@@ -14,12 +14,14 @@ export default function CarbonDeepLink() {
 
   React.useEffect(() => {
     const handle = params.carbonId;
-    if (!authStore.getAccess()) {
-      router.replace(`/auth/login?identifier=${encodeURIComponent(handle)}`);
-      return;
-    }
     let alive = true;
     (async () => {
+      const authed = Boolean(authStore.getAccess()) || await api.restoreWebSession();
+      if (!alive) return;
+      if (!authed) {
+        router.replace(`/auth/login?identifier=${encodeURIComponent(handle)}`);
+        return;
+      }
       try {
         const carbon = await api.carbonByHandle(handle);
         const room = await api.directRoom("carbon", carbon.carbon_id);

@@ -6,9 +6,30 @@ import { env } from "./env";
 import { api } from "./api";
 import { authStore } from "./auth";
 import type { HeldSend, WsFrame } from "./types";
+import { SyncBarrierBuffer } from "./sync-barrier-buffer";
+import { protocolCompatibility } from "./protocol-window";
+import {
+  heldSendMaySchedule,
+  heldSendScheduleDelayMs,
+  heldSendScheduleSignature,
+} from "./held-send-state";
+import { acceptSocketHelloOnce, type SocketHelloState } from "./ws-handshake";
+import {
+  CLIENT_SYNC_REPAIR_CLOSE_CODE,
+  DEFAULT_HEARTBEAT_POLICY,
+  heartbeatAction,
+  normalizeHeartbeatPolicy,
+  socketCloseAction,
+  type HeartbeatPolicy,
+} from "./liveness-policy";
+import { probeApiConnectivity } from "./connectivity-classifier";
 
 interface UseWsOptions {
   onFrame?: (f: WsFrame) => void;
+  onBarrier?: (
+    hello: Extract<WsFrame, { type: "hello" }>,
+    context: { generation: number; signal: AbortSignal },
+  ) => Promise<void>;
   enabled?: boolean;
 }
 
@@ -17,17 +38,20 @@ interface UseWsReturn {
   lastFrame: WsFrame | null;
   send: (frame: object) => void;
   reconnect: () => void;
+  state:
+    | "offline"
+    | "captive"
+    | "degraded"
+    | "connecting"
+    | "authenticating"
+    | "syncing"
+    | "online";
 }
 
 // Heartbeat keeps idle connections alive (proxies/load-balancers drop silent
 // sockets). Backoff caps reconnection attempts after an unexpected drop —
 // e.g. a backend restart, a network blip, or a backgrounded tab.
-const PING_INTERVAL_MS = 25_000;
 const MAX_BACKOFF_MS = 15_000;
-// Watchdog: if NOTHING has arrived (no pong, no frames) for this long, the
-// socket is dead-but-open (sleeping proxy, dropped uplink with no FIN) —
-// force-close it so the close handler's reconnect path takes over.
-const STALE_AFTER_MS = PING_INTERVAL_MS * 2.5;
 // Ticket-based WS auth: mint a single-use, short-TTL ticket per connect
 // attempt so the URL never carries the long-lived JWT. Minting is a plain
 // HTTP call (with api.ts's transparent 401-refresh) — it must never wedge the
@@ -37,8 +61,7 @@ const STALE_AFTER_MS = PING_INTERVAL_MS * 2.5;
 const TICKET_MINT_TIMEOUT_MS = 5_000;
 const HELD_SEND_SYNC_MS = 15_000;
 const HELD_SEND_RETRY_MS = 2_000;
-const HELD_SEND_PENDING_MAX_DELAY_MS = 10_100;
-const HELD_SEND_RELEASING_MAX_DELAY_MS = 5_100;
+const MAX_BUFFERED_FRAMES = 1_000;
 
 /** Resolve to a ticket string, or null when minting failed/timed out
  *  (network down, 5xx, endpoint not deployed yet). Never rejects. */
@@ -53,17 +76,27 @@ function mintTicket(): Promise<string | null> {
   return Promise.race([mint, timeout]);
 }
 
-export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): UseWsReturn {
+export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptions = {}): UseWsReturn {
   const [ready, setReady] = React.useState(false);
+  const [state, setState] = React.useState<UseWsReturn["state"]>("offline");
   const [lastFrame, setLastFrame] = React.useState<WsFrame | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
   const onFrameRef = React.useRef(onFrame);
-  onFrameRef.current = onFrame;
+  const onBarrierRef = React.useRef(onBarrier);
+  React.useLayoutEffect(() => {
+    onFrameRef.current = onFrame;
+    onBarrierRef.current = onBarrier;
+  }, [onBarrier, onFrame]);
+  const barrierBufferRef = React.useRef(new SyncBarrierBuffer<WsFrame>(MAX_BUFFERED_FRAMES));
+  const barrierAbortRef = React.useRef<AbortController | null>(null);
+  const onlineRef = React.useRef(false);
+  const foregroundRef = React.useRef(false);
 
   const pingRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   // Last time ANY message arrived — pongs included. Drives the stale watchdog.
   // Stamped on `open`, so the 0 initial value never trips the check.
   const lastActivityRef = React.useRef(0);
+  const heartbeatPolicyRef = React.useRef<HeartbeatPolicy>(DEFAULT_HEARTBEAT_POLICY);
   const reconnectRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptsRef = React.useRef(0);
   // True only when we tear the socket down on purpose (unmount / token change /
@@ -74,6 +107,7 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
   // happened) while we were waiting, the stale attempt must abort instead of
   // stacking a second socket.
   const connectSeqRef = React.useRef(0);
+  const connectFnRef = React.useRef<() => void>(() => {});
   // Held-send recovery is deliberately socket/page scoped, not RoomView
   // scoped. Switching chats remounts RoomView; this ref survives and keeps the
   // original message's authoritative release timer alive.
@@ -92,6 +126,11 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
 
   const connect = React.useCallback(() => {
     if (!enabled) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setReady(false);
+      setState("offline");
+      return;
+    }
     // Already have a live/connecting socket — don't stack a second one.
     const existing = wsRef.current;
     if (
@@ -105,14 +144,16 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     const siliconKey = authStore.getSiliconKey();
     if (!access && !siliconKey) return;
     intentionalRef.current = false;
+    setState("connecting");
     const seq = ++connectSeqRef.current;
 
     const scheduleReconnect = () => {
       if (intentionalRef.current || !enabled) return;
-      const delay = Math.min(1000 * 2 ** attemptsRef.current, MAX_BACKOFF_MS);
+      const base = Math.min(1000 * 2 ** attemptsRef.current, MAX_BACKOFF_MS);
+      const delay = Math.round(base * (0.5 + Math.random()));
       attemptsRef.current += 1;
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
-      reconnectRef.current = setTimeout(() => connect(), delay);
+      reconnectRef.current = setTimeout(() => connectFnRef.current(), delay);
     };
 
     const wsUrl = (params: Record<string, string>) =>
@@ -121,45 +162,158 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     const open = (url: string) => {
       try {
         const ws = new WebSocket(url);
+        const helloState: SocketHelloState = { received: false };
         wsRef.current = ws;
-        ws.addEventListener("open", () => {
-          setReady(true);
-          attemptsRef.current = 0;
-          lastActivityRef.current = Date.now();
+        const restartHeartbeat = () => {
           if (pingRef.current) clearInterval(pingRef.current);
-          pingRef.current = setInterval(() => {
+          const tick = () => {
             try {
-              if (ws.readyState === WebSocket.OPEN) {
-                // No pong (or any other frame) since well before the last ping —
-                // the connection is silently dead. Close it; the close handler
-                // schedules the reconnect.
-                if (Date.now() - lastActivityRef.current > STALE_AFTER_MS) {
-                  ws.close();
-                  return;
-                }
-                ws.send(JSON.stringify({ type: "ping" }));
-              }
+              const action = heartbeatAction({
+                networkAvailable: navigator.onLine !== false,
+                socketOpen: ws.readyState === WebSocket.OPEN,
+                waking: false,
+                elapsedMs: performance.now() - lastActivityRef.current,
+                policy: heartbeatPolicyRef.current,
+              });
+              if (action === "reconnect") ws.close(4408, "heartbeat timeout");
+              else if (action === "ping") ws.send(JSON.stringify({ type: "ping" }));
             } catch {
-              /* ignore */
+              /* close/error handlers own recovery */
             }
-          }, PING_INTERVAL_MS);
-        });
-        ws.addEventListener("close", () => {
+          };
+          pingRef.current = setInterval(tick, heartbeatPolicyRef.current.intervalMs);
+        };
+        ws.addEventListener("open", () => {
           setReady(false);
+          setState("authenticating");
+          onlineRef.current = false;
+          // Buffer anything arriving after TCP open until hello's authoritative
+          // event/account barriers have both been drained.
+          barrierBufferRef.current.start();
+          heartbeatPolicyRef.current = DEFAULT_HEARTBEAT_POLICY;
+          lastActivityRef.current = performance.now();
+          restartHeartbeat();
+        });
+        ws.addEventListener("close", (event) => {
+          if (wsRef.current !== ws) return;
+          setReady(false);
+          if (navigator.onLine === false) {
+            setState("offline");
+          } else {
+            setState("degraded");
+            void probeApiConnectivity().then((classification) => {
+              if (wsRef.current !== null || onlineRef.current) return;
+              setState(classification === "reachable" ? "degraded" : classification);
+            });
+          }
+          onlineRef.current = false;
+          barrierBufferRef.current.reset();
+          barrierAbortRef.current?.abort();
+          barrierAbortRef.current = null;
           if (wsRef.current === ws) wsRef.current = null;
           if (pingRef.current) {
             clearInterval(pingRef.current);
             pingRef.current = null;
           }
-          scheduleReconnect();
+          const closeAction = socketCloseAction({
+            code: event.code,
+            networkAvailable: navigator.onLine !== false,
+            wanted: !intentionalRef.current && enabled,
+          });
+          if (closeAction === "reconnect_and_sync") scheduleReconnect();
         });
         ws.addEventListener("error", () => {
           // a `close` event always follows — reconnection is handled there.
         });
         ws.addEventListener("message", (e) => {
-          lastActivityRef.current = Date.now();
+          if (wsRef.current !== ws) return;
+          lastActivityRef.current = performance.now();
           try {
             const f = JSON.parse(e.data) as WsFrame;
+            if (f.type === "hello") {
+              const accepted = acceptSocketHelloOnce(helloState, {
+                abortBarrier: () => {
+                  barrierAbortRef.current?.abort();
+                  barrierAbortRef.current = null;
+                },
+                invalidateGeneration: () => {
+                  connectSeqRef.current += 1;
+                },
+                resetBuffer: () => barrierBufferRef.current.reset(),
+                close: (code, reason) => ws.close(code, reason),
+              });
+              if (!accepted) {
+                onlineRef.current = false;
+                setReady(false);
+                setState("offline");
+                return;
+              }
+              if (
+                protocolCompatibility(
+                  1,
+                  f.protocol_min ?? 1,
+                  f.protocol_max ?? f.protocol_version ?? 1,
+                ) !== "compatible"
+              ) {
+                ws.close(1008, "protocol incompatible");
+                return;
+              }
+              heartbeatPolicyRef.current = normalizeHeartbeatPolicy(
+                f.heartbeat_interval_ms ?? DEFAULT_HEARTBEAT_POLICY.intervalMs,
+                f.heartbeat_timeout_ms ?? DEFAULT_HEARTBEAT_POLICY.timeoutMs,
+              );
+              restartHeartbeat();
+              setState("syncing");
+              const barrierSeq = connectSeqRef.current;
+              barrierAbortRef.current?.abort();
+              const barrierController = new AbortController();
+              barrierAbortRef.current = barrierController;
+              void Promise.resolve(onBarrierRef.current?.(f, {
+                generation: barrierSeq,
+                signal: barrierController.signal,
+              }))
+                .then(() => {
+                  if (
+                    barrierController.signal.aborted ||
+                    barrierSeq !== connectSeqRef.current ||
+                    wsRef.current !== ws
+                  ) return;
+                  onlineRef.current = true;
+                  attemptsRef.current = 0;
+                  const buffered = barrierBufferRef.current.release();
+                  for (const frame of buffered) {
+                    if (frame.type === "held_send") heldFrameRef.current(frame.held_send);
+                    onFrameRef.current?.(frame);
+                  }
+                  setReady(true);
+                  setState("online");
+                  const foreground =
+                    document.visibilityState === "visible" && document.hasFocus();
+                  foregroundRef.current = foreground;
+                  try {
+                    ws.send(JSON.stringify({
+                      type: "presence",
+                      state: foreground ? "active" : "inactive",
+                    }));
+                  } catch {
+                    /* chat remains authoritative; lease expires safely */
+                  }
+                })
+                .catch(() => {
+                  if (!barrierController.signal.aborted && wsRef.current === ws) {
+                    ws.close(CLIENT_SYNC_REPAIR_CLOSE_CODE, "sync failed");
+                  }
+                });
+              return;
+            }
+            if (!onlineRef.current) {
+              const offered = barrierBufferRef.current.offer(f, f.type === "pong");
+              if (offered === "ignored" || offered === "buffered") return;
+              if (offered === "overflow") {
+                ws.close(CLIENT_SYNC_REPAIR_CLOSE_CODE, "sync buffer overflow");
+                return;
+              }
+            }
             if (f.type === "held_send") heldFrameRef.current(f.held_send);
             setLastFrame(f);
             onFrameRef.current?.(f);
@@ -198,15 +352,27 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
         open(wsUrl({ ticket }));
         return;
       }
-      // Mint failed (offline / transient 5xx): back off and retry.
+      // Mint failed. Distinguish no route, captive interception, and reachable
+      // HTTPS with a degraded WS/auth path; HTTPS sync may still repair the last.
+      void probeApiConnectivity().then((classification) => {
+        if (seq !== connectSeqRef.current || intentionalRef.current) return;
+        if (classification !== "reachable") setState(classification);
+        else setState("degraded");
+      });
       scheduleReconnect();
     });
   }, [enabled]);
+  React.useLayoutEffect(() => {
+    connectFnRef.current = connect;
+  }, [connect]);
 
   React.useEffect(() => {
-    connect();
+    const initialConnect = setTimeout(connect, 0);
     return () => {
+      clearTimeout(initialConnect);
       intentionalRef.current = true;
+      barrierAbortRef.current?.abort();
+      barrierAbortRef.current = null;
       clearTimers();
       wsRef.current?.close();
       wsRef.current = null;
@@ -217,10 +383,14 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
   React.useEffect(() => {
     return authStore.subscribe(() => {
       intentionalRef.current = true;
+      barrierAbortRef.current?.abort();
+      barrierAbortRef.current = null;
       clearTimers();
       wsRef.current?.close();
       wsRef.current = null;
       setReady(false);
+      setState("offline");
+      onlineRef.current = false;
       attemptsRef.current = 0;
       setTimeout(() => connect(), 50);
     });
@@ -232,21 +402,68 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     if (!enabled) return;
     const wake = () => {
       const ws = wsRef.current;
-      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      const socketOpen = ws?.readyState === WebSocket.OPEN;
+      const action = heartbeatAction({
+        networkAvailable: navigator.onLine !== false,
+        socketOpen,
+        waking: true,
+        elapsedMs: performance.now() - lastActivityRef.current,
+        policy: heartbeatPolicyRef.current,
+      });
+      if (action === "reconnect" && socketOpen) {
+        attemptsRef.current = 0;
+        ws.close(1000, "wake liveness check");
+      } else if (action === "reconnect") {
         attemptsRef.current = 0;
         connect();
+      } else if (action === "ping" && socketOpen) {
+        try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* close owns recovery */ }
       }
     };
-    const onVisible = () => {
-      if (document.visibilityState === "visible") wake();
+    const onOffline = () => {
+      setReady(false);
+      setState("offline");
+      wsRef.current?.close(1001, "network unavailable");
     };
-    window.addEventListener("online", wake);
-    window.addEventListener("focus", wake);
-    document.addEventListener("visibilitychange", onVisible);
+    const classifyWake = () => {
+      void probeApiConnectivity().then((classification) => {
+        if (classification === "reachable") wake();
+        else {
+          setReady(false);
+          setState(classification);
+          wsRef.current?.close(1001, "network path not usable");
+        }
+      });
+    };
+    const publishForeground = () => {
+      const foreground =
+        document.visibilityState === "visible" && document.hasFocus();
+      if (foreground === foregroundRef.current) return;
+      foregroundRef.current = foreground;
+      const ws = wsRef.current;
+      if (onlineRef.current && ws?.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({
+            type: "presence",
+            state: foreground ? "active" : "inactive",
+          }));
+        } catch {
+          /* disconnect/lease expiry owns recovery */
+        }
+      }
+      if (foreground) wake();
+    };
+    window.addEventListener("online", classifyWake);
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("focus", publishForeground);
+    window.addEventListener("blur", publishForeground);
+    document.addEventListener("visibilitychange", publishForeground);
     return () => {
-      window.removeEventListener("online", wake);
-      window.removeEventListener("focus", wake);
-      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", classifyWake);
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("focus", publishForeground);
+      window.removeEventListener("blur", publishForeground);
+      document.removeEventListener("visibilitychange", publishForeground);
     };
   }, [connect, enabled]);
 
@@ -254,12 +471,14 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     if (!enabled) return;
     let cancelled = false;
     const timers = new Map<string, number>();
+    const timerSignatures = new Map<string, string>();
     const releasing = new Set<string>();
 
     const clearHeldTimer = (heldSendId: string) => {
       const timer = timers.get(heldSendId);
       if (timer !== undefined) window.clearTimeout(timer);
       timers.delete(heldSendId);
+      timerSignatures.delete(heldSendId);
     };
 
     async function requestRelease(held: HeldSend) {
@@ -274,31 +493,41 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
         if (cancelled) return;
         const retry = window.setTimeout(() => schedule(held), HELD_SEND_RETRY_MS);
         timers.set(held.held_send_id, retry);
+        timerSignatures.set(
+          held.held_send_id,
+          heldSendScheduleSignature(held),
+        );
       }
     }
 
     function schedule(held: HeldSend) {
-      clearHeldTimer(held.held_send_id);
-      if (held.state === "sent" || held.state === "cancelled" || held.state === "failed") {
+      if (!heldSendMaySchedule(held)) {
+        clearHeldTimer(held.held_send_id);
         releasing.delete(held.held_send_id);
         return;
       }
+      if (releasing.has(held.held_send_id)) return;
+      const signature = heldSendScheduleSignature(held);
+      if (
+        timers.has(held.held_send_id) &&
+        timerSignatures.get(held.held_send_id) === signature
+      ) {
+        return;
+      }
+      clearHeldTimer(held.held_send_id);
       // Use server-relative duration, never its absolute wall clock. A browser
-      // clock that is ahead/behind cannot turn ten seconds into zero or sixty.
-      // Releasing rows get a short grace before send-now reclaims a dead worker.
-      const serverHoldMs =
-        Date.parse(held.release_at) - Date.parse(held.created_at) + 100;
-      const delay =
-        held.state === "releasing"
-          ? HELD_SEND_RELEASING_MAX_DELAY_MS
-          : Number.isFinite(serverHoldMs)
-            ? Math.min(HELD_SEND_PENDING_MAX_DELAY_MS, Math.max(0, serverHoldMs))
-            : HELD_SEND_RETRY_MS;
+      // clock that is ahead/behind cannot turn five seconds into zero or sixty.
+      // Unchanged poll rows retain the original timer; user extensions change
+      // the version/signature and replace it. Releasing rows get a short grace
+      // before send-now reclaims a dead worker.
+      const delay = heldSendScheduleDelayMs(held);
       const timer = window.setTimeout(() => {
         timers.delete(held.held_send_id);
+        timerSignatures.delete(held.held_send_id);
         void requestRelease(held);
       }, delay);
       timers.set(held.held_send_id, timer);
+      timerSignatures.set(held.held_send_id, signature);
     }
 
     const sync = async () => {
@@ -345,9 +574,15 @@ export function useChatSocket({ onFrame, enabled = true }: UseWsOptions = {}): U
     intentionalRef.current = true;
     wsRef.current?.close();
     wsRef.current = null;
+    barrierBufferRef.current.reset();
+    barrierAbortRef.current?.abort();
+    barrierAbortRef.current = null;
+    onlineRef.current = false;
+    setReady(false);
+    setState("offline");
     attemptsRef.current = 0;
     setTimeout(() => connect(), 50);
   }, [connect, clearTimers]);
 
-  return { ready, lastFrame, send, reconnect };
+  return { ready, lastFrame, send, reconnect, state };
 }

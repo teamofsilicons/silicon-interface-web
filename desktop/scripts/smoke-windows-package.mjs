@@ -261,11 +261,25 @@ async function verifyPortableExecutable(executablePath) {
   }
 }
 
-export async function smokeWindowsPackage(options) {
+async function verifyRuntimeExecutable(executablePath) {
+  const canonical = await realpath(executablePath);
+  const details = await stat(canonical);
+  if (!details.isFile() || path.basename(canonical) !== PRODUCT_EXECUTABLE) {
+    fail(`unexpected Windows runtime executable: ${canonical}`);
+  }
+  await verifyPortableExecutable(canonical);
+  const asarPath = path.join(path.dirname(canonical), "resources", "app.asar");
+  await access(asarPath);
+  if (!(await stat(asarPath)).isFile()) {
+    fail(`packaged application archive is not a file: ${asarPath}`);
+  }
+  return canonical;
+}
+
+export async function smokeWindowsExecutable(inputExecutablePath, options) {
   if (process.platform !== "win32") fail("Windows package smoke test requires Windows");
 
-  const executablePath = await resolveWindowsExecutable(options.packagePath);
-  await verifyPortableExecutable(executablePath);
+  const executablePath = await verifyRuntimeExecutable(inputExecutablePath);
   const desktopManifest = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -361,6 +375,11 @@ export async function smokeWindowsPackage(options) {
     ]);
     if (terminationError) throw terminationError;
   }
+}
+
+export async function smokeWindowsPackage(options) {
+  const executablePath = await resolveWindowsExecutable(options.packagePath);
+  await smokeWindowsExecutable(executablePath, options);
 }
 
 async function main() {

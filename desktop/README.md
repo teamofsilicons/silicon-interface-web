@@ -162,10 +162,11 @@ receipt after the deployed Interface has hydrated its trusted desktop bridge.
 They validate package version, platform, architecture, process identity, and
 the exact HTTPS production origin, hold a stability window, terminate the full
 process tree, and remove all smoke data. Linux performs a real DEB install and
-uninstall; Windows separately performs a silent NSIS install/uninstall in an
-ephemeral directory. The smoke mode never reads a user's cookies or drafts,
-takes over an installed app, changes the protocol handler, or checks for
-updates.
+uninstall; Windows separately performs a silent NSIS install, launches the
+installed executable through the same readiness gate, and then confirms a
+silent uninstall in an ephemeral directory. The smoke mode never reads a
+user's cookies or drafts, takes over an installed app, changes the protocol
+handler, or checks for updates.
 
 Cross-compilation proves that files can be assembled, but it does not replace a
 launch/install check on the target OS. CI builds each target on its native GitHub

@@ -7,6 +7,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { smokeWindowsExecutable } from "./smoke-windows-package.mjs";
+
 const DESKTOP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PRODUCT_EXECUTABLE = "Silicon Interface.exe";
 const COMMAND_TIMEOUT_MS = 180_000;
@@ -141,6 +143,12 @@ export async function smokeWindowsInstaller(packagePath) {
     run(installerPath, ["/S", `/D=${installDirectory}`]);
     installed = await findInstalledFiles(installDirectory);
     console.log(`windows-installer-smoke: installed ${version}/${architecture}`);
+
+    await smokeWindowsExecutable(installed.appPath, {
+      stabilityMs: 10_000,
+      timeoutMs: 75_000,
+    });
+    console.log("windows-installer-smoke: installed application passed runtime readiness");
 
     run(installed.uninstallerPath, ["/S"]);
     await waitUntilRemoved(installed.appPath);

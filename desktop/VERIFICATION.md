@@ -112,8 +112,9 @@ applies to a distributable build.
 
 The branch and tagged workflows now include app-authored native runtime gates:
 macOS launches the real packaged bundle; Windows launches and supervises the
-unpacked packaged executable and separately installs/uninstalls the NSIS
-candidate in an ephemeral directory; Ubuntu validates and installs the exact DEB,
+unpacked packaged executable, installs the NSIS candidate in an ephemeral
+directory, launches that installed executable, and confirms uninstall; Ubuntu
+validates and installs the exact DEB,
 launches it under isolated Xvfb/D-Bus/XDG state, proves the receipt PID resolves
 to the packaged executable, and uninstalls it. A process merely staying alive
 is insufficient—the receipt must match version, platform, architecture, PID,

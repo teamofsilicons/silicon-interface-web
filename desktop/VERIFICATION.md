@@ -22,6 +22,25 @@ The exact current tree passed:
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
 
+Commit `c3ae6a9` passed the complete native GitHub Actions Desktop workflow
+([run 29493558076](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29493558076)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87605138553` | passed in 1m42s | n/a |
+| macOS 14 arm64 package/runtime | `87605481238` | passed in 1m43s | `8373490825` |
+| Windows Server 2022 x64 package/runtime/install | `87605481297` | passed in 4m25s | `8373556885` |
+| Ubuntu 22.04 x64 package/runtime/install | `87605481248` | passed in 2m31s | `8373511596` |
+
+The app-authored native evidence was successful on every host. macOS and
+Windows loaded `https://interface.teamofsilicons.com/` from the packaged main
+process and stayed healthy for the 10-second stability window. Windows then
+installed version `0.1.0` x64 from the NSIS candidate into an isolated path and
+confirmed that its uninstaller removed the application. Ubuntu installed the
+exact DEB with apt, proved that the readiness PID resolved to the packaged
+executable, stayed healthy for 10 seconds under Xvfb/D-Bus, and confirmed DEB
+removal. Artifact upload occurred only after those gates passed.
+
 The pushed tree at commit `2857b38` also passed the full native GitHub Actions
 Desktop workflow ([run 29486760897](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29486760897)):
 

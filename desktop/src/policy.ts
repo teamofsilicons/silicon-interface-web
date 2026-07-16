@@ -16,6 +16,46 @@ const ALLOWED_PERMISSIONS = new Set<string>([
   "fullscreen",
   "clipboard-sanitized-write",
 ]);
+const WINDOWS_RESERVED_FILENAME = /^(?:con|prn|aux|nul|clock\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
+const MAX_FILENAME_UTF16_UNITS = 180;
+const MAX_FILENAME_UTF8_BYTES = 220;
+
+function takeFilenamePrefix(value: string, maxUtf16Units: number, maxUtf8Bytes: number): string {
+  let result = "";
+  let bytes = 0;
+  for (const codePoint of value) {
+    const nextBytes = Buffer.byteLength(codePoint, "utf8");
+    if (result.length + codePoint.length > maxUtf16Units || bytes + nextBytes > maxUtf8Bytes) break;
+    result += codePoint;
+    bytes += nextBytes;
+  }
+  return result;
+}
+
+function boundedFilename(value: string): string {
+  if (
+    value.length <= MAX_FILENAME_UTF16_UNITS &&
+    Buffer.byteLength(value, "utf8") <= MAX_FILENAME_UTF8_BYTES
+  ) {
+    return value;
+  }
+
+  const dot = value.lastIndexOf(".");
+  const possibleExtension = dot > 0 && value.length - dot <= 21 ? value.slice(dot) : "";
+  const extension =
+    possibleExtension.length <= MAX_FILENAME_UTF16_UNITS &&
+    Buffer.byteLength(possibleExtension, "utf8") <= MAX_FILENAME_UTF8_BYTES
+      ? possibleExtension
+      : "";
+  const base = extension ? value.slice(0, -extension.length) : value;
+  return (
+    takeFilenamePrefix(
+      base,
+      MAX_FILENAME_UTF16_UNITS - extension.length,
+      MAX_FILENAME_UTF8_BYTES - Buffer.byteLength(extension, "utf8"),
+    ) + extension
+  );
+}
 
 export function resolveRendererUrl(
   production: boolean,
@@ -77,9 +117,23 @@ export function safeDownloadUrl(candidate: string, trustedOrigin: string): strin
 
 export function safeSuggestedFilename(candidate: unknown): string {
   if (typeof candidate !== "string") return "download";
-  const leaf = candidate.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f]/g, "").trim();
-  if (!leaf || leaf === "." || leaf === "..") return "download";
-  return leaf.slice(0, 240);
+  const leaf = candidate.split(/[\\/]/).pop();
+  if (!leaf) return "download";
+  let safe = leaf
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "_")
+    .trim()
+    .replace(/[ .]+$/g, "");
+  if (!safe || safe === "." || safe === "..") return "download";
+
+  // Windows reserves these stems even when an extension follows (CON.txt,
+  // LPT1.log, and so on). Prefixing keeps the user's visible name without
+  // allowing the native Save dialog to target a device namespace.
+  const stem = safe.split(".", 1)[0];
+  if (WINDOWS_RESERVED_FILENAME.test(stem)) safe = `_${safe}`;
+
+  safe = boundedFilename(safe).replace(/[ .]+$/g, "");
+  return safe || "download";
 }
 
 export function permissionAllowed(

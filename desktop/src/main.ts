@@ -263,8 +263,9 @@ function registerIpc(): void {
   });
 }
 
-function beginQuitHandshake(): void {
+function beginQuitHandshake(options: { surfaceFailure?: boolean } = {}): void {
   if (quitHandshakeInFlight) return;
+  const surfaceFailure = options.surfaceFailure !== false;
   if (!mainWindow || mainWindow.isDestroyed() || !rendererReady) {
     // Renderer state is continuously journaled. If there is no live renderer
     // capable of answering, there is no in-memory recording/upload to drain.
@@ -275,13 +276,13 @@ function beginQuitHandshake(): void {
     return;
   }
   quitHandshakeInFlight = true;
-  showMainWindow();
+  if (surfaceFailure) showMainWindow();
   mainWindow.webContents.send(IPC.lifecycleBeforeQuit);
   quitHandshakeTimer = setTimeout(() => {
     quitHandshakeInFlight = false;
     pendingUpdateInstall = false;
-    showMainWindow();
-    if (mainWindow) {
+    if (surfaceFailure) showMainWindow();
+    if (surfaceFailure && mainWindow) {
       void dialog.showMessageBox(mainWindow, {
         type: "warning",
         title: "Silicon Interface could not finish saving",
@@ -480,6 +481,23 @@ function createWindow(): BrowserWindow {
   win.on("hide", sendWindowState);
   win.on("minimize", sendWindowState);
   win.on("restore", sendWindowState);
+  if (process.platform === "win32") {
+    // Windows does not emit app.before-quit during shutdown, restart, or
+    // sign-out. Hold the session end only for the same bounded local-durability
+    // handshake used by an ordinary quit; once the renderer confirms its
+    // journal, app.quit() releases the process so Windows can continue.
+    win.on("query-session-end", (event) => {
+      if (quitApproved) {
+        quitting = true;
+        return;
+      }
+      event.preventDefault();
+      beginQuitHandshake({ surfaceFailure: false });
+    });
+    win.on("session-end", () => {
+      quitting = true;
+    });
+  }
   win.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();

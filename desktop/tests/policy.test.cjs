@@ -50,6 +50,27 @@ test("downloads accept HTTPS, reject credentials, and sanitize filenames", () =>
   assert.equal(safeSuggestedFilename(".."), "download");
 });
 
+test("download filenames are safe on Windows, macOS, and Linux", () => {
+  assert.equal(safeSuggestedFilename('quarter<1>:report|final?.pdf'), "quarter_1__report_final_.pdf");
+  assert.equal(safeSuggestedFilename("CON.txt"), "_CON.txt");
+  assert.equal(safeSuggestedFilename("lpt9.backup.zip"), "_lpt9.backup.zip");
+  assert.equal(safeSuggestedFilename("normal name...   "), "normal name");
+  assert.equal(safeSuggestedFilename("\u0000\u0001"), "__");
+
+  const long = `${"a".repeat(400)}.pdf`;
+  const bounded = safeSuggestedFilename(long);
+  assert.ok(bounded.endsWith(".pdf"));
+  assert.ok(bounded.length <= 180);
+  assert.ok(Buffer.byteLength(bounded, "utf8") <= 220);
+
+  const unicode = `${"🙂".repeat(200)}.png`;
+  const boundedUnicode = safeSuggestedFilename(unicode);
+  assert.ok(boundedUnicode.endsWith(".png"));
+  assert.ok(boundedUnicode.length <= 180);
+  assert.ok(Buffer.byteLength(boundedUnicode, "utf8") <= 220);
+  assert.doesNotMatch(boundedUnicode, /[\uD800-\uDBFF]$/);
+});
+
 test("permissions require the trusted main frame and explicit capability", () => {
   assert.equal(
     permissionAllowed("notifications", PRODUCTION_RENDERER_ORIGIN, PRODUCTION_RENDERER_ORIGIN, true),

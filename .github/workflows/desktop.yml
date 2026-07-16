@@ -3,6 +3,8 @@ name: Desktop
 on:
   pull_request:
     paths:
+      - "src/**"
+      - "public/**"
       - "desktop/build/**"
       - "desktop/resources/**"
       - "desktop/scripts/**"
@@ -10,13 +12,6 @@ on:
       - "desktop/tests/**"
       - "desktop/electron-builder.yml"
       - "desktop/package.json"
-      - "src/components/desktop-bridge-init.tsx"
-      - "src/components/chat/media-previewer.tsx"
-      - "src/lib/drafts.ts"
-      - "src/lib/desktop-bridge.ts"
-      - "src/lib/notifications.ts"
-      - "src/lib/push.ts"
-      - "public/sw.js"
       - "package.json"
       - "pnpm-lock.yaml"
       - "scripts/dependency-audit.mjs"
@@ -27,6 +22,8 @@ on:
   push:
     branches: [main]
     paths:
+      - "src/**"
+      - "public/**"
       - "desktop/build/**"
       - "desktop/resources/**"
       - "desktop/scripts/**"
@@ -34,13 +31,6 @@ on:
       - "desktop/tests/**"
       - "desktop/electron-builder.yml"
       - "desktop/package.json"
-      - "src/components/desktop-bridge-init.tsx"
-      - "src/components/chat/media-previewer.tsx"
-      - "src/lib/drafts.ts"
-      - "src/lib/desktop-bridge.ts"
-      - "src/lib/notifications.ts"
-      - "src/lib/push.ts"
-      - "public/sw.js"
       - "package.json"
       - "pnpm-lock.yaml"
       - "scripts/dependency-audit.mjs"

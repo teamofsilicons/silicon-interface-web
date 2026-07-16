@@ -15,12 +15,12 @@ const REQUIRED_SECRETS = [
   "SSL_ESIGNER_TOTP_SECRET",
 ];
 
-function requireEnvironment(name) {
-  const value = process.env[name]?.trim();
-  if (!value) {
+function requireEnvironment(name, { trim = false } = {}) {
+  const raw = process.env[name];
+  if (typeof raw !== "string" || !raw.trim()) {
     throw new Error(`eSigner: missing ${name}`);
   }
-  return value;
+  return trim ? raw.trim() : raw;
 }
 
 function redact(value, secrets) {
@@ -52,7 +52,7 @@ async function signWith(configuration, run) {
     throw new Error("eSigner: input must be a nonempty regular file");
   }
 
-  const jar = path.resolve(requireEnvironment("SSL_CODE_SIGN_JAR"));
+  const jar = path.resolve(requireEnvironment("SSL_CODE_SIGN_JAR", { trim: true }));
   if (path.basename(jar) !== EXPECTED_JAR) {
     throw new Error(`eSigner: expected the pinned ${EXPECTED_JAR}`);
   }

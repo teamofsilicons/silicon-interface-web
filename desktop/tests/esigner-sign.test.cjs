@@ -45,7 +45,12 @@ function candidate() {
 
 test("eSigner hook signs one SHA-256 executable in place without a shell", async () => {
   const { file, jar } = candidate();
-  await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
+  const exactPassword = " password-secret-with-spaces ";
+  await withEnvironment({
+    ...ENVIRONMENT,
+    SSL_ESIGNER_PASSWORD: exactPassword,
+    SSL_CODE_SIGN_JAR: jar,
+  }, async () => {
     const commands = [];
     await _private.signWith({ path: file, hash: "sha256" }, async (_java, args, options) => {
       commands.push(args);
@@ -53,6 +58,7 @@ test("eSigner hook signs one SHA-256 executable in place without a shell", async
       assert.equal(options.env.CODE_SIGN_TOOL_PATH, path.dirname(path.dirname(jar)));
       assert.equal(args.includes(`-input_file_path=${file}`), true);
       assert.equal(args.some((arg) => arg.startsWith("-password=")), true);
+      assert.equal(args.includes(`-password=${exactPassword}`), true);
       if (args.includes("sign")) writeFileSync(file, "signed executable");
       return { stdout: "signed" };
     });

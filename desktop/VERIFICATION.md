@@ -328,10 +328,11 @@ The AWS release foundation is deployed as stack
 | Public release endpoint | `https://downloads.teamofsilicons.com` |
 | Public TLS | ACM `ISSUED`; alias attached; Amazon RSA 2048 certificate |
 
-GitHub variables `AWS_RELEASE_ROLE_ARN`, `AWS_RELEASE_BUCKET`,
-`AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID`, and
-`ENABLE_GITHUB_ATTESTATIONS` are configured. The release workflow's third-party
-actions are pinned to immutable commit SHAs.
+GitHub variables `AWS_RELEASE_ROLE_ARN`, `AWS_RELEASE_BUCKET`, and
+`AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID` are configured. Release provenance is
+mandatory: every payload is attested through GitHub's Sigstore-backed
+attestation service before the GitHub draft or stable feed can publish. The
+release workflow's third-party actions are pinned to immutable commit SHAs.
 
 The manual macOS signing preflight at GitHub Actions run
 `29507864074` passed on the host-native arm64 candidate in 4m48s. It imported

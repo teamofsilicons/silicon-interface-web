@@ -219,8 +219,8 @@ is tag-triggered only, matching the tag-only AWS OIDC trust policy, and it:
    install/runtime/uninstall gate;
 7. emits DMG/ZIP, NSIS/ZIP, AppImage/DEB, updater metadata, a CycloneDX SBOM,
    `SHA256SUMS.txt`, and `release-manifest.json`;
-8. optionally emits GitHub/Sigstore provenance when the repository plan supports
-   artifact attestations;
+8. requires GitHub/Sigstore provenance for every release payload before any
+   public publication;
 9. prepares a private GitHub draft and verifies every asset digest without
    allowing same-name replacement;
 10. uploads every versioned payload before its mutable updater pointer, rejects
@@ -272,7 +272,6 @@ Add these Actions variables:
 | `AWS_RELEASE_ROLE_ARN` | GitHub OIDC role allowed to publish desktop artifacts |
 | `AWS_RELEASE_BUCKET` | Private-origin bucket behind `downloads.teamofsilicons.com` |
 | `AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID` | Optional CDN invalidation target |
-| `ENABLE_GITHUB_ATTESTATIONS` | Set `true` only when the repository plan supports them |
 | `WINDOWS_SIGNING_PROVIDER` | Set `sslcom-esigner` for the cloud-HSM adapter; leave unset for PFX |
 | `WINDOWS_PUBLISHER_NAME` | Exact CA-verified certificate common name; required for eSigner updater verification |
 

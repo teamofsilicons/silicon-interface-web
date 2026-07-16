@@ -39,6 +39,26 @@ test("release version gate rejects a tag that does not match package version", (
   assert.match(result.stderr, /expected tag/);
 });
 
+test("tagged releases require provenance before any public publication", () => {
+  const workflow = readFileSync(
+    path.join(__dirname, "..", "..", ".github", "workflows", "desktop-release.yml"),
+    "utf8",
+  );
+  const attest = workflow.indexOf("- name: Attest release provenance");
+  const prepare = workflow.indexOf("- name: Prepare verified GitHub draft assets");
+  const publish = workflow.indexOf("- name: Publish payloads, then atomically activate updater pointers");
+  assert.ok(attest >= 0, "release workflow must attest its artifacts");
+  assert.ok(prepare > attest, "attestation must precede GitHub draft preparation");
+  assert.ok(publish > prepare, "feed publication must follow attestation and draft preparation");
+  assert.doesNotMatch(
+    workflow.slice(attest, prepare),
+    /\n\s+if:/,
+    "release provenance must never be optional",
+  );
+  assert.match(workflow, /\n\s+attestations: write\n/);
+  assert.match(workflow, /\n\s+id-token: write\n/);
+});
+
 function writeUpdateCandidate(root, filename, payload = "signed candidate") {
   writeFileSync(path.join(root, filename), payload);
   return {

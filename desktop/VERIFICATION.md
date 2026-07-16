@@ -211,30 +211,38 @@ The AWS release foundation is deployed as stack
 | OIDC trust | this repository's `desktop-v*` tags only |
 | Publish scope | `interface/stable/*` only; outside write simulation denied |
 | CDN permission | invalidation for distribution `E6OSPAJ24EU2D` only |
-| Current endpoint | `https://d2fexyeajugqns.cloudfront.net` |
+| CloudFront origin endpoint | `https://d2fexyeajugqns.cloudfront.net` |
+| Public release endpoint | `https://downloads.teamofsilicons.com` |
+| Public TLS | ACM `ISSUED`; alias attached; Amazon RSA 2048 certificate |
 
 GitHub variables `AWS_RELEASE_ROLE_ARN`, `AWS_RELEASE_BUCKET`,
 `AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID`, and
 `ENABLE_GITHUB_ATTESTATIONS` are configured. The release workflow's third-party
 actions are pinned to immutable commit SHAs.
 
+The manual macOS signing preflight at GitHub Actions run
+`29507864074` passed on the host-native arm64 candidate in 4m48s. It imported
+the encrypted Developer ID archive, selected the pinned
+`Developer ID Application: Shubham Gupta (LTBSK59BJ2)` identity, signed with
+hardened runtime and a secure timestamp, received Apple notarization, verified
+the stapled ticket and Gatekeeper assessment on the unpacked application plus
+the DMG and ZIP contents, verified update metadata, launched the exact signed
+ZIP application without mutating it, received the authenticated production
+readiness receipt, and uploaded the preflight evidence. The workflow publishes
+nothing and is safe to repeat before a tag.
+
 ## External gates before a public stable release
 
 These are not source defects and cannot be silently bypassed:
 
-1. Add the ACM validation CNAME at Namecheap:
-   - host: `_8437dc4d5da0d39e9e28dfafd6bac595.downloads`
-   - value: `_4faf8f40c16340d1d472878859fa374e.jkddzztszm.acm-validations.aws.`
-2. After ACM becomes `ISSUED`, rerun
-   `AWS_PROFILE=silicon-production desktop/infra/deploy-release-foundation.sh`,
-   then add `downloads` as a CNAME to `d2fexyeajugqns.cloudfront.net`.
-3. Supply Apple Developer ID/notarization secrets and a trusted Windows signing
-   certificate in GitHub Actions.
-4. Complete the interactive acceptance slice in `desktop/README.md` on clean
+1. Acquire and integrate a CI-compatible trusted Windows signing identity;
+   modern public-trust private keys must remain in approved hardware/cloud HSM
+   custody, so the exact workflow adapter depends on the selected provider.
+2. Complete the interactive acceptance slice in `desktop/README.md` on clean
    physical Windows, macOS, and Linux machines. CI now covers deterministic
    package/runtime readiness; it cannot click native dialogs, test IME/screen
    readers, or replace a signed human install acceptance.
-5. Commit the release tree, push `desktop-v0.1.0`, and require every native
+3. Commit the release tree, push `desktop-v0.1.0`, and require every native
    signing/package/publish job to finish green before distributing an installer.
 
 Until those gates are complete, local packages are engineering candidates only.

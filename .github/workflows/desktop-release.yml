@@ -138,6 +138,7 @@ jobs:
             desktop/dist-${{ matrix.arch }}/*.zip
             desktop/dist-${{ matrix.arch }}/*.yml
             desktop/dist-${{ matrix.arch }}/*.blockmap
+            !desktop/dist-${{ matrix.arch }}/builder-debug.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -242,6 +243,7 @@ jobs:
             desktop/dist-${{ matrix.arch }}/*.zip
             desktop/dist-${{ matrix.arch }}/*.yml
             desktop/dist-${{ matrix.arch }}/*.blockmap
+            !desktop/dist-${{ matrix.arch }}/builder-debug.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -287,6 +289,7 @@ jobs:
             desktop/dist-${{ matrix.arch }}/*.AppImage
             desktop/dist-${{ matrix.arch }}/*.deb
             desktop/dist-${{ matrix.arch }}/*.yml
+            !desktop/dist-${{ matrix.arch }}/builder-debug.yml
           if-no-files-found: error
           retention-days: 14
 

@@ -11,7 +11,7 @@ const feeds = [
   ["win32/x64", "latest.yml"],
   ["win32/arm64", "latest.yml"],
   ["linux/x64", "latest-linux.yml"],
-  ["linux/arm64", "latest-linux.yml"],
+  ["linux/arm64", "latest-linux-arm64.yml"],
 ];
 
 async function fixture() {

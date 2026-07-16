@@ -15,7 +15,7 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke/signing tests | 53/53 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 54/54 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite | 249/249 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
@@ -177,6 +177,16 @@ against every artifact's exact file name, byte size, and SHA-512 digest:
 | macOS arm64 | DMG + ZIP | `latest-mac.yml` | passed |
 | Windows x64 | NSIS EXE + ZIP | `latest.yml` | passed |
 | Linux x64 | AppImage + DEB | `latest-linux.yml` | passed |
+| Linux arm64 | AppImage + DEB | `latest-linux-arm64.yml` | passed |
+
+The current tree also completed a non-native architecture rehearsal for macOS
+x64, Windows arm64, and Linux arm64. All updater metadata matched the exact
+artifact names, sizes, and SHA-512 values. The x64 DMG checksum was valid and
+its ZIP had no compressed-data errors; the Windows ZIP was valid and contained
+an Aarch64 PE application; the Linux AppImage and unpacked application were
+AArch64 ELF binaries, and the DEB contained valid Debian control/data members.
+This rehearsal caught and corrected the vendor-standard Linux arm64 pointer
+name (`latest-linux-arm64.yml`) before the signed tag workflow.
 
 Container checks also passed: DMG verification, both ZIP integrity checks, and
 the Debian archive structure. The packaged ASAR allow-list was identical across

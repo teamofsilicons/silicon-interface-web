@@ -141,3 +141,28 @@ test("Windows update artifact gate requires the exact cloud-signing publisher", 
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /do not exactly match/);
 });
+
+test("Linux arm64 update gate follows electron-builder's architecture-scoped pointer", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "silicon-linux-arm64-update-"));
+  const appImage = "Silicon Interface-0.1.0-linux-arm64.AppImage";
+  const deb = "Silicon Interface-0.1.0-linux-arm64.deb";
+  const appImageInfo = writeUpdateCandidate(root, appImage, "arm64 appimage");
+  const debInfo = writeUpdateCandidate(root, deb, "arm64 deb");
+  writeFileSync(
+    path.join(root, "latest-linux-arm64.yml"),
+    `version: 0.1.0\nfiles:\n  - url: ${appImage}\n    sha512: ${appImageInfo.sha512}\n    size: ${appImageInfo.size}\n  - url: ${deb}\n    sha512: ${debInfo.sha512}\n    size: ${debInfo.size}\npath: ${appImage}\nsha512: ${appImageInfo.sha512}\n`,
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(__dirname, "..", "scripts", "verify-update-artifacts.mjs"),
+      root,
+      "linux",
+      "arm64",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /linux\/arm64 metadata matches 2 artifacts/);
+});

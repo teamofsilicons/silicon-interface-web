@@ -12,7 +12,7 @@ const FEED_POINTERS = new Map([
   ["win32/x64", "latest.yml"],
   ["win32/arm64", "latest.yml"],
   ["linux/x64", "latest-linux.yml"],
-  ["linux/arm64", "latest-linux.yml"],
+  ["linux/arm64", "latest-linux-arm64.yml"],
 ]);
 const SUMMARY_ORDER = [
   "desktop.sbom.cdx.json",

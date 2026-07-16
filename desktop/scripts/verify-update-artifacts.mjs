@@ -12,9 +12,9 @@ const packageJson = JSON.parse(await readFile(path.join(desktopRoot, "package.js
 const productName = packageJson.productName ?? "Silicon Interface";
 
 const metadataByPlatform = {
-  darwin: "latest-mac.yml",
-  win32: "latest.yml",
-  linux: "latest-linux.yml",
+  darwin: () => "latest-mac.yml",
+  win32: () => "latest.yml",
+  linux: (architecture) => architecture === "arm64" ? "latest-linux-arm64.yml" : "latest-linux.yml",
 };
 
 function fail(message) {
@@ -138,7 +138,7 @@ function expectedNames() {
   return new Set([`${prefix}-linux-arm64.AppImage`, `${prefix}-linux-arm64.deb`]);
 }
 
-const metadataName = metadataByPlatform[platform];
+const metadataName = metadataByPlatform[platform](arch);
 let source;
 try {
   source = await readFile(path.join(outputRoot, metadataName), "utf8");

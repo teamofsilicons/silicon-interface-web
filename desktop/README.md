@@ -147,13 +147,15 @@ non-mutating and requires cookie encryption, a timestamped Developer ID
 Application signature, the configured Apple team, hardened runtime, and a
 valid deep signature. An ad-hoc build is never distributable.
 
-The branch workflow also executes these fresh-package gates on the native host:
+The branch workflow executes these fresh-package gates on native x64 and arm64
+hosts: `macos-15-intel` plus Apple Silicon `macos-14`, `windows-2022` plus
+`windows-11-arm`, and `ubuntu-22.04` plus `ubuntu-22.04-arm`.
 
 ```bash
-# Windows Server 2022
+# Windows x64 or Windows 11 ARM64
 node desktop/scripts/smoke-windows-package.mjs desktop/dist
 
-# Ubuntu 22.04 after installing xvfb
+# Ubuntu x64 or ARM64 after installing xvfb
 node desktop/scripts/smoke-linux-package.mjs desktop/dist --format appimage
 node desktop/scripts/smoke-linux-package.mjs desktop/dist --format deb --deb-mode install
 ```
@@ -196,7 +198,8 @@ is tag-triggered only, matching the tag-only AWS OIDC trust policy, and it:
    `desktop-v0.1.0`;
 2. runs desktop unit tests, all Interface reliability tests, type checking, and
    the exact production web build;
-3. builds x64 and arm64 packages on macOS, Windows, and Linux runners;
+3. builds and launches x64 and arm64 packages on native macOS, Windows, and
+   Linux runners rather than treating a cross-build as runtime proof;
 4. verifies every updater file name, size, and SHA-512 value plus all required
    portable archives and block-map sidecars, rejecting missing or duplicate
    update metadata;

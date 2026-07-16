@@ -15,9 +15,9 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke/signing tests | 57/57 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 60/60 passed |
 | Interface TypeScript | passed |
-| Chat reliability suite | 249/249 passed |
+| Chat reliability suite | 251/251 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
@@ -167,6 +167,18 @@ outbox behavior, held sends, attachment staging/resume, receipts, reconnect and
 sync barriers, offline history, notifications, service-worker recovery, and the
 desktop bridge.
 
+The current implementation additionally protects Windows shutdown/restart/
+sign-out with the same bounded local-durability handshake as an ordinary quit,
+sanitizes native Save As names against Windows device names and invalid/path-
+budget characters, and preserves every ordered file in a multi-file native
+drop instead of retaining only the first item.
+
+The Windows one-click acceptance path uses a pinned deterministic NSIS GUID,
+performs the real default per-user install, discovers the directory Windows
+registered for that GUID, launches the installed application, and then requires
+both the installed executable and registry identity to disappear on uninstall.
+It refuses to replace a pre-existing local installation.
+
 ## Package evidence
 
 Updater candidates were assembled and their generated metadata was checked
@@ -293,6 +305,22 @@ selection, hardened-runtime signing, Apple notarization, stapling, Gatekeeper
 assessment in the app/DMG/ZIP, updater metadata verification, exact signed ZIP
 launch, and artifact upload (`8381150742`). This is the currently configured
 GitHub certificate archive, not a superseded local export.
+
+The final dual-architecture signing preflight at commit `dab249f`
+([run 29517673706](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29517673706))
+passed on both native Apple Silicon and native Intel runners. The arm64 job
+`87686674678` and x64 job `87686674680` each imported the same protected
+Developer ID archive, signed with hardened runtime and timestamp, notarized,
+verified the stapled app/DMG/ZIP plus Gatekeeper, launched the exact signed ZIP
+application against production, and uploaded architecture-scoped evidence
+artifacts `8383440794` and `8383547634`.
+
+Artifact `8382689613` from the prior exact-certificate arm64 preflight was also
+downloaded to the local Apple Silicon Mac, its DMG checksum verified, mounted
+read-only, copied to an isolated Applications directory, and re-checked with
+`codesign`, `stapler`, and Gatekeeper. The copied application then reported the
+exact production renderer and remained healthy for the ten-second native
+stability window. No system Gatekeeper bypass or user profile was used.
 
 ## External gates before a public stable release
 

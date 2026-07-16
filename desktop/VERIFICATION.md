@@ -17,7 +17,7 @@ The exact current tree passed:
 | --- | --- |
 | Deployment-contract tests | 15/15 passed |
 | Dependency advisory gate | passed; 847 locked packages, 0 advisories at the high threshold |
-| Desktop TypeScript + policy/release/smoke/signing tests | 65/65 passed |
+| Desktop TypeScript + policy/release/smoke/signing tests | 68/68 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite in the committed desktop tree | 252/252 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
@@ -430,10 +430,18 @@ The rehearsal also exposed a vendor CLI edge case: CodeSignTool can return exit
 status zero while printing a signing error. The adapter now rejects
 line-leading `Error`, `Fatal`, or `Failure` output from both scan and sign
 commands before considering byte mutation, and the two regression cases are in
-the 65-test desktop suite. The first sandbox attempt correctly failed because
-the local Mac clock was approximately 55 seconds behind trusted NTP and SSL.com
-rejected the generated TOTP. The successful rehearsal used a process-local
-time correction; no system clock or repository artifact was modified.
+the current 68-test desktop suite. The first sandbox attempt correctly failed
+because the local Mac clock was approximately 55 seconds behind trusted NTP and
+SSL.com rejected the generated TOTP. The successful rehearsal used a
+process-local time correction; no system clock or repository artifact was
+modified.
+
+The eSigner GitHub activation helper also has three fail-closed tests. Its
+read-only mode requires all four encrypted secret names, the exact provider,
+and a byte-for-byte publisher Common Name. Configure mode requires an
+interactive terminal, delegates secret entry and local encryption to GitHub
+CLI, never accepts secret values through arguments or files, and activates the
+two public variables only after every secret prompt succeeds.
 
 ## External gates before a public stable release
 

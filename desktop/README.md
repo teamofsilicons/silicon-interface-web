@@ -248,6 +248,10 @@ secret below; modern Windows public-trust keys are commonly cloud-HSM backed and
 may require a provider-specific workflow instead of the classic `.pfx` path.
 The manual **Desktop signing preflight** workflow can independently exercise
 either the macOS or Windows signing path without publishing a release.
+For SSL.com, `scripts/configure-esigner-github.sh` securely prompts for the four
+secret values, sets the two public variables only after every prompt succeeds,
+and includes a read-only `--check` mode. The exact command is documented in
+`SIGNING_SETUP.md`.
 
 Add these encrypted Actions secrets:
 

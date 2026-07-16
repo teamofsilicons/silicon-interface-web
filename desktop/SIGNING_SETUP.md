@@ -235,6 +235,25 @@ To activate that path after SSL.com finishes identity validation:
    installed-app launch, installer, uninstaller, and removal gates before the
    public tag is created.
 
+After SSL.com has issued the certificate and enabled the automation credential,
+the following helper performs steps 3 and 4 without placing a secret in a file
+or command-line argument. GitHub CLI prompts for each secret and encrypts it
+locally before upload:
+
+```bash
+desktop/scripts/configure-esigner-github.sh \
+  --publisher-name "Exact certificate Common Name"
+```
+
+Re-run it read-only at any time to prove that every required secret name exists
+and both public variables still match exactly:
+
+```bash
+desktop/scripts/configure-esigner-github.sh \
+  --publisher-name "Exact certificate Common Name" \
+  --check
+```
+
 The existing `WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` path remains only
 for a CA-provided, CA/B-compliant PFX usable by the hosted runner. Leave
 `WINDOWS_SIGNING_PROVIDER` unset for that legacy path. Never configure both

@@ -33,10 +33,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node desktop/scripts/check-release-env.mjs mac
       - run: pnpm -C desktop build
+      - name: Select native package architecture
+        run: |
+          case "$RUNNER_ARCH" in
+            X64) desktop_arch=x64 ;;
+            ARM64) desktop_arch=arm64 ;;
+            *) echo "Unsupported macOS runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          echo "DESKTOP_ARCH=$desktop_arch" >> "$GITHUB_ENV"
       - name: Build, sign, and notarize
-        run: pnpm -C desktop exec electron-builder --mac --x64 --publish never --config.directories.output=dist-signing-preflight
+        run: pnpm -C desktop exec electron-builder --mac "--$DESKTOP_ARCH" --publish never --config.directories.output=dist-signing-preflight
       - name: Verify update artifacts
-        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight darwin x64
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight darwin "$DESKTOP_ARCH"
       - name: Verify packaged application and containers
         run: |
           output_dir="desktop/dist-signing-preflight"

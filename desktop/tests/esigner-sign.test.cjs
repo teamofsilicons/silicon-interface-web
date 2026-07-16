@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { mkdtempSync, writeFileSync } = require("node:fs");
+const { mkdirSync, mkdtempSync, writeFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -33,9 +33,12 @@ function withEnvironment(values, callback) {
 
 function candidate() {
   const root = mkdtempSync(path.join(os.tmpdir(), "silicon-esigner-"));
-  const jar = path.join(root, _private.EXPECTED_JAR);
+  const jar = path.join(root, "jar", _private.EXPECTED_JAR);
   const file = path.join(root, "Silicon Interface.exe");
+  mkdirSync(path.join(root, "jar"));
+  mkdirSync(path.join(root, "conf"));
   writeFileSync(jar, "pinned tool");
+  writeFileSync(path.join(root, "conf", "code_sign_tool.properties"), "production endpoints");
   writeFileSync(file, "unsigned executable");
   return { file, jar };
 }
@@ -45,6 +48,7 @@ test("eSigner hook signs one SHA-256 executable in place without a shell", async
   await withEnvironment({ ...ENVIRONMENT, SSL_CODE_SIGN_JAR: jar }, async () => {
     await _private.signWith({ path: file, hash: "sha256" }, async (_java, args, options) => {
       assert.equal(options.windowsHide, true);
+      assert.equal(options.env.CODE_SIGN_TOOL_PATH, path.dirname(path.dirname(jar)));
       assert.equal(args.includes("-override=true"), true);
       assert.equal(args.includes("-malware_block=true"), true);
       assert.equal(args.includes(`-input_file_path=${file}`), true);

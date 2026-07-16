@@ -60,6 +60,12 @@ async function signWith(configuration, run) {
   if (!jarInfo.isFile() || jarInfo.isSymbolicLink() || jarInfo.size === 0) {
     throw new Error("eSigner: signing tool must be a nonempty regular file");
   }
+  const toolRoot = path.dirname(path.dirname(jar));
+  const toolConfig = path.join(toolRoot, "conf", "code_sign_tool.properties");
+  const configInfo = await lstat(toolConfig);
+  if (!configInfo.isFile() || configInfo.isSymbolicLink() || configInfo.size === 0) {
+    throw new Error("eSigner: signing tool production configuration is missing");
+  }
 
   const values = Object.fromEntries(REQUIRED_SECRETS.map((name) => [name, requireEnvironment(name)]));
   const secrets = Object.values(values);
@@ -88,6 +94,7 @@ async function signWith(configuration, run) {
       windowsHide: true,
       timeout: 10 * 60 * 1000,
       maxBuffer: 8 * 1024 * 1024,
+      env: { ...process.env, CODE_SIGN_TOOL_PATH: toolRoot },
     });
   } catch (error) {
     const details = redact(error?.stderr || error?.stdout || error?.message, secrets).trim();

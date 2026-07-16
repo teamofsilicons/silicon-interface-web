@@ -19,7 +19,10 @@ import { clearStorageIssue, reportStorageIssue } from "./storage-health";
 import { decorateAuthoritativeTimelineEvent } from "./timeline-identity";
 
 const DB_NAME = "silicon-interface-chat-cache";
-const DB_VERSION = 7;
+// v8 shipped in pre-release/dev builds. Never request an older IndexedDB
+// version: browsers reject that before any recovery code can run. v9 also
+// guarantees the compatibility store exists for those profiles.
+const DB_VERSION = 9;
 const EVENTS = "events";
 const SYNC_CHECKPOINTS = "syncCheckpoints";
 const SYNC_RECOVERY = "syncRecovery";
@@ -27,6 +30,8 @@ const PENDING_ACCOUNT_REPLAY = "pendingAccountReplay";
 const ACCOUNT_PROJECTIONS = "accountProjections";
 const INITIAL_SYNC_BUNDLES = "initialSyncBundles";
 const OWNER_ROOM_TIMELINE = "ownerRoomTimeline";
+const DELIVERY_ACKS = "deliveryAcks";
+const DELIVERY_ACK_OWNER = "ownerId";
 
 export interface SyncCursors {
   event: string;
@@ -118,6 +123,37 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
+    const finish = (db: IDBDatabase) => {
+      const requiredStores = [
+        EVENTS,
+        SYNC_CHECKPOINTS,
+        SYNC_RECOVERY,
+        PENDING_ACCOUNT_REPLAY,
+        ACCOUNT_PROJECTIONS,
+        INITIAL_SYNC_BUNDLES,
+        DELIVERY_ACKS,
+      ];
+      if (requiredStores.some((store) => !db.objectStoreNames.contains(store))) {
+        db.close();
+        fail(new Error("Chat cache schema is incomplete"));
+        return;
+      }
+      db.addEventListener("versionchange", () => {
+        db.close();
+        dbPromise = null;
+      });
+      clearStorageIssue("timeline");
+      resolve(db);
+    };
+    const fail = (error: unknown) => {
+      dbPromise = null;
+      reportStorageIssue({
+        severity: "degraded",
+        area: "timeline",
+        message: "We couldn’t load saved chat history on this device. Your messages are still safe and will reconnect from Glass.",
+      });
+      reject(error);
+    };
     const request = window.indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = (upgradeEvent) => {
       const db = request.result;
@@ -166,22 +202,24 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(INITIAL_SYNC_BUNDLES)) {
         db.createObjectStore(INITIAL_SYNC_BUNDLES, { keyPath: "ownerId" });
       }
+      if (!db.objectStoreNames.contains(DELIVERY_ACKS)) {
+        const acknowledgements = db.createObjectStore(DELIVERY_ACKS, { keyPath: "key" });
+        acknowledgements.createIndex(DELIVERY_ACK_OWNER, "ownerId");
+      }
     };
-    request.onsuccess = () => {
-      request.result.addEventListener("versionchange", () => {
-        request.result.close();
-        dbPromise = null;
-      });
-      resolve(request.result);
-    };
+    request.onsuccess = () => finish(request.result);
     request.onerror = () => {
-      dbPromise = null;
-      reportStorageIssue({
-        severity: "degraded",
-        area: "timeline",
-        message: "Offline chat history could not be verified. It was not deleted; current history will rebuild from Glass.",
-      });
-      reject(request.error);
+      if (request.error?.name === "VersionError") {
+        // Another tab or a newer app may already have upgraded this cache.
+        // Open its current version and use it only after verifying every store
+        // this build needs. This preserves history instead of deleting data or
+        // trapping the user in a repeated version warning.
+        const compatible = window.indexedDB.open(DB_NAME);
+        compatible.onsuccess = () => finish(compatible.result);
+        compatible.onerror = () => fail(compatible.error);
+        return;
+      }
+      fail(request.error);
     };
   });
   return dbPromise;

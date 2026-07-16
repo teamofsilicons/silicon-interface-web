@@ -1148,7 +1148,11 @@ function ChatPageInner() {
       try {
         await refreshRoomsAuthoritatively();
       } catch (e) {
-        toast.error(e instanceof ApiError ? e.message : String(e));
+        toast.error(
+          e instanceof ApiError
+            ? e.message
+            : "We couldn’t refresh your chats. Your messages are still safe — try again.",
+        );
       } finally {
         roomsCacheOwnerRef.current = ownerId;
         roomsCacheReadyRef.current = true;

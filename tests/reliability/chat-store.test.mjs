@@ -68,6 +68,30 @@ test("offline timeline migrates v1 rows and remains chronological", async () => 
   );
 });
 
+test("a newer database version reopens safely without losing cached history", async () => {
+  await deleteDatabase("silicon-interface-chat-cache");
+  installBrowser();
+  const cache = await import("../../src/lib/chat-store.ts");
+  const kept = event(
+    "01J00000000000000000000009",
+    "2026-01-01T00:00:09.000Z",
+    "kept across a newer schema",
+  );
+  await cache.storeEvents("compatible-owner", [{ roomId: "room", event: kept }]);
+  await new Promise((resolve, reject) => {
+    const request = indexedDB.open("silicon-interface-chat-cache", 10);
+    request.onsuccess = () => {
+      request.result.close();
+      resolve();
+    };
+    request.onerror = () => reject(request.error);
+  });
+  assert.deepEqual(
+    await cache.loadStoredRoomEvents("compatible-owner", "room"),
+    [kept],
+  );
+});
+
 test("timeline pressure eviction requires reachability and retains each room tail", async () => {
   await deleteDatabase("silicon-interface-chat-cache");
   installBrowser();

@@ -298,17 +298,5 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Silicon Interface ${RELEASE_TAG#desktop-v}"
           find release -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name 'SHA256SUMS.txt' -o -name 'release-manifest.json' -o -name '*.cdx.json' \) -print0 | \
             xargs -0 gh release upload "$RELEASE_TAG" --clobber
-      - name: Publish architecture-scoped update metadata
-        run: |
-          aws s3 sync release/darwin/x64 "s3://$AWS_RELEASE_BUCKET/interface/stable/darwin/x64" --delete
-          aws s3 sync release/darwin/arm64 "s3://$AWS_RELEASE_BUCKET/interface/stable/darwin/arm64" --delete
-          aws s3 sync release/win32/x64 "s3://$AWS_RELEASE_BUCKET/interface/stable/win32/x64" --delete
-          aws s3 sync release/win32/arm64 "s3://$AWS_RELEASE_BUCKET/interface/stable/win32/arm64" --delete
-          aws s3 sync release/linux/x64 "s3://$AWS_RELEASE_BUCKET/interface/stable/linux/x64" --delete
-          aws s3 sync release/linux/arm64 "s3://$AWS_RELEASE_BUCKET/interface/stable/linux/arm64" --delete
-          aws s3 cp release/SHA256SUMS.txt "s3://$AWS_RELEASE_BUCKET/interface/stable/SHA256SUMS.txt"
-          aws s3 cp release/release-manifest.json "s3://$AWS_RELEASE_BUCKET/interface/stable/release-manifest.json"
-          aws s3 cp release/desktop.sbom.cdx.json "s3://$AWS_RELEASE_BUCKET/interface/stable/desktop.sbom.cdx.json"
-      - name: Refresh the downloads CDN
-        if: ${{ env.AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID != '' }}
-        run: aws cloudfront create-invalidation --distribution-id "$AWS_RELEASE_CLOUDFRONT_DISTRIBUTION_ID" --paths '/interface/stable/*'
+      - name: Publish payloads, then atomically activate updater pointers
+        run: node desktop/scripts/publish-release.mjs release

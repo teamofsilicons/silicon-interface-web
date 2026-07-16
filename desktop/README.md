@@ -207,8 +207,10 @@ runner. Before stable promotion, run this physical acceptance slice on every OS:
    `SHA256SUMS.txt`, and `release-manifest.json`;
 8. optionally emits GitHub/Sigstore provenance when the repository plan supports
    artifact attestations;
-9. creates GitHub release assets and publishes architecture-isolated update
-   feeds to the downloads bucket with short-lived GitHub OIDC credentials;
+9. creates GitHub release assets, uploads every versioned payload before its
+   mutable updater pointer, rejects any conflicting immutable S3 path, retains
+   older installers, and only then activates architecture-isolated feeds using
+   short-lived GitHub OIDC credentials;
 10. invalidates the downloads CDN when a distribution ID is configured.
 
 The updater paths are fixed in signed code and cannot be supplied by the page:
@@ -274,16 +276,15 @@ from `infra/release-foundation.yml`.
 
 ## Current release blockers
 
-The source and unsigned package candidates are implemented and locally verified.
-A public production release is not complete until all of the following external
-inputs exist and the release workflow is green:
+The source and package candidates are implemented and locally verified. The
+Apple Developer ID/notarization gate and the production downloads DNS/TLS/CDN
+foundation are complete. A public production release is not complete until all
+of the following remaining external gates are satisfied and the tagged release
+workflow is green:
 
-- Apple Developer ID certificate and notarization credentials;
-- trusted Windows code-signing certificate or an approved Artifact Signing flow;
-- Namecheap validation and the final `downloads.teamofsilicons.com` CNAME (the
-  bucket, CloudFront distribution, certificate request, and scoped GitHub OIDC
-  role are already deployed);
+- trusted Windows code-signing identity and its provider-specific CI adapter;
 - clean-machine install/runtime acceptance on actual Windows and Linux systems;
+- final `desktop-vX.Y.Z` signed release run and stable-feed promotion.
 
 The production web bridge is already live: the deployed Interface bundle was
 verified to contain the protocol-v1 lifecycle and deep-link adapter on

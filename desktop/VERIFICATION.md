@@ -193,6 +193,14 @@ candidate and the application installed from the signed NSIS executable.
 The release rehearsal produced a CycloneDX SBOM with 275 components and a
 16-file, 706,677,312-byte manifest whose SHA-256 entries all verified.
 
+Stable-feed publication is payload-first and fail-closed. Every installer,
+archive, blockmap, and other versioned payload is uploaded and read-after-write
+verified before any `latest*.yml` pointer changes. Existing payload keys are
+retained when their stored byte count and SHA-256 metadata match, while a
+different body at an existing immutable key aborts the release. Old installers
+are never deleted by activation. Mutable pointers and shared summaries use
+no-cache headers, are activated last, and are the only CDN paths invalidated.
+
 ## Production integration
 
 The deployed web bundle at `https://interface.teamofsilicons.com` contains the

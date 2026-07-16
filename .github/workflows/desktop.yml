@@ -3,7 +3,13 @@ name: Desktop
 on:
   pull_request:
     paths:
-      - "desktop/**"
+      - "desktop/build/**"
+      - "desktop/resources/**"
+      - "desktop/scripts/**"
+      - "desktop/src/**"
+      - "desktop/tests/**"
+      - "desktop/electron-builder.yml"
+      - "desktop/package.json"
       - "src/components/desktop-bridge-init.tsx"
       - "src/components/chat/media-previewer.tsx"
       - "src/lib/drafts.ts"
@@ -17,6 +23,24 @@ on:
   push:
     branches: [main]
     tags: ["desktop-v*"]
+    paths:
+      - "desktop/build/**"
+      - "desktop/resources/**"
+      - "desktop/scripts/**"
+      - "desktop/src/**"
+      - "desktop/tests/**"
+      - "desktop/electron-builder.yml"
+      - "desktop/package.json"
+      - "src/components/desktop-bridge-init.tsx"
+      - "src/components/chat/media-previewer.tsx"
+      - "src/lib/drafts.ts"
+      - "src/lib/desktop-bridge.ts"
+      - "src/lib/notifications.ts"
+      - "src/lib/push.ts"
+      - "public/sw.js"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
 permissions:
@@ -52,10 +76,16 @@ jobs:
         include:
           - os: macos-14
             target: mac
+            platform: darwin
+            arch: arm64
           - os: windows-2022
             target: win
+            platform: win32
+            arch: x64
           - os: ubuntu-22.04
             target: linux
+            platform: linux
+            arch: x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -71,6 +101,25 @@ jobs:
         run: pnpm desktop:dist:${{ matrix.target }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Verify update artifacts
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist ${{ matrix.platform }} ${{ matrix.arch }}
+      - name: Install Linux runtime-smoke dependencies
+        if: ${{ matrix.target == 'linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb dbus-x11
+      - name: Launch packaged macOS application
+        if: ${{ matrix.target == 'mac' }}
+        run: node desktop/scripts/smoke-mac-engineering.mjs desktop/dist
+      - name: Launch packaged Windows application
+        if: ${{ matrix.target == 'win' }}
+        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist
+      - name: Install and uninstall Windows package
+        if: ${{ matrix.target == 'win' }}
+        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist
+      - name: Install and launch packaged Linux application
+        if: ${{ matrix.target == 'linux' }}
+        run: node desktop/scripts/smoke-linux-package.mjs desktop/dist --format deb --deb-mode install
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: silicon-interface-${{ matrix.target }}

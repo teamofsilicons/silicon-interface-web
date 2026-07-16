@@ -85,7 +85,41 @@ jobs:
           app_path="$(find desktop/dist-${{ matrix.arch }} -type d -name 'Silicon Interface.app' -print -quit)"
           test -n "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate -v "$app_path"
           spctl --assess --type execute --verbose=2 "$app_path"
+      - name: Verify notarized app inside DMG and ZIP
+        run: |
+          dmg_path="$(find desktop/dist-${{ matrix.arch }} -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          zip_path="$(find desktop/dist-${{ matrix.arch }} -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$dmg_path"
+          test -n "$zip_path"
+          hdiutil verify "$dmg_path"
+
+          mount_dir="$(mktemp -d)"
+          zip_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rm -rf "$mount_dir" "$zip_dir"
+          }
+          trap cleanup EXIT
+
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg_path"
+          dmg_app="$(find "$mount_dir" -maxdepth 2 -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$dmg_app"
+          codesign --verify --deep --strict --verbose=2 "$dmg_app"
+          xcrun stapler validate -v "$dmg_app"
+          spctl --assess --type execute --verbose=2 "$dmg_app"
+          hdiutil detach "$mount_dir"
+
+          ditto -x -k "$zip_path" "$zip_dir"
+          zip_app="$(find "$zip_dir" -maxdepth 2 -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$zip_app"
+          codesign --verify --deep --strict --verbose=2 "$zip_app"
+          xcrun stapler validate -v "$zip_app"
+          spctl --assess --type execute --verbose=2 "$zip_app"
+      - name: Launch signed macOS application
+        if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
+        run: node desktop/scripts/smoke-mac-engineering.mjs desktop/dist-${{ matrix.arch }} --signature-mode release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-mac-${{ matrix.arch }}
@@ -136,6 +170,12 @@ jobs:
               throw "Invalid signature on $($installer.Name): $($signature.Status)"
             }
           }
+      - name: Launch signed Windows application
+        if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
+        run: node desktop/scripts/smoke-windows-package.mjs desktop/dist-${{ matrix.arch }}
+      - name: Install and uninstall signed Windows package
+        if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
+        run: node desktop/scripts/smoke-windows-installer.mjs desktop/dist-${{ matrix.arch }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-win-${{ matrix.arch }}
@@ -171,6 +211,14 @@ jobs:
         run: pnpm -C desktop exec electron-builder --linux --${{ matrix.arch }} --publish never --config.directories.output=dist-${{ matrix.arch }}
       - name: Verify update artifacts
         run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-${{ matrix.arch }} linux ${{ matrix.arch }}
+      - name: Install Linux runtime-smoke dependencies
+        if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb dbus-x11
+      - name: Install and launch packaged Linux application
+        if: ${{ (matrix.arch == 'x64' && runner.arch == 'X64') || (matrix.arch == 'arm64' && runner.arch == 'ARM64') }}
+        run: node desktop/scripts/smoke-linux-package.mjs desktop/dist-${{ matrix.arch }} --format deb --deb-mode install
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-linux-${{ matrix.arch }}

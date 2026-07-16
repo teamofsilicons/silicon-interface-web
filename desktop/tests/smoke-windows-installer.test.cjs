@@ -1,0 +1,50 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { mkdir, mkdtemp, realpath, rm, writeFile } = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+
+let smoke;
+test.before(async () => {
+  smoke = await import("../scripts/smoke-windows-installer.mjs");
+});
+
+test("Windows installer name is versioned and architecture scoped", () => {
+  assert.equal(
+    smoke.expectedWindowsInstallerName("0.1.0", "x64"),
+    "Silicon Interface-0.1.0-win-x64.exe",
+  );
+  assert.equal(
+    smoke.expectedWindowsInstallerName("1.2.3-beta.1", "arm64"),
+    "Silicon Interface-1.2.3-beta.1-win-arm64.exe",
+  );
+  assert.throws(() => smoke.expectedWindowsInstallerName("latest", "x64"), /invalid/);
+  assert.throws(() => smoke.expectedWindowsInstallerName("0.1.0", "ia32"), /x64 or arm64/);
+});
+
+test("Windows installer resolver ignores unpacked executables and rejects ambiguity", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "silicon-windows-installer-test-"));
+  const expectedName = "Silicon Interface-0.1.0-win-x64.exe";
+  try {
+    await mkdir(path.join(root, "win-unpacked"), { recursive: true });
+    await writeFile(path.join(root, "win-unpacked", "Silicon Interface.exe"), "MZ");
+    const installer = path.join(root, expectedName);
+    await writeFile(installer, "MZ");
+    assert.equal(
+      await smoke.resolveWindowsInstaller(root, "0.1.0", "x64"),
+      await realpath(installer),
+    );
+
+    const nested = path.join(root, "nested");
+    await mkdir(nested);
+    await writeFile(path.join(nested, expectedName), "MZ");
+    await assert.rejects(
+      () => smoke.resolveWindowsInstaller(root, "0.1.0", "x64"),
+      /multiple/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

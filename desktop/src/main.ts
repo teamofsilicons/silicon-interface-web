@@ -31,9 +31,25 @@ import {
   safeExternalUrl,
   safeSuggestedFilename,
 } from "./policy";
+import {
+  desktopSmokeProfilePath,
+  parseDesktopSmokeToken,
+  writeDesktopSmokeResult,
+  type DesktopSmokeResult,
+} from "./smoke";
 import { startDesktopUpdater, type DesktopUpdater } from "./updater";
 
 app.enableSandbox();
+
+const smokeToken = parseDesktopSmokeToken(process.env.SILICON_DESKTOP_SMOKE_TOKEN);
+if (smokeToken) {
+  // A smoke candidate must never hand its launch to an already-running user
+  // session through requestSingleInstanceLock, nor read that session's
+  // cookies/drafts. The token is path-safe and unique to one bounded run.
+  const smokeProfile = desktopSmokeProfilePath(app.getPath("temp"), smokeToken);
+  app.setPath("userData", smokeProfile);
+  app.setPath("sessionData", smokeProfile);
+}
 
 const production = app.isPackaged;
 const rendererUrl = resolveRendererUrl(production);
@@ -51,6 +67,21 @@ let quitApproved = false;
 let quitHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingUpdateInstall = false;
 let updater: DesktopUpdater | null = null;
+let smokeResultRecorded = false;
+
+function recordSmokeResult(result: DesktopSmokeResult): void {
+  if (!smokeToken || smokeResultRecorded) return;
+  smokeResultRecorded = true;
+  void writeDesktopSmokeResult(app.getPath("temp"), smokeToken, {
+    ...result,
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    architecture: process.arch,
+    packaged: app.isPackaged,
+  }).catch((error) => {
+    console.error("Failed to write desktop smoke result", error);
+  });
+}
 
 function iconPath(): string {
   return path.join(app.getAppPath(), "build", "icon.png");
@@ -191,6 +222,10 @@ function registerIpc(): void {
   ipcMain.on(IPC.rendererReady, (event) => {
     if (!isTrustedIpcSender(event)) return;
     rendererReady = true;
+    recordSmokeResult({
+      status: "ready",
+      url: event.senderFrame?.url ?? mainWindow?.webContents.getURL() ?? "",
+    });
     sendWindowState();
     sendDeepLink();
   });
@@ -409,13 +444,23 @@ function createWindow(): BrowserWindow {
     recoveryAttempts = 0;
   });
 
-  win.webContents.on("did-fail-load", (_event, errorCode, _description, validatedUrl, isMainFrame) => {
+  win.webContents.on("did-fail-load", (_event, errorCode, description, validatedUrl, isMainFrame) => {
     if (!isMainFrame || errorCode === -3 || validatedUrl.startsWith("file:")) return;
+    recordSmokeResult({
+      status: "load-failed",
+      url: validatedUrl,
+      detail: `${errorCode}: ${description}`,
+    });
     loadOfflinePage();
   });
 
   win.webContents.on("render-process-gone", (_event, details) => {
     if (details.reason === "clean-exit") return;
+    recordSmokeResult({
+      status: "renderer-gone",
+      url: win.webContents.getURL(),
+      detail: details.reason,
+    });
     rendererReady = false;
     recoveryAttempts += 1;
     if (recoveryAttempts <= 3) {
@@ -542,14 +587,18 @@ function installMenu(): void {
 }
 
 if (process.platform === "win32") app.setAppUserModelId("ai.45d.silicon-interface");
-if (app.isPackaged) app.setAsDefaultProtocolClient("silicon");
+if (app.isPackaged && !smokeToken) app.setAsDefaultProtocolClient("silicon");
 
 app.on("open-url", (event, url) => {
   event.preventDefault();
   queueDeepLink(parseDeepLink(url));
 });
 
-if (!app.requestSingleInstanceLock()) {
+// macOS enforces the lock at the application/bundle level even when userData is
+// redirected. A tokenized smoke launch is already isolated from every real
+// profile and must be able to run beside an installed production instance.
+const ownsInstanceLock = smokeToken ? true : app.requestSingleInstanceLock();
+if (!ownsInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, argv) => {

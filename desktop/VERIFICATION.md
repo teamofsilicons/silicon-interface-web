@@ -15,7 +15,7 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release tests | 14/14 passed |
+| Desktop TypeScript + policy/release/smoke tests | 35/35 passed |
 | Interface TypeScript | passed |
 | Chat reliability suite | 249/249 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
@@ -76,10 +76,29 @@ All inspected platform binaries had the required Electron fuses:
 - application code restricted to the ASAR;
 - extra `file://` privileges disabled.
 
-The unpacked macOS arm64 engineering build was ad-hoc signed after fuse mutation,
-passed `codesign --verify`, launched the sandboxed renderer against production,
-maintained TLS connections, and exited cleanly. This proves the local runtime
-path; an ad-hoc signature is not a distributable signature.
+The current unpacked macOS arm64 engineering build was prepared after fuse
+mutation, ad-hoc signed with the required Electron JIT entitlements, and passed
+`codesign --verify`. It launched beside an already-running installed copy using
+an isolated profile, received an app-authored readiness receipt only after the
+trusted production desktop bridge hydrated, stayed healthy for the bounded
+stability window, and left no process, receipt, or profile behind.
+
+Cookie encryption cannot initialize Electron's macOS network service under an
+ad-hoc identity because that identity has no stable Developer ID Keychain
+group. The engineering helper therefore disables only that fuse and verifies
+all remaining production fuses before re-signing. Release mode is non-mutating
+and requires cookie encryption plus a timestamped, hardened-runtime Developer
+ID Application signature pinned to `APPLE_TEAM_ID`. This exception never
+applies to a distributable build.
+
+The branch and tagged workflows now include app-authored native runtime gates:
+macOS launches the real packaged bundle; Windows launches and supervises the
+unpacked packaged executable and separately installs/uninstalls the NSIS
+candidate in an ephemeral directory; Ubuntu validates and installs the exact DEB,
+launches it under isolated Xvfb/D-Bus/XDG state, proves the receipt PID resolves
+to the packaged executable, and uninstalls it. A process merely staying alive
+is insufficient—the receipt must match version, platform, architecture, PID,
+timestamp, packaged state, and the exact production HTTPS origin.
 
 The release rehearsal produced a CycloneDX SBOM with 275 components and a
 16-file, 706,677,312-byte manifest whose SHA-256 entries all verified.
@@ -121,8 +140,10 @@ These are not source defects and cannot be silently bypassed:
    then add `downloads` as a CNAME to `d2fexyeajugqns.cloudfront.net`.
 3. Supply Apple Developer ID/notarization secrets and a trusted Windows signing
    certificate in GitHub Actions.
-4. Run the acceptance slice in `desktop/README.md` on clean physical or hosted
-   Windows and Linux machines. Cross-compilation is evidence, not an install test.
+4. Complete the interactive acceptance slice in `desktop/README.md` on clean
+   physical Windows, macOS, and Linux machines. CI now covers deterministic
+   package/runtime readiness; it cannot click native dialogs, test IME/screen
+   readers, or replace a signed human install acceptance.
 5. Commit the release tree, push `desktop-v0.1.0`, and require every native
    signing/package/publish job to finish green before distributing an installer.
 

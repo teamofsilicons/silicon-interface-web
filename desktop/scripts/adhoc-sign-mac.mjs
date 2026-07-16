@@ -1,7 +1,8 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import { prepareMacSignature } from "./smoke-mac-engineering.mjs";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.resolve(process.argv[2] ?? path.join(desktopRoot, "dist-local"));
@@ -28,19 +29,10 @@ async function findApp(directory) {
 const appPath = await findApp(outputRoot).catch(() => null);
 if (!appPath) fail(`no .app bundle found below ${outputRoot}`);
 
-const signed = spawnSync(
-  "codesign",
-  ["--force", "--deep", "--sign", "-", "--timestamp=none", appPath],
-  { encoding: "utf8" },
-);
-if (signed.status !== 0) fail(`codesign failed\n${signed.stderr}`);
-
-const verified = spawnSync(
-  "codesign",
-  ["--verify", "--deep", "--strict", "--verbose=2", appPath],
-  { encoding: "utf8" },
-);
-if (verified.status !== 0) fail(`signature verification failed\n${verified.stderr}`);
+await prepareMacSignature(appPath, "engineering").catch((error) => {
+  fail(error instanceof Error ? error.message : String(error));
+});
 
 console.log(`adhoc-sign-mac: local engineering bundle is runnable at ${appPath}`);
+console.log("adhoc-sign-mac: cookie encryption is disabled only because ad-hoc identities cannot own its Keychain group");
 console.log("adhoc-sign-mac: this ad-hoc signature is not valid for distribution");

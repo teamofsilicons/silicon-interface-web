@@ -132,16 +132,40 @@ pnpm desktop:dist:linux
 
 On Apple Silicon, Electron fuse writes invalidate the vendor signature and
 macOS will terminate a truly unsigned bundle. Use the dedicated engineering
-smoke build, which applies an ad-hoc signature to the unpacked app after fuses:
+smoke build, which prepares the unpacked app for an ad-hoc identity after
+fuses, then run the same app-authored readiness gate used by CI:
 
 ```bash
 pnpm -C desktop dist:mac:local
-SILICON_DISABLE_UPDATES=1 open -n "desktop/dist-local/mac-arm64/Silicon Interface.app"
+node desktop/scripts/smoke-mac-engineering.mjs desktop/dist-local
 ```
 
-The ad-hoc build is runnable locally but is never distributable. Production
-DMG/ZIP artifacts are signed with Developer ID and notarized by the release
-workflow instead.
+Electron cookie encryption requires a stable signing identity on macOS. The
+disposable ad-hoc engineering build disables only that identity-bound fuse;
+every other production fuse remains enforced. The release smoke is
+non-mutating and requires cookie encryption, a timestamped Developer ID
+Application signature, the configured Apple team, hardened runtime, and a
+valid deep signature. An ad-hoc build is never distributable.
+
+The branch workflow also executes these fresh-package gates on the native host:
+
+```bash
+# Windows Server 2022
+node desktop/scripts/smoke-windows-package.mjs desktop/dist
+
+# Ubuntu 22.04 after installing xvfb
+node desktop/scripts/smoke-linux-package.mjs desktop/dist --format deb --deb-mode install
+```
+
+These commands use an isolated session and require a one-time app-authored
+receipt after the deployed Interface has hydrated its trusted desktop bridge.
+They validate package version, platform, architecture, process identity, and
+the exact HTTPS production origin, hold a stability window, terminate the full
+process tree, and remove all smoke data. Linux performs a real DEB install and
+uninstall; Windows separately performs a silent NSIS install/uninstall in an
+ephemeral directory. The smoke mode never reads a user's cookies or drafts,
+takes over an installed app, changes the protocol handler, or checks for
+updates.
 
 Cross-compilation proves that files can be assembled, but it does not replace a
 launch/install check on the target OS. CI builds each target on its native GitHub
@@ -168,17 +192,19 @@ runner. Before stable promotion, run this physical acceptance slice on every OS:
    `desktop-v0.1.0`;
 2. runs desktop unit tests, all Interface reliability tests, type checking, and
    the exact production web build;
-3. builds x64 and arm64 packages on native macOS, Windows, and Linux runners;
+3. builds x64 and arm64 packages on macOS, Windows, and Linux runners;
 4. verifies every updater file name, size, and SHA-512 value, rejecting missing
    or duplicate update metadata;
-5. signs/notarizes macOS, signs Windows, and verifies those signatures;
-6. emits DMG/ZIP, NSIS/ZIP, AppImage/DEB, updater metadata, a CycloneDX SBOM,
+5. signs/notarizes macOS, signs Windows, verifies the notarization ticket inside
+   the unpacked app, DMG, and ZIP, and launches every host-native package;
+6. performs a real host-native Linux DEB install/runtime/uninstall gate;
+7. emits DMG/ZIP, NSIS/ZIP, AppImage/DEB, updater metadata, a CycloneDX SBOM,
    `SHA256SUMS.txt`, and `release-manifest.json`;
-7. optionally emits GitHub/Sigstore provenance when the repository plan supports
+8. optionally emits GitHub/Sigstore provenance when the repository plan supports
    artifact attestations;
-8. creates GitHub release assets and publishes architecture-isolated update
+9. creates GitHub release assets and publishes architecture-isolated update
    feeds to the downloads bucket with short-lived GitHub OIDC credentials;
-9. invalidates the downloads CDN when a distribution ID is configured.
+10. invalidates the downloads CDN when a distribution ID is configured.
 
 The updater paths are fixed in signed code and cannot be supplied by the page:
 

@@ -129,6 +129,26 @@ Use one of these paths:
 
 Do not purchase a USB-only product for the current GitHub-hosted workflow.
 
+### Alternatives evaluated for this repository
+
+Microsoft's Public Trust onboarding does not currently include organizations or
+individual developers in India. If the intended publisher is legally based in
+India, Azure Artifact Signing's Private Trust and Public Trust Test profiles are
+not substitutes: neither produces a default-trusted public Windows publisher.
+
+SignPath Foundation's free program is also not a release shortcut for the
+current repository. Its published conditions require an OSI-approved license,
+no proprietary components, an already-released project, documented privacy and
+code-signing policies, manual release approval, and verifiable source builds.
+This repository is public but currently declares no license, and a Foundation
+certificate would display `SignPath Foundation` rather than the product owner's
+legal identity. Do not misrepresent the project to obtain a community signer.
+
+For a publisher outside Microsoft's current Public Trust countries, use the
+CA-validated cloud-HSM path below. It is the only path already integrated with
+the release workflow and preserves the intended individual or organization as
+the Windows publisher.
+
 ### Path A: Azure Artifact Signing
 
 Microsoft currently limits Public Trust identity validation to organizations in

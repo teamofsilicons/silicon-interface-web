@@ -178,6 +178,12 @@ release.
 
 ## Release acceptance after credentials exist
 
+Before creating a release tag, run the manual **Desktop signing preflight**
+workflow. It builds one macOS x64 candidate, signs and notarizes it, validates the
+stapled ticket and Gatekeeper assessment in the app, DMG, and ZIP, and launches
+the signed ZIP application. It never publishes a release or writes to the
+downloads bucket.
+
 1. Confirm all configured secret names exist without printing their values.
 2. Run the tagged release workflow for `desktop-v0.1.0`.
 3. Require signed macOS x64/arm64, Windows x64/arm64, and Linux x64/arm64 jobs to

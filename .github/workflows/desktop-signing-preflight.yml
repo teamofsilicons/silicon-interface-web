@@ -1,0 +1,97 @@
+name: Desktop signing preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-signing-preflight
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS sign, notarize, and verify
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node desktop/scripts/check-release-env.mjs mac
+      - run: pnpm -C desktop build
+      - name: Build, sign, and notarize
+        run: pnpm -C desktop exec electron-builder --mac --x64 --publish never --config.directories.output=dist-signing-preflight
+      - name: Verify update artifacts
+        run: node desktop/scripts/verify-update-artifacts.mjs desktop/dist-signing-preflight darwin x64
+      - name: Verify packaged application and containers
+        run: |
+          output_dir="desktop/dist-signing-preflight"
+          app_path="$(find "$output_dir" -type d -name 'Silicon Interface.app' -print -quit)"
+          dmg_path="$(find "$output_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          zip_path="$(find "$output_dir" -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+          test -n "$zip_path"
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate -v "$app_path"
+          spctl --assess --type execute --verbose=2 "$app_path"
+          hdiutil verify "$dmg_path"
+
+          mount_dir="$(mktemp -d)"
+          zip_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rm -rf "$mount_dir" "$zip_dir"
+          }
+          trap cleanup EXIT
+
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg_path"
+          dmg_app="$(find "$mount_dir" -maxdepth 2 -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$dmg_app"
+          codesign --verify --deep --strict --verbose=2 "$dmg_app"
+          xcrun stapler validate -v "$dmg_app"
+          spctl --assess --type execute --verbose=2 "$dmg_app"
+          hdiutil detach "$mount_dir"
+
+          ditto -x -k "$zip_path" "$zip_dir"
+          zip_app="$(find "$zip_dir" -maxdepth 2 -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$zip_app"
+          codesign --verify --deep --strict --verbose=2 "$zip_app"
+          xcrun stapler validate -v "$zip_app"
+          spctl --assess --type execute --verbose=2 "$zip_app"
+      - name: Launch signed application
+        run: |
+          zip_path="$(find desktop/dist-signing-preflight -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$zip_path"
+          run_dir="$(mktemp -d)"
+          trap 'rm -rf "$run_dir"' EXIT
+          ditto -x -k "$zip_path" "$run_dir"
+          zip_app="$(find "$run_dir" -maxdepth 2 -type d -name 'Silicon Interface.app' -print -quit)"
+          test -n "$zip_app"
+          node desktop/scripts/smoke-mac-engineering.mjs "$zip_app" --signature-mode release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: desktop-macos-signing-preflight
+          path: |
+            desktop/dist-signing-preflight/*.dmg
+            desktop/dist-signing-preflight/*.zip
+            desktop/dist-signing-preflight/*.yml
+            desktop/dist-signing-preflight/*.blockmap
+          if-no-files-found: warn
+          retention-days: 3

@@ -15,12 +15,47 @@ The exact current tree passed:
 
 | Gate | Result |
 | --- | --- |
-| Desktop TypeScript + policy/release/smoke/signing tests | 60/60 passed |
+| Deployment-contract tests | 12/12 passed |
+| Dependency advisory gate | passed; 847 locked packages, 0 advisories at the high threshold |
+| Desktop TypeScript + policy/release/smoke/signing tests | 62/62 passed |
 | Interface TypeScript | passed |
-| Chat reliability suite | 251/251 passed |
+| Chat reliability suite in the committed desktop tree | 252/252 passed |
 | Next.js 16.2.6 production webpack build | passed; 14 routes generated |
 | Workflow YAML parse | passed |
 | CloudFormation template validation | passed in `us-east-1` |
+
+Commit `22fa08f` passed the complete six-architecture native GitHub Actions
+Desktop workflow
+([run 29525903554](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29525903554)):
+
+| Native job | Job ID | Result | Uploaded artifact ID |
+| --- | --- | --- | --- |
+| Shared Ubuntu test/build gate | `87714142999` | passed | n/a |
+| macOS 14 arm64 package/runtime | `87714585363` | passed | `8386727221` |
+| macOS 15 Intel x64 package/runtime | `87714585402` | passed | `8386790346` |
+| Windows 11 ARM arm64 package/runtime/install | `87714585334` | passed | `8386870150` |
+| Windows Server 2022 x64 package/runtime/install | `87714585367` | passed | `8386817955` |
+| Ubuntu 22.04 ARM arm64 package/runtime/install | `87714585371` | passed | `8386755215` |
+| Ubuntu 22.04 x64 package/runtime/install | `87714585391` | passed | `8386759151` |
+
+The Windows ARM64 job used a timestamped, runner-local engineering
+Authenticode identity and independently proved that this identity is rejected
+by the exact public-release publisher gate. It then verified the generated
+updater SHA-512, launched the unpacked ARM64 application against
+`https://interface.teamofsilicons.com/`, remained healthy for ten seconds,
+performed the real default per-user NSIS install, verified the installer,
+installed application, and uninstaller signatures, launched the installed
+application against production, remained healthy for another ten seconds, and
+confirmed uninstall removed the application.
+
+The ARM64 installer now uses an architecture-scoped real ZIP payload with
+electron-builder differential packaging disabled. This is required because
+the x86 NSIS 7z plug-in silently omitted ARM64-transformed EXE/DLL entries. A
+local extraction of the corrected installer identified the embedded payload as
+ZIP and completed `unzip -t` without errors, including the ARM64 executable and
+native DLLs. Windows x64 retains its smaller differential installer and EXE
+blockmap. The signed ARM64 updater intentionally downloads the complete
+installer without first requesting a missing blockmap.
 
 Commit `2a9bc8b` passed the complete native GitHub Actions Desktop workflow
 ([run 29513081958](https://github.com/teamofsilicons/silicon-interface-web/actions/runs/29513081958)):
@@ -182,12 +217,16 @@ It refuses to replace a pre-existing local installation.
 ## Package evidence
 
 Updater candidates were assembled and their generated metadata was checked
-against every artifact's exact file name, byte size, and SHA-512 digest:
+against every artifact's exact file name and SHA-512 digest. Declared metadata
+sizes were checked when present; the release manifest independently records and
+verifies the exact byte size of every payload:
 
 | Platform candidate | Formats | Metadata | Result |
 | --- | --- | --- | --- |
+| macOS x64 | DMG + ZIP | `latest-mac.yml` | passed |
 | macOS arm64 | DMG + ZIP | `latest-mac.yml` | passed |
 | Windows x64 | NSIS EXE + ZIP | `latest.yml` | passed |
+| Windows arm64 | full NSIS EXE + ZIP | `latest.yml` | passed |
 | Linux x64 | AppImage + DEB | `latest-linux.yml` | passed |
 | Linux arm64 | AppImage + DEB | `latest-linux-arm64.yml` | passed |
 
@@ -264,6 +303,14 @@ stable feed activates successfully.
 The deployed web bundle at `https://interface.teamofsilicons.com` contains the
 protocol-v1 desktop lifecycle/deep-link adapter. Glass returned healthy database
 and Redis readiness from `/healthz` and `/readyz` during the verification run.
+
+The exact current full Interface working set was promoted through the guarded
+candidate/CAS deployment path as Vercel deployment
+`dpl_D6qiXcTP8pbLXhRm9xxLJ3bvHf8u`. Its immutable candidate, production alias,
+and alias-stability checks passed after 286/286 reliability tests, ESLint,
+TypeScript, a local production build, and the mandatory Vercel Node 24 build.
+The retained machine-readable evidence is
+`/Users/codanium/.silicon/releases/interface-20260716T185727Z-bbcc06f58495/deployment-evidence.json`.
 
 The AWS release foundation is deployed as stack
 `silicon-interface-desktop-releases` in account `234951665042`, `us-east-1`:

@@ -56,32 +56,44 @@ const STEPS = [
   "Almost ready…",
 ];
 
+const STEP_PROGRESS = [24, 58, 88];
+
+function formatElapsed(elapsedMs: number) {
+  return `${(elapsedMs / 1000).toFixed(1)}s elapsed`;
+}
+
 function SiliconBrowserDialogBody({ siliconId }: { siliconId: string }) {
   const [phase, setPhase] = React.useState<Phase>("launching");
   const [step, setStep] = React.useState(0);
-  const [result, setResult] = React.useState<{ url: string; reused: boolean } | null>(null);
+  const [elapsedMs, setElapsedMs] = React.useState(0);
+  const [result, setResult] = React.useState<{ url: string } | null>(null);
   const [error, setError] = React.useState("");
 
   const launch = React.useCallback(() => {
     setPhase("launching");
     setStep(0);
+    setElapsedMs(0);
     setError("");
     setResult(null);
 
     let alive = true;
+    const startedAt = performance.now();
     // Walk the progress labels while the request is in flight — the backend
     // does check-then-maybe-create in one call, so this is honest staging.
     const timers = [
       window.setTimeout(() => alive && setStep(1), 700),
       window.setTimeout(() => alive && setStep(2), 2200),
     ];
+    const elapsedTimer = window.setInterval(() => {
+      if (alive) setElapsedMs(performance.now() - startedAt);
+    }, 100);
 
     (async () => {
       try {
         const r = await api.openSiliconBrowser(siliconId);
         if (!alive) return;
         if (!r.viewer_url) throw new Error("No browser session was returned.");
-        setResult({ url: r.viewer_url, reused: Boolean(r.reused || r.live) });
+        setResult({ url: r.viewer_url });
         setPhase("ready");
       } catch (e) {
         if (!alive) return;
@@ -89,12 +101,14 @@ function SiliconBrowserDialogBody({ siliconId }: { siliconId: string }) {
         setPhase("error");
       } finally {
         timers.forEach((t) => window.clearTimeout(t));
+        window.clearInterval(elapsedTimer);
       }
     })();
 
     return () => {
       alive = false;
       timers.forEach((t) => window.clearTimeout(t));
+      window.clearInterval(elapsedTimer);
     };
   }, [siliconId]);
 
@@ -129,23 +143,11 @@ function SiliconBrowserDialogBody({ siliconId }: { siliconId: string }) {
   if (phase === "ready" && result) {
     return (
       <div className="flex flex-col items-center gap-3 py-4 text-center">
-        <span
-          aria-hidden
-          className="h-2.5 w-2.5 rounded-full bg-foreground animate-pulse motion-reduce:animate-none"
-        />
-        <p className="text-sm font-medium">
-          {result.reused ? "Joined the live session" : "Browser is ready"}
-        </p>
-        <p className="max-w-xs text-xs text-muted-foreground">
-          {result.reused
-            ? "This silicon already had a browser open — you'll join exactly what it's doing."
-            : "A fresh session started in this silicon's browser profile."}
-        </p>
         <a
           href={result.url}
           target="_blank"
           rel="noopener noreferrer"
-          className="mt-2 flex items-center justify-center gap-1.5 bg-foreground px-4 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90"
+          className="flex items-center justify-center gap-1.5 bg-foreground px-4 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90"
         >
           Open browser
           <ArrowUpRight className="h-4 w-4" weight="bold" />
@@ -156,6 +158,8 @@ function SiliconBrowserDialogBody({ siliconId }: { siliconId: string }) {
   }
 
   // Launching.
+  const progress = STEP_PROGRESS[step] ?? STEP_PROGRESS[0];
+
   return (
     <div className="flex flex-col items-center gap-4 py-6 text-center">
       <span
@@ -179,6 +183,25 @@ function SiliconBrowserDialogBody({ siliconId }: { siliconId: string }) {
             {label}
           </p>
         ))}
+      </div>
+      <div className="w-full max-w-72 pt-1">
+        <div
+          role="progressbar"
+          aria-label="Browser launch progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+          className="h-1.5 w-full overflow-hidden bg-muted"
+        >
+          <div
+            className="h-full bg-foreground transition-[width] duration-500 ease-out motion-reduce:transition-none"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
+          <span>{`Step ${step + 1} of ${STEPS.length}`}</span>
+          <span>{formatElapsed(elapsedMs)}</span>
+        </div>
       </div>
     </div>
   );

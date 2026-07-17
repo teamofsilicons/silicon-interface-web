@@ -131,7 +131,7 @@ type Tier = "info" | "warn" | "urgent" | "critical";
  *   • 7→3 days   — prominent; spells out that silicons will stop working
  *   • 2→1 days   — loud
  *   • due day    — red "Last Day"; overdue/paused stays red
- * Team logo on the left, "Pay now" on the right. Re-checks hourly and
+ * Team logo on the left, with the payment action beside the amount. Re-checks hourly and
  * recomputes the day count at local midnight.
  */
 export function PaymentBanner() {
@@ -191,7 +191,7 @@ export function PaymentBanner() {
     return () => clearInterval(id);
   }, []);
 
-  // Pay now opens the team's billing page (the workspace's Billing tab).
+  // Continue Payment opens the team's billing page (the workspace's Billing tab).
   const payNow = (r: TeamPayment) => {
     router.push(`/chat?team=${encodeURIComponent(r.slug)}&tab=billing`);
   };
@@ -256,43 +256,43 @@ export function PaymentBanner() {
         <div className={cn("mt-0.5 truncate text-xs", tier === "critical" ? "text-white/85" : "text-muted-foreground")}>
           {timing}
         </div>
-        <div className="mt-2 min-w-0 truncate text-base font-semibold tracking-tight tabular-nums">
-          {amount}
-        </div>
-      </div>
-      <div className="flex shrink-0 flex-col items-center justify-center">
+        <div className="mt-2 flex min-w-0 items-center gap-3">
+          <div className="min-w-0 truncate text-base font-semibold tracking-tight tabular-nums">
+            {amount}
+          </div>
           <Button
             size="sm"
             onClick={() => payNow(r)}
             className={cn(
-              "h-9 shrink-0 px-4 text-xs",
+              "ml-auto h-9 shrink-0 px-4 text-xs",
               tier === "critical" && "bg-white text-destructive hover:bg-white/90",
             )}
           >
-            Pay Now
+            Continue Payment
           </Button>
+        </div>
         {multiple && (
-            <div className="mt-1 flex items-center justify-center gap-0.5">
-              <button
-                type="button"
-                aria-label="previous notification"
-                onClick={() => setIndex((n) => (n - 1 + rows.length) % rows.length)}
-                className="grid h-7 w-6 place-items-center opacity-70 transition-opacity hover:opacity-100"
-              >
-                <CaretLeft className="h-4 w-4" weight="bold" />
-              </button>
-              <span className="label-mono text-[9px] tabular-nums opacity-70">
-                {i + 1}/{rows.length}
-              </span>
-              <button
-                type="button"
-                aria-label="next notification"
-                onClick={() => setIndex((n) => (n + 1) % rows.length)}
-                className="grid h-7 w-6 place-items-center opacity-70 transition-opacity hover:opacity-100"
-              >
-                <CaretRight className="h-4 w-4" weight="bold" />
-              </button>
-            </div>
+          <div className="mt-1 flex items-center justify-end gap-0.5">
+            <button
+              type="button"
+              aria-label="previous notification"
+              onClick={() => setIndex((n) => (n - 1 + rows.length) % rows.length)}
+              className="grid h-7 w-6 place-items-center opacity-70 transition-opacity hover:opacity-100"
+            >
+              <CaretLeft className="h-4 w-4" weight="bold" />
+            </button>
+            <span className="label-mono text-[9px] tabular-nums opacity-70">
+              {i + 1}/{rows.length}
+            </span>
+            <button
+              type="button"
+              aria-label="next notification"
+              onClick={() => setIndex((n) => (n + 1) % rows.length)}
+              className="grid h-7 w-6 place-items-center opacity-70 transition-opacity hover:opacity-100"
+            >
+              <CaretRight className="h-4 w-4" weight="bold" />
+            </button>
+          </div>
         )}
       </div>
     </div>

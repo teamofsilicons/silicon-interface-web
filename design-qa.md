@@ -51,3 +51,61 @@
 - Primary header interaction and browser console: passed.
 
 final result: passed
+
+---
+
+# Payment Banner Design QA
+
+- Source visual truth: `/var/folders/cr/4xxx8tw93k50dllp_gz65rdm0000gn/T/TemporaryItems/NSIRD_screencaptureui_JEnBzU/Screenshot 2026-07-18 at 12.23.52 AM.png`
+- Focused source crop: `/Users/codanium/Documents/silicon/silicon-interface/design-qa-assets/payment-banner-before.png`
+- Implementation screenshot: `/Users/codanium/Documents/silicon/silicon-interface/design-qa-assets/payment-banner-after.png`
+- Combined comparison: `/Users/codanium/Documents/silicon/silicon-interface/design-qa-assets/payment-banner-comparison.png`
+- Viewport: focused 320 × 115 CSS-pixel payment banner, normalized beside the reference crop
+- State: informational payment reminder, one team, `$110.00`, 13 days remaining
+
+## Full-view comparison evidence
+
+The combined comparison confirms the requested structural change: the payment amount and CTA now occupy the same horizontal row, with the CTA aligned to the amount's right. The surrounding title, timing copy, banner color, hierarchy, and spacing remain consistent with the existing design.
+
+## Focused region comparison evidence
+
+The banner itself is the focused region. No additional crop was needed because the amount/CTA row, typography, color, and vertical rhythm are all readable in the 320 × 115 capture.
+
+## Required fidelity surfaces
+
+- Fonts and typography: Existing TikTok Sans hierarchy, weights, sizes, line heights, and tabular amount styling are unchanged. The longer CTA remains on one line.
+- Spacing and layout rhythm: The CTA is on the amount row with a 12px gap and automatic right alignment. Banner padding and title/timing spacing are unchanged.
+- Colors and visual tokens: Existing `bg-secondary`, foreground, muted foreground, and primary button tokens are unchanged.
+- Image quality and asset fidelity: The production `IdAvatar` component and logo resolution logic are unchanged. The isolated browser harness held its neutral pre-hydration avatar placeholder, so the comparison intentionally evaluates only the edited content region.
+- Copy and content: `Pay Now` is replaced by `Continue Payment`; all other app-specific copy is unchanged.
+
+## Findings
+
+No actionable P0, P1, or P2 visual mismatches were found for the requested change.
+
+## Interaction and console checks
+
+- The rendered banner exposes one enabled button named `Continue Payment`.
+- The button keeps the existing `router.push` billing destination handler; no navigation code was changed.
+- The isolated visual route did not reproduce the authenticated application shell, so end-to-end billing navigation was not used as a visual acceptance signal.
+- Browser console was checked and showed no errors or warnings attributable to the payment banner.
+
+## Comparison history
+
+- Initial comparison: The reference placed `Pay Now` beside the upper copy while the requested design calls for the CTA beside the amount.
+- Fix applied: Moved the existing button into the amount row, right-aligned it, changed the label to `Continue Payment`, and right-aligned the optional multi-team controls below that row.
+- Post-fix evidence: `payment-banner-comparison.png` shows the amount and CTA aligned on the same row with no clipping or wrapping.
+
+## Implementation checklist
+
+- [x] CTA moved to the amount row.
+- [x] CTA label changed to `Continue Payment`.
+- [x] Existing billing destination preserved.
+- [x] Multi-team controls preserved beneath the amount row.
+- [x] Lint and TypeScript checks passed after removing the temporary visual harness.
+
+## Follow-up polish
+
+No P3 follow-up is required for this scoped change.
+
+final result: passed

@@ -1,6 +1,8 @@
 import * as React from "react";
 import type { Icon } from "@phosphor-icons/react";
+import { CircleNotch } from "@phosphor-icons/react/dist/ssr";
 
+import { parseCsvPreview } from "@/lib/csv-preview";
 import { cn } from "@/lib/utils";
 
 import { FileName } from "./file-name";
@@ -22,6 +24,7 @@ export function AttachmentCard({
   isVideo,
   textPreview,
   textPreviewFormat = "plain",
+  textPreviewLoading = false,
   sizeLabel,
   tilt,
   onClick,
@@ -35,7 +38,9 @@ export function AttachmentCard({
   /** A head of the file's text content — shown as a document-style peek when
    *  there's no image/video thumbnail (markdown / text / code files). */
   textPreview?: string | null;
-  textPreviewFormat?: "plain" | "markdown";
+  textPreviewFormat?: "plain" | "markdown" | "csv";
+  /** Keeps CSV cards at their final geometry while the content head loads. */
+  textPreviewLoading?: boolean;
   sizeLabel?: string | null;
   /** Degrees of rotation (pins only). Omit for a flat standalone card. */
   tilt?: number;
@@ -76,6 +81,19 @@ export function AttachmentCard({
             // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL
             <img src={thumbnailUrl} alt="" draggable={false} className="sdr-media h-full w-full select-none object-cover" />
           )
+        ) : textPreviewFormat === "csv" && textPreview ? (
+          <CompactCsvPreview source={textPreview} />
+        ) : textPreviewFormat === "csv" && textPreviewLoading ? (
+          <div
+            className="absolute inset-0 grid place-items-center bg-card text-muted-foreground"
+            role="status"
+            aria-label="loading CSV preview"
+          >
+            <span className="flex flex-col items-center gap-1 text-[9px]">
+              <CircleNotch className="size-4 animate-spin" />
+              loading CSV…
+            </span>
+          </div>
         ) : textPreview ? (
           <>
             {/* tiny document-style peek of the file's text, fading out at the
@@ -99,6 +117,42 @@ export function AttachmentCard({
           </span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function CompactCsvPreview({ source }: { source: string }) {
+  const preview = parseCsvPreview(source, {
+    maxRows: 3,
+    maxColumns: 3,
+    maxCellCharacters: 80,
+  });
+  if (preview.columnCount === 0) return null;
+  return (
+    <div className="absolute inset-0 overflow-hidden bg-card p-1 font-mono text-[6px] leading-tight">
+      <table className="w-full table-fixed border-collapse">
+        <thead>
+          <tr className="bg-muted text-foreground">
+            {preview.headers.map((header, index) => (
+              <th key={index} className="truncate border px-1 py-0.5 text-left font-semibold">
+                {header || `Column ${index + 1}`}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {preview.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {preview.headers.map((_, columnIndex) => (
+                <td key={columnIndex} className="truncate border px-1 py-0.5">
+                  {row[columnIndex] || "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-b from-transparent to-card" />
     </div>
   );
 }

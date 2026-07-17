@@ -254,13 +254,18 @@ export function MediaPreviewer({
           {isText && (
             <div className={cn("min-w-0 max-w-full flex-1", renderedSourceOpen ? "h-full min-h-[40dvh]" : "p-4 sm:p-6")}>
               {textError ? (
-                <p className="text-sm text-muted-foreground">
+                <p className="grid h-full min-h-[40dvh] w-full place-items-center p-6 text-sm text-muted-foreground">
                   couldn&rsquo;t load the file - use the download button.
                 </p>
               ) : textForUrl === null ? (
-                <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <CircleNotch className="h-4 w-4 animate-spin" /> loading...
-                </p>
+                <div
+                  className="grid h-full min-h-[40dvh] w-full place-items-center p-6 text-sm text-muted-foreground"
+                  role="status"
+                >
+                  <span className="flex items-center gap-2">
+                    <CircleNotch className="h-4 w-4 animate-spin" /> loading...
+                  </span>
+                </div>
               ) : activeSourceMode === "preview" && isHtmlDocument ? (
                 <HtmlPreviewFrame source={textForUrl} title={label} baseUrl={url} />
               ) : activeSourceMode === "preview" && isSvgDocument ? (

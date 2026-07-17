@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { parseCsvPreview } from "@/lib/csv-preview";
+import { linkifyHttpText } from "@/lib/link-display";
 import { cn } from "@/lib/utils";
 
 export function CsvPreviewer({ source }: { source: string }) {
@@ -79,9 +80,7 @@ export function CsvPreviewer({ source }: { source: string }) {
                         !value && "text-muted-foreground",
                       )}
                     >
-                      <span className="block max-h-24 overflow-hidden whitespace-pre-wrap break-words">
-                        {value || "—"}
-                      </span>
+                      <CsvCellValue value={value} />
                     </td>
                   );
                 })}
@@ -91,5 +90,32 @@ export function CsvPreviewer({ source }: { source: string }) {
         </table>
       </div>
     </div>
+  );
+}
+
+function CsvCellValue({ value }: { value: string }) {
+  if (!value) {
+    return <span className="block max-h-24 overflow-hidden">—</span>;
+  }
+  return (
+    <span className="block max-h-24 overflow-hidden whitespace-pre-wrap break-words">
+      {linkifyHttpText(value).map((segment, index) =>
+        segment.href ? (
+          <a
+            key={`${index}:${segment.href}`}
+            href={segment.href}
+            title={segment.href}
+            aria-label={`Open ${segment.href}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary underline underline-offset-2 hover:opacity-80"
+          >
+            {segment.text}
+          </a>
+        ) : (
+          <React.Fragment key={index}>{segment.text}</React.Fragment>
+        ),
+      )}
+    </span>
   );
 }

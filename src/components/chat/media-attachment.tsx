@@ -15,7 +15,7 @@ import { api } from "@/lib/api";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
-import { isTextLike, useTextSnippet } from "@/lib/text-preview";
+import { isTextLike, useTextSnippetState } from "@/lib/text-preview";
 import { languageForFile } from "@/lib/programmatic-files";
 import type { AnnotationDraft, MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -114,7 +114,11 @@ export function MediaAttachment({
   // Content peek for text/markdown/code attachments (only matters for the file
   // card; images/video/audio render their own rich inline preview).
   const textLikeAttachment = isTextLike(filenameProp, mime);
-  const textPeek = useTextSnippet(textLikeAttachment ? url : null, mediaId, textLikeAttachment);
+  const textPeek = useTextSnippetState(
+    textLikeAttachment ? url : null,
+    mediaId,
+    textLikeAttachment,
+  );
 
   // §6.2 — Pending media (e.g. an in-flight TTS render) reports `status:
   // "pending"` with a null `download_url`. Rather than show an inert
@@ -354,6 +358,10 @@ export function MediaAttachment({
       <AttachmentCard
         glyph={fileGlyph(filenameProp || caption || "", m)}
         filename={filenameProp?.trim() || caption?.trim() || "file"}
+        textPreviewFormat={
+          languageForFile(filenameProp || caption, m)?.id === "csv" ? "csv" : "plain"
+        }
+        textPreviewLoading={languageForFile(filenameProp || caption, m)?.id === "csv"}
       />
     );
   }
@@ -512,8 +520,9 @@ export function MediaAttachment({
         glyph={Glyph}
         filename={filename}
         thumbnailUrl={pdfThumb}
-        textPreview={textPeek}
-        textPreviewFormat={languageForFile(filename, m)?.id === "markdown" ? "markdown" : "plain"}
+        textPreview={textPeek.text}
+        textPreviewFormat={attachmentTextPreviewFormat(filename, m)}
+        textPreviewLoading={textPeek.loading}
         sizeLabel={sizeLabel}
         onClick={() => {
           if (canPreview) setPreviewOpen(true);
@@ -537,6 +546,16 @@ export function MediaAttachment({
       )}
     </>
   );
+}
+
+function attachmentTextPreviewFormat(
+  filename?: string | null,
+  mime?: string | null,
+): "plain" | "markdown" | "csv" {
+  const language = languageForFile(filename, mime)?.id;
+  if (language === "markdown") return "markdown";
+  if (language === "csv") return "csv";
+  return "plain";
 }
 
 function formatBytes(n: number): string {

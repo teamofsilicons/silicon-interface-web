@@ -48,19 +48,46 @@ export function useTextSnippet(
   enabled = true,
   maxChars = 1500,
 ): string | null {
-  const [snippet, setSnippet] = React.useState<string | null>(() =>
-    key ? cache.get(key) ?? null : null,
-  );
+  return useTextSnippetState(url, key, enabled, maxChars).text;
+}
+
+export interface TextSnippetState {
+  text: string | null;
+  loading: boolean;
+  error: boolean;
+}
+
+/** Like useTextSnippet, but exposes enough state for a stable inline loader. */
+export function useTextSnippetState(
+  url: string | null | undefined,
+  key: string,
+  enabled = true,
+  maxChars = 1500,
+): TextSnippetState {
+  const [result, setResult] = React.useState<{
+    key: string;
+    text: string | null;
+    error: boolean;
+  }>(() => ({ key, text: key ? cache.get(key) ?? null : null, error: false }));
+  const cached = key ? cache.get(key) ?? null : null;
+  const current = result.key === key ? result : { key, text: cached, error: false };
+  const text = cached ?? current.text;
   React.useEffect(() => {
     if (!enabled || !url) return;
-    if (snippet != null) return;
+    if (cache.has(key)) return;
     let alive = true;
     void fetchSnippet(url, key, maxChars).then((t) => {
-      if (alive && t != null) setSnippet(t);
+      if (!alive) return;
+      setResult({ key, text: t, error: t == null });
     });
     return () => {
       alive = false;
     };
-  }, [url, key, enabled, maxChars, snippet]);
-  return snippet;
+  }, [url, key, enabled, maxChars]);
+  const error = enabled && Boolean(url) && current.error && text == null;
+  return {
+    text,
+    loading: enabled && Boolean(url) && text == null && !error,
+    error,
+  };
 }

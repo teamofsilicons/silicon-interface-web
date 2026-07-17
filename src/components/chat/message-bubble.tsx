@@ -28,7 +28,7 @@ import { readMediaUpload } from "@/lib/media-upload-store";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
-import { isTextLike, useTextSnippet } from "@/lib/text-preview";
+import { isTextLike, useTextSnippetState } from "@/lib/text-preview";
 import { languageForFile } from "@/lib/programmatic-files";
 import type { AnnotationDraft, Event, EventType, ProgressState } from "@/lib/types";
 import { editableTextForEvent, eventShowsEdited } from "@/lib/event-edit";
@@ -162,7 +162,8 @@ function AttachmentPin({
   const thumbnailUrl = isVisual ? url : isPdf ? pdfThumb : null;
   // Content peek for text/markdown/code files.
   const textLike = !isVisual && !isPdf && isTextLike(filename, mime);
-  const textPeek = useTextSnippet(textLike ? url : null, mediaId, textLike);
+  const textPeek = useTextSnippetState(textLike ? url : null, mediaId, textLike);
+  const textPreviewLanguage = languageForFile(filename, mime)?.id;
 
   const canPreview = isPreviewable(filename, mime);
   const open = async (e: React.MouseEvent) => {
@@ -192,8 +193,15 @@ function AttachmentPin({
         filename={filename}
         thumbnailUrl={thumbnailUrl}
         isVideo={isVideo}
-        textPreview={textPeek}
-        textPreviewFormat={languageForFile(filename, mime)?.id === "markdown" ? "markdown" : "plain"}
+        textPreview={textPeek.text}
+        textPreviewFormat={
+          textPreviewLanguage === "markdown"
+            ? "markdown"
+            : textPreviewLanguage === "csv"
+              ? "csv"
+              : "plain"
+        }
+        textPreviewLoading={textPreviewLanguage === "csv" && (textPeek.loading || !url)}
         tilt={tilt}
         onClick={open}
       />

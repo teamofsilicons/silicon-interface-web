@@ -18,6 +18,7 @@ import { SiliconInviteDialog } from "./silicon-invite-dialog";
 
 import { api } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { compactUrlLabel } from "@/lib/link-display";
 import type { Contact, CarbonPublic, Event, Room, SiliconPublic } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { albumMediaItems } from "@/lib/albums";
@@ -636,11 +637,13 @@ function LinksTab({ links }: { links: string[] }) {
         <li key={u} className="min-w-0">
           <a
             href={u}
+            title={u}
+            aria-label={`Open ${u}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="block max-w-full break-all text-sm text-primary hover:underline"
+            className="block max-w-full truncate text-sm text-primary hover:underline"
           >
-            {u}
+            {compactUrlLabel(u)}
           </a>
         </li>
       ))}

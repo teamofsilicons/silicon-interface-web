@@ -1180,7 +1180,9 @@ function HeldSendCountdown({ releaseAt }: { releaseAt: string }) {
 }
 
 function Receipt({ status }: { status: MessageStatus }) {
-  return <MessageReceiptGlyph status={status} className="h-3 w-3" />;
+  // Match the full height of the metadata rail so the receipt reads as part of
+  // the timestamp instead of a tiny mark floating beside it.
+  return <MessageReceiptGlyph status={status} className="h-4 w-4 shrink-0" />;
 }
 
 /** One-line preview of a quoted (replied-to) message. */

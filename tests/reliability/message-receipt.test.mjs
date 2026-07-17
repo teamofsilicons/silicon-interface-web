@@ -254,6 +254,25 @@ test("waiting, sent, delivered, and read use the requested Phosphor glyph classe
   assert.doesNotMatch(source, /SignalReceiptMark/);
 });
 
+test("receipt glyphs have a deliberate metadata and sidebar footprint", async () => {
+  const bubbleSource = await readFile(
+    new URL("../../src/components/chat/message-bubble.tsx", import.meta.url),
+    "utf8",
+  );
+  const roomListSource = await readFile(
+    new URL("../../src/components/chat/room-list.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    bubbleSource,
+    /MessageReceiptGlyph status=\{status\} className="h-4 w-4 shrink-0"/,
+  );
+  assert.match(
+    roomListSource,
+    /className="h-5 w-5 shrink-0 text-foreground"/,
+  );
+});
+
 test("group receipts never overclaim partial delivery or partial read", () => {
   assert.deepEqual(messageReceiptPresentation("partially_delivered"), {
     visual: "delivered",

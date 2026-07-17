@@ -660,7 +660,7 @@ function RoomRow({
             ) : visibleDraft ? null : mineLast ? (
               <MessageReceiptGlyph
                 status={lastReceiptStatus}
-                className="h-4 w-4 shrink-0 text-foreground"
+                className="h-5 w-5 shrink-0 text-foreground"
               />
             ) : null}
           </div>

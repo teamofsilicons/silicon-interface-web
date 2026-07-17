@@ -5,9 +5,10 @@ import { mergeEventRevision } from "./event-revision";
 /**
  * A small per-room cache of the most recent events, in localStorage, so a
  * reopened chat paints its last messages instantly instead of waiting for the
- * `api.events` round-trip. The room view writes it while open; the chat page
- * appends incoming websocket events for *closed* rooms so the newly-arrived
- * message is already in the cache when the user opens the chat (no ~1s gap).
+ * `api.events` round-trip. Both the room view and the page-level websocket
+ * projection write through this cache. That shared ownership is intentional:
+ * it closes the interval between selecting a sidebar row and mounting its
+ * RoomView, when a newly-arrived message must not be stranded in the sidebar.
  */
 // Keep this in lockstep with the room view's initial page size: the cached
 // snippet and the first server fetch must cover the same recent messages so
@@ -74,7 +75,8 @@ export function saveRoomEventSnippet<T extends Event>(roomId: string, events: T[
 /**
  * Append a single freshly-received event to a room's cached snippet, deduping
  * by event_id (a later copy wins, e.g. a finalized version of an optimistic
- * send). Used by the chat page for rooms that aren't currently open.
+ * send). Used by the chat page for every accepted websocket event so room
+ * navigation can synchronously hand the latest rows to the next RoomView.
  */
 function eventClientId(event: Event): string | null {
   const local = (event as TimelineEvent)._clientId;

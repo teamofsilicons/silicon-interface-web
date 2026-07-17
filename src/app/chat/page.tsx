@@ -2855,11 +2855,13 @@ function ChatPageInner() {
         if (ev.sender_kind === "silicon") playReceivedSilicon();
         else playReceived();
       }
-      // For a CLOSED room, fold the incoming event into its cached snippet so
-      // it's already there when the user opens the chat — no ~1s wait for the
-      // api.events fetch to surface a message that already arrived over the WS.
-      // (When the room is open, RoomView owns and persists the snippet itself.)
-      if (!isOpen) appendRoomEventSnippet(rid, ev);
+      // Every accepted socket event updates the same per-room handoff cache.
+      // Do this even when the room is currently selected: during a sidebar
+      // navigation `selectedRef` changes before the next RoomView mounts, so
+      // assigning cache ownership only to "closed" rooms can lose the event in
+      // that transition window. appendRoomEventSnippet is revision-aware and
+      // idempotent, so the mounted RoomView may safely persist the same event.
+      appendRoomEventSnippet(rid, ev);
       const preview = eventPreview(ev);
       // An open room only counts as "seen" while the user is actually present
       // (in the desktop wrapper: window visible AND focused). A minimized or

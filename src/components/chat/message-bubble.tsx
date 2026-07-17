@@ -2,9 +2,9 @@
 
 import * as React from "react";
 import {
+  ArrowClockwise,
   ArrowBendUpLeft,
   Check,
-  Checks,
   Clock,
   Copy,
   DotsThree,
@@ -23,6 +23,8 @@ import {
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
+import { authStore } from "@/lib/auth";
+import { readMediaUpload } from "@/lib/media-upload-store";
 import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
@@ -30,12 +32,9 @@ import { isTextLike, useTextSnippet } from "@/lib/text-preview";
 import { languageForFile } from "@/lib/programmatic-files";
 import type { AnnotationDraft, Event, EventType, ProgressState } from "@/lib/types";
 import { editableTextForEvent, eventShowsEdited } from "@/lib/event-edit";
-import { renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
+import { extractUrls, renderMarkdown, looksLikeMarkdown } from "@/lib/markdown";
 import { emojiOnly } from "@/lib/emoji";
-import {
-  messageReceiptPresentation,
-  type MessageReceiptStatus,
-} from "@/lib/message-receipt";
+import { type MessageReceiptStatus } from "@/lib/message-receipt";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import type { MentionTarget } from "@/lib/mentions";
@@ -47,14 +46,16 @@ import {
 } from "@/lib/send-failure";
 
 import { downloadAsset, MediaPreviewer, type AnnotationOpenRequest } from "./media-previewer";
+import { MessageReceiptGlyph } from "./message-receipt-glyph";
 
 import { Badge } from "@/components/ui/badge";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { AttachmentCard } from "@/components/chat/attachment-card";
 import { MarkdownView } from "@/components/chat/markdown-view";
 import { fileGlyph, isPreviewable } from "@/components/chat/file-icon";
-import { LinkPreviewCard } from "@/components/chat/link-preview-card";
+import { fallbackLinkPreview, LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
+import { SiliconAudio } from "@/components/chat/silicon-audio";
 import { RemoteBrowserCard } from "@/components/chat/remote-browser-card";
 import { albumMediaItems } from "@/lib/albums";
 import {
@@ -408,6 +409,10 @@ export function MessageBubble({
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
   // controlled state for that dropdown.
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
+  // Failure details are attempt-local. Once a message has any accepted/
+  // delivered/read state they must not keep a stale correction menu alive.
+  const actionableFailure =
+    status === "failed" || status === "challenge" ? failure : undefined;
   const hasActions =
     !redacted &&
       !!(onReply ||
@@ -415,8 +420,9 @@ export function MessageBubble({
       onEdit ||
       (onForward && canForward) ||
       onDelete ||
+      (status === "failed" && onRetry) ||
       (onSelect && canForward) ||
-      (failure?.correctionActions.length && onCorrection));
+      (actionableFailure?.correctionActions.length && onCorrection));
   // Multi-select eligibility mirrors the forward gate: a real, settled,
   // non-deleted bubble whose type the backend forward endpoint supports.
   // Streaming/optimistic (`is_final === false`) and deleted messages are never
@@ -468,9 +474,14 @@ export function MessageBubble({
         // selection so a click reads as "select", not "highlight".
         inSelect && "cursor-pointer select-none",
       )}
-      // Toggle selection when the row is an eligible select target. Clicking
-      // suppresses the normal action menu (hidden below) and normal behavior.
-      onClick={inSelect ? () => onToggleSelect?.(event) : undefined}
+      // Capture before quotes, links, media, mentions, avatars, or menus can
+      // consume the click. In selection flow the whole row is one Telegram-
+      // style toggle target, so the same gesture selects and deselects.
+      onClickCapture={inSelect ? (clickEvent) => {
+        clickEvent.preventDefault();
+        clickEvent.stopPropagation();
+        onToggleSelect?.(event);
+      } : undefined}
     >
       {selectMode && (
         // Leading select affordance, shown for every bubble while in select-
@@ -626,7 +637,8 @@ export function MessageBubble({
               onDelete={redacted ? undefined : onDelete}
               onTakeBack={onTakeBack}
               onCopied={triggerCopyFlash}
-              failure={failure}
+              failure={actionableFailure}
+              onRetry={status === "failed" ? onRetry : undefined}
               onCorrection={onCorrection}
             />
           )}
@@ -696,17 +708,7 @@ export function MessageBubble({
                 status === "retrying" ||
                 status === "challenge") &&
                 isMine && status && !showHeldCountdown && (
-                status === "failed" && failure?.correctionActions.length && onCorrection ? (
-                  <button
-                    type="button"
-                    onClick={() => onCorrection(event, failure.correctionActions[0])}
-                    title={failureMessage ?? sendFailureMessage(failure)}
-                    className="inline-flex items-center gap-1 text-destructive transition-colors hover:underline"
-                  >
-                    <Receipt status={status} />
-                    <span>{correctionActionLabel(failure.correctionActions[0])}</span>
-                  </button>
-                ) : status === "failed" && onRetry && !failure ? (
+                status === "failed" && onRetry ? (
                   // Failed → the receipt becomes tap-to-retry (same clientId,
                   // so server-side idempotency guarantees no duplicate).
                   <button
@@ -802,6 +804,7 @@ function BubbleActions({
   onTakeBack,
   onCopied,
   failure,
+  onRetry,
   onCorrection,
 }: {
   event: Event;
@@ -822,12 +825,18 @@ function BubbleActions({
   onTakeBack?: (eventId: string, force?: boolean) => void;
   onCopied?: () => void;
   failure?: SendFailureRecord;
+  onRetry?: (event: Event) => void;
   onCorrection?: (event: Event, action: CorrectionAction) => void;
 }) {
   const canDelete = isMine && !!onDelete;
   const canTakeBack = isMine && isOwnSilicon;
   const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false;
   const canEdit = isMine && !!onEdit && editableTextForEvent(event) !== null;
+  // Session repair is an app-level recovery operation, never a valid action
+  // on one message. In particular, a message menu must never offer "sign in".
+  const correctionActions = (failure?.correctionActions ?? []).filter(
+    (action) => action !== "repair_session",
+  );
   const textBody = event.type === "m.text" ? String(event.content.body ?? "") : "";
   const handleCopy = async () => {
     // §7.1 — copyText handles insecure contexts (LAN/http) with an execCommand
@@ -994,16 +1003,26 @@ function BubbleActions({
               </DropdownMenuItem>
             </>
           )}
-          {failure && onCorrection && failure.correctionActions.length > 0 && (
+          {(onRetry || (onCorrection && correctionActions.length > 0)) && (
             <>
               <DropdownMenuSeparator />
-              {failure.correctionActions.map((action) => (
+              {onRetry && (
+                <DropdownMenuItem onClick={() => onRetry(event)}>
+                  <ArrowClockwise className="mr-2 h-3.5 w-3.5" />
+                  retry
+                </DropdownMenuItem>
+              )}
+              {correctionActions.map((action) => (
                 <DropdownMenuItem
                   key={action}
-                  onClick={() => onCorrection(event, action)}
+                  onClick={() => onCorrection?.(event, action)}
                   className={action === "discard_local" ? "text-destructive" : undefined}
                 >
-                  <WarningCircle className="mr-2 h-3.5 w-3.5" />
+                  {action === "discard_local" ? (
+                    <Trash className="mr-2 h-3.5 w-3.5" />
+                  ) : (
+                    <WarningCircle className="mr-2 h-3.5 w-3.5" />
+                  )}
                   {correctionActionLabel(action)}
                 </DropdownMenuItem>
               ))}
@@ -1153,17 +1172,7 @@ function HeldSendCountdown({ releaseAt }: { releaseAt: string }) {
 }
 
 function Receipt({ status }: { status: MessageStatus }) {
-  const presentation = messageReceiptPresentation(status);
-  if (presentation.visual === "attention") {
-    return <WarningCircle className="h-3 w-3 text-destructive" aria-label={presentation.label} />;
-  }
-  if (presentation.visual === "waiting") {
-    return <Clock className="h-3 w-3 opacity-60" aria-label={presentation.label} />;
-  }
-  if (presentation.visual === "read") {
-    return <Checks className="receipt-fill h-3 w-3 text-[#1A1A1A]" aria-label={presentation.label} weight="bold" />;
-  }
-  return <Check className="h-3 w-3 opacity-70" aria-label={presentation.label} weight="bold" />;
+  return <MessageReceiptGlyph status={status} className="h-3 w-3" />;
 }
 
 /** One-line preview of a quoted (replied-to) message. */
@@ -1191,6 +1200,43 @@ function replyPreview(ev: Event): string {
     default:
       return "message";
   }
+}
+
+/** Failed/restored voice sends do not have a server media_id yet, but their
+ * exact Blob remains in the durable media journal. Render that source through
+ * the normal compact player instead of degrading to a generic music label. */
+function DurableVoiceAttachment({
+  event,
+  peaks,
+}: {
+  event: Event;
+  peaks: number[] | null;
+}) {
+  const clientId = (event as Event & { _clientId?: string })._clientId;
+  const owner = authStore.getCarbon()?.carbon_id;
+  const [url, setUrl] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let alive = true;
+    let objectUrl: string | null = null;
+    if (!owner || !clientId) return;
+    void readMediaUpload(`carbon:${owner}`, clientId).then((stored) => {
+      if (!alive || !stored?.blob) return;
+      objectUrl = URL.createObjectURL(stored.blob);
+      setUrl(objectUrl);
+    }).catch(() => undefined);
+    return () => {
+      alive = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [clientId, owner]);
+  return (
+    <SiliconAudio
+      url={url}
+      peaks={peaks}
+      durationMs={typeof event.content.duration_ms === "number" ? event.content.duration_ms : null}
+      className="w-full max-w-[20rem]"
+    />
+  );
 }
 
 /** A few words of the voice transcript, with a "View transcript" link that
@@ -1409,6 +1455,9 @@ function BodyContent({
       // lists, code, tables…); plain chatter keeps the lightweight inline
       // renderer (bold/italic/links + preserved newlines).
       const asMarkdown = looksLikeMarkdown(body);
+      const bodyUrls = extractUrls(body);
+      const stableLinkPreview = event.link_preview ??
+        (bodyUrls.length === 1 ? fallbackLinkPreview(bodyUrls[0]) : null);
       return (
         <div className="space-y-1">
           {asMarkdown ? (
@@ -1421,12 +1470,12 @@ function BodyContent({
                 onMentionClick={onMentionClick}
                 mentionInverted={isMine}
               />
-              {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
+              {stableLinkPreview && <LinkPreviewCard preview={stableLinkPreview} />}
             </div>
           ) : (
             <div className="whitespace-pre-wrap break-words">
               {renderMarkdown(body, mentionOptions)}
-              {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
+              {stableLinkPreview && <LinkPreviewCard preview={stableLinkPreview} />}
             </div>
           )}
         </div>
@@ -1547,9 +1596,7 @@ function BodyContent({
               replyToEventId={event.event_id}
             />
           ) : (
-            <div className="flex items-center gap-2 text-xs">
-              <MusicNote className="h-4 w-4" /> voice note
-            </div>
+            <DurableVoiceAttachment event={event} peaks={localPeaks} />
           )}
           {c.transcript ? <VoiceTranscript text={String(c.transcript)} /> : null}
         </div>

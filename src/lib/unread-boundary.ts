@@ -8,7 +8,13 @@ export type RoomOpenReadTarget = {
 /** Opening a writable room is itself the read action. Resolve it entirely from
  * the room-list projection so the badge can clear before history hydration. */
 export function roomOpenReadTarget(room: Room): RoomOpenReadTarget | null {
-  if (room.observed || (!room.unread && (room.unread_count ?? room.unread_boundary.unread_count) < 1)) {
+  const unreadCount = Math.max(
+    Number.isSafeInteger(room.unread_count) ? Number(room.unread_count) : 0,
+    Number.isSafeInteger(room.unread_boundary.unread_count)
+      ? Number(room.unread_boundary.unread_count)
+      : 0,
+  );
+  if (room.observed || (!room.unread && unreadCount < 1)) {
     return null;
   }
   const lastPosition = room.last_event?.stream_position;

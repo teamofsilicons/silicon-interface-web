@@ -11,3 +11,8 @@ test("PostHog state cannot create parent-domain cookies visible to Glass", () =>
   assert.match(source, /Domain=\$\{domain\}/);
   assert.doesNotMatch(source, /persistence:\s*["'](?:cookie|localStorage\+cookie)["']/);
 });
+
+test("private chat analytics never starts session replay uploads", () => {
+  assert.match(source, /disable_session_recording:\s*true/);
+  assert.doesNotMatch(source, /disable_session_recording:\s*false/);
+});

@@ -20,6 +20,7 @@ import {
 } from "../../src/lib/room-snippet.ts";
 import { ackOutbox, enqueueOutbox, listOutbox } from "../../src/lib/outbox.ts";
 import { loadStoredRoomEvents } from "../../src/lib/chat-store.ts";
+import { mergeEventRevision } from "../../src/lib/event-revision.ts";
 
 function localEvent(identity, body = "draft") {
   return applyTimelineIdentity(
@@ -84,6 +85,51 @@ test("trusted transaction echo keeps local key, position, and timestamp", async 
   assert.equal(rows[0].created_at, identity.localCreatedAt);
   assert.equal(rows[0]._authoritativeCreatedAt, "2035-02-03T04:05:06.000Z");
   assert.equal(rows[0].content.body, "enriched");
+  assert.equal(
+    readTimelineIdentity(owner, "client-1")?.eventId,
+    "event-1",
+    "a trusted transaction echo must permanently record server acceptance",
+  );
+});
+
+test("a stale history response cannot undo a newer edit", () => {
+  const original = {
+    ...serverEvent("event-edited", "2026-07-16T16:00:00.000Z", "original"),
+    accepted_at: "2026-07-16T16:00:00.000Z",
+    edit_version: 0,
+    edited_at: null,
+  };
+  const edited = {
+    ...original,
+    content: { body: "edited" },
+    edit_version: 1,
+    edited_at: "2026-07-16T16:01:00.000Z",
+    stream_position: 50,
+  };
+  const merged = mergeEventRevision(edited, { ...original, stream_position: 12 });
+  assert.equal(merged.content.body, "edited");
+  assert.equal(merged.edit_version, 1);
+});
+
+test("an edit mutation position never moves an accepted timeline row", () => {
+  installBrowser();
+  const first = {
+    ...serverEvent("01K00000000000000000000001", "2026-07-16T16:00:00.000Z", "first"),
+    accepted_at: "2026-07-16T16:00:00.000Z",
+    stream_position: 99,
+    edit_version: 1,
+    edited_at: "2026-07-16T16:03:00.000Z",
+  };
+  const second = {
+    ...serverEvent("01K00000000000000000000002", "2026-07-16T16:01:00.000Z", "second"),
+    accepted_at: "2026-07-16T16:01:00.000Z",
+    stream_position: 20,
+  };
+  const rows = reconcileTimelineEvents([], [second, first], {
+    ownerId: "accepted-order-owner",
+    currentDevice: "web-a",
+  });
+  assert.deepEqual(rows.map((row) => row.content.body), ["first", "second"]);
 });
 
 test("socket-before-response aliases collapse without a remount", async () => {
@@ -191,6 +237,23 @@ test("accepted messages follow authoritative ULID order despite client timestamp
   });
   assert.deepEqual(rows.map((row) => row.content.body), ["older", "newer"]);
   assert.equal(rows.at(-1).event_id, newer.event_id);
+});
+
+test("cross-writer accepted messages follow commit position when ULIDs disagree", () => {
+  installBrowser();
+  const committedFirst = {
+    ...serverEvent("01J00000000000000000000002", "2026-01-01T00:00:00.000Z", "first"),
+    stream_position: 40,
+  };
+  const committedSecond = {
+    ...serverEvent("01J00000000000000000000001", "2026-01-01T00:00:00.000Z", "second"),
+    stream_position: 41,
+  };
+  const rows = reconcileTimelineEvents([], [committedSecond, committedFirst], {
+    ownerId: "timeline-cross-writer-order-owner",
+    currentDevice: "web-a",
+  });
+  assert.deepEqual(rows.map((row) => row.content.body), ["first", "second"]);
 });
 
 test("duplicate history pages are idempotent and synthetic rows gate server actions", async () => {

@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { parseCsvPreview } from "../../src/lib/csv-preview.ts";
+import { hasRenderedSourcePreview } from "../../src/lib/programmatic-files.ts";
+
+test("CSV files select the rendered table preview by extension or MIME", () => {
+  assert.equal(hasRenderedSourcePreview("report.CSV", "application/octet-stream"), true);
+  assert.equal(hasRenderedSourcePreview("report", "text/csv; charset=utf-8"), true);
+});
+
+test("CSV preview parses quoted separators, escaped quotes, and record breaks", () => {
+  const preview = parseCsvPreview(
+    '\uFEFFname,notes,total\r\nAda,"line one\r\nline two",10\r\nLin,"said ""hello""",20',
+  );
+
+  assert.deepEqual(preview.headers, ["name", "notes", "total"]);
+  assert.deepEqual(preview.rows, [
+    ["Ada", "line one\nline two", "10"],
+    ["Lin", 'said "hello"', "20"],
+  ]);
+  assert.equal(preview.truncatedRows, false);
+});
+
+test("CSV preview pads short headers and bounds rows, columns, and cells", () => {
+  const preview = parseCsvPreview("a\n1,toolong,hidden\n2,b,c\n3,d,e", {
+    maxRows: 2,
+    maxColumns: 2,
+    maxCellCharacters: 3,
+  });
+
+  assert.deepEqual(preview.headers, ["a", ""]);
+  assert.deepEqual(preview.rows, [["1", "too…"], ["2", "b"]]);
+  assert.equal(preview.truncatedRows, true);
+  assert.equal(preview.truncatedColumns, true);
+  assert.equal(preview.truncatedCells, true);
+});
+
+test("CSV preview does not invent a row for a trailing record break", () => {
+  const preview = parseCsvPreview("a,b\n1,2\n");
+  assert.deepEqual(preview.rows, [["1", "2"]]);
+});

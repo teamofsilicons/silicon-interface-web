@@ -9,6 +9,7 @@ import type {
   UnreadBoundary,
 } from "./types";
 import { validateStreamVectorPosition } from "./sync-integrity";
+import { mergeDeliverySummaries, normalizeDeliverySummary } from "./delivery-state";
 
 const KINDS = new Set<Kind>(["carbon", "silicon", "system"]);
 
@@ -76,6 +77,17 @@ function normalizeLastEvent(value: unknown): RoomLastEvent | null {
   const preview = str(raw.preview);
   const at = str(raw.at);
   if (!preview && !at) return null;
+  const rawDelivery = asRecord(raw.delivery);
+  const delivery = rawDelivery &&
+    Number.isSafeInteger(rawDelivery.recipient_count) &&
+    Number.isSafeInteger(rawDelivery.delivered_count) &&
+    Number.isSafeInteger(rawDelivery.read_count)
+    ? normalizeDeliverySummary(
+        Number(rawDelivery.recipient_count),
+        Number(rawDelivery.delivered_count),
+        Number(rawDelivery.read_count),
+      )
+    : undefined;
   return {
     event_id: str(raw.event_id) || undefined,
     preview,
@@ -84,10 +96,15 @@ function normalizeLastEvent(value: unknown): RoomLastEvent | null {
     sender_kind: raw.sender_kind == null ? null : kind(raw.sender_kind, "system"),
     type: str(raw.type, "m.text"),
     read: typeof raw.read === "boolean" ? raw.read : undefined,
+    ...(delivery ? { delivery } : {}),
     stream_position: Number.isSafeInteger(raw.stream_position)
       ? Number(raw.stream_position)
       : undefined,
     stream_writer: typeof raw.stream_writer === "string" ? raw.stream_writer : undefined,
+    edit_version: Number.isSafeInteger(raw.edit_version)
+      ? Number(raw.edit_version)
+      : undefined,
+    edited_at: typeof raw.edited_at === "string" ? raw.edited_at : null,
   };
 }
 
@@ -231,4 +248,133 @@ export function normalizeRoom(value: unknown): Room | null {
 export function normalizeRooms(value: unknown): Room[] {
   if (!Array.isArray(value)) return [];
   return value.map(normalizeRoom).filter((room): room is Room => room !== null);
+}
+
+function roomActivityAt(room: Room): string {
+  return room.list_projection?.activity_at || room.last_event?.at || "";
+}
+
+function roomActivityPosition(room: Room): number {
+  const projected = room.list_projection?.activity_stream_position;
+  if (Number.isSafeInteger(projected)) return Number(projected);
+  const last = room.last_event?.stream_position;
+  return Number.isSafeInteger(last) ? Number(last) : 0;
+}
+
+/** Compare the visible last-message projections in application order.
+ * A zero timestamp/position tie deliberately favors the already-painted
+ * projection: an eventually-consistent room refresh must never roll a live or
+ * just-accepted sidebar row back to a different event. */
+function compareRoomActivity(current: Room, incoming: Room): number {
+  const currentLast = current.last_event;
+  const incomingLast = incoming.last_event;
+  if (currentLast?.event_id && currentLast.event_id === incomingLast?.event_id) return 0;
+
+  const currentAt = roomActivityAt(current);
+  const incomingAt = roomActivityAt(incoming);
+  if (currentAt !== incomingAt) {
+    if (!currentAt) return -1;
+    if (!incomingAt) return 1;
+    return currentAt.localeCompare(incomingAt);
+  }
+
+  const currentPosition = roomActivityPosition(current);
+  const incomingPosition = roomActivityPosition(incoming);
+  if (currentPosition !== incomingPosition) {
+    return currentPosition < incomingPosition ? -1 : 1;
+  }
+
+  if (currentLast && !incomingLast) return 1;
+  if (!currentLast && incomingLast) return -1;
+  return currentLast && incomingLast ? 1 : 0;
+}
+
+function mergeListProjectionProgress(
+  current: Room,
+  incoming: Room,
+  preserveCurrentActivity: boolean,
+): Room["list_projection"] {
+  const currentProjection = current.list_projection;
+  const incomingProjection = incoming.list_projection;
+  if (!currentProjection) return incomingProjection;
+  if (!incomingProjection) return currentProjection;
+
+  const currentThrough = currentProjection.through_stream_position;
+  const incomingThrough = incomingProjection.through_stream_position;
+  const preserveCurrentThrough = currentThrough > incomingThrough;
+  const throughVector = preserveCurrentThrough
+    ? currentProjection.through_stream_vector
+    : incomingProjection.through_stream_vector;
+
+  return {
+    ...incomingProjection,
+    through_stream_position: Math.max(currentThrough, incomingThrough),
+    ...(throughVector ? { through_stream_vector: throughVector } : {}),
+    activity_stream_position: preserveCurrentActivity
+      ? currentProjection.activity_stream_position
+      : incomingProjection.activity_stream_position,
+    activity_at: preserveCurrentActivity
+      ? currentProjection.activity_at
+      : incomingProjection.activity_at,
+  };
+}
+
+/** Merge an authoritative room snapshot without allowing eventually-consistent
+ * refreshes to roll back the visible tail, edit revision, receipt state, or
+ * stream checkpoint that the live timeline has already established. */
+export function mergeRoomReceiptProjection(current: Room, incoming: Room): Room {
+  const currentLast = current.last_event;
+  const incomingLast = incoming.last_event;
+  const sameEvent = Boolean(
+    currentLast?.event_id &&
+    incomingLast?.event_id &&
+    currentLast.event_id === incomingLast.event_id,
+  );
+
+  if (!sameEvent || !currentLast || !incomingLast) {
+    const preserveCurrentActivity = compareRoomActivity(current, incoming) > 0;
+    if (!preserveCurrentActivity) {
+      return {
+        ...incoming,
+        list_projection: mergeListProjectionProgress(current, incoming, false),
+      };
+    }
+    return {
+      ...incoming,
+      last_event: currentLast,
+      list_projection: mergeListProjectionProgress(current, incoming, true),
+    };
+  }
+
+  const currentEditVersion = Number.isSafeInteger(currentLast?.edit_version)
+    ? Number(currentLast?.edit_version)
+    : 0;
+  const incomingEditVersion = Number.isSafeInteger(incomingLast?.edit_version)
+    ? Number(incomingLast?.edit_version)
+    : 0;
+  const newestRevision = currentEditVersion > incomingEditVersion
+    ? currentLast!
+    : incomingLast!;
+  const delivery = mergeDeliverySummaries(currentLast.delivery, incomingLast.delivery);
+  const read = currentLast.read === true || incomingLast.read === true || delivery?.state === "read";
+  return {
+    ...incoming,
+    last_event: {
+      ...newestRevision,
+      ...(delivery ? { delivery } : {}),
+      read,
+    },
+    list_projection: mergeListProjectionProgress(current, incoming, false),
+  };
+}
+
+export function replaceRoomsPreservingReceiptFacts(
+  current: Room[],
+  incoming: Room[],
+): Room[] {
+  const currentById = new Map(current.map((room) => [room.room_id, room]));
+  return incoming.map((room) => {
+    const existing = currentById.get(room.room_id);
+    return existing ? mergeRoomReceiptProjection(existing, room) : room;
+  });
 }

@@ -70,16 +70,16 @@ import {
   loadServerDraft,
   retryLocalDraftPersistence,
   retryDraftSync,
-  resolveDraftConflict,
   setDraft,
   setDraftFocused,
   setDraftSelection,
-  useDraftConflict,
+  useDraft,
   useDraftSyncStatus,
   type DraftSelectionDirection,
 } from "@/lib/drafts";
 import {
   COMPOSER_SELECTION_COMMIT_DELAY_MS,
+  mayPersistComposerSelection,
   mayRestoreComposerSnapshot,
 } from "@/lib/composer-selection";
 import { getDraftAttachments, setDraftAttachments } from "@/lib/draft-attachments";
@@ -108,13 +108,6 @@ import type { AnnotationDraft, Event, EventType, HeldSend } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
 import { ComposerExpressionPicker } from "@/components/chat/expression-picker";
@@ -172,8 +165,25 @@ export type CancelQueuedResult =
 
 function SavedVoicePlayer({ draft }: { draft: VoiceDraft }) {
   const [url] = React.useState(() => URL.createObjectURL(draft.blob));
+  const [peaks, setPeaks] = React.useState<number[] | null>(null);
   React.useEffect(() => () => URL.revokeObjectURL(url), [url]);
-  return <SiliconAudio url={url} durationMs={draft.durationMs} className="min-w-0 w-full" />;
+  React.useEffect(() => {
+    let alive = true;
+    void computePeaks(draft.blob).then((result) => {
+      if (alive && result) setPeaks(result.peaks);
+    }).catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [draft.blob]);
+  return (
+    <SiliconAudio
+      url={url}
+      peaks={peaks}
+      durationMs={draft.durationMs}
+      className="w-full max-w-[22rem]"
+    />
+  );
 }
 
 interface Props {
@@ -235,6 +245,8 @@ interface Props {
   /** Keep draft editing available while blocking new sends. */
   sendDisabled?: boolean;
   sendDisabledReason?: string;
+  /** The composer changed the amount of vertical space available to chat. */
+  onLayoutChange?: () => void;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -770,6 +782,7 @@ export function Composer({
   onCancelHeldLast,
   sendDisabled = false,
   sendDisabledReason = "sending is disabled",
+  onLayoutChange,
 }: Props) {
   const [text, setText] = React.useState("");
   const enterBehavior: ComposerEnterBehavior = React.useSyncExternalStore(
@@ -777,11 +790,7 @@ export function Composer({
     readComposerEnterBehavior,
     (): ComposerEnterBehavior => "send",
   );
-  const draftConflict = useDraftConflict(roomId);
-  const draftConflictSignature = draftConflict
-    ? `${draftConflict.version}:${draftConflict.content_updated_at ?? draftConflict.updated_at}:${draftConflict.origin_device ?? ""}:${draftConflict.text}`
-    : null;
-  const [dismissedDraftConflict, setDismissedDraftConflict] = React.useState<string | null>(null);
+  const publishedDraftText = useDraft(roomId);
   const draftSync = useDraftSyncStatus(roomId);
   const localDraftUnsafe =
     draftSync.localDurabilityPending || Boolean(draftSync.localDurabilityError);
@@ -830,17 +839,31 @@ export function Composer({
     Array<{ entry: OutboxEntry; error?: string }>
   >([]);
   const [editSaving, setEditSaving] = React.useState(false);
-  // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
-  // control during the upload, and retain the recorded blob if it fails so the
-  // user can retry instead of losing the recording.
-  const voiceXhrRef = React.useRef<XMLHttpRequest | null>(null);
-  const [voiceUploadPct, setVoiceUploadPct] = React.useState<number | null>(null);
+  // The durable outbox is the sole network owner for finalized voice notes.
+  // Running a second composer uploader here raced upload completion and could
+  // turn an already accepted note into a visible failure.
   const [pendingVoice, setPendingVoice] = React.useState<VoiceDraft | null>(null);
+  const voiceLocalUrlsRef = React.useRef(new Map<string, string>());
+  React.useEffect(() => () => {
+    for (const url of voiceLocalUrlsRef.current.values()) URL.revokeObjectURL(url);
+    voiceLocalUrlsRef.current.clear();
+  }, [roomId]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
   const textRef = React.useRef(text);
   const composerInteractionEpochRef = React.useRef(0);
+  const applyingComposerSnapshotRef = React.useRef(true);
+  const pendingComposerRestoreRef = React.useRef<{
+    roomId: string;
+    text: string;
+    start: number;
+    end: number;
+    direction: DraftSelectionDirection;
+    expectedInteractionEpoch?: number;
+  } | null>(null);
   const noteComposerInteraction = React.useCallback(() => {
+    pendingComposerRestoreRef.current = null;
+    applyingComposerSnapshotRef.current = false;
     composerInteractionEpochRef.current += 1;
   }, []);
   const pendingDraftSelectionRef = React.useRef<{
@@ -888,7 +911,7 @@ export function Composer({
   }, []);
   const persistComposerSelection = React.useCallback(
     (textarea: HTMLTextAreaElement, immediate = false) => {
-      if (isEditing) return;
+      if (!mayPersistComposerSelection(isEditing, applyingComposerSnapshotRef.current)) return;
       pendingDraftSelectionRef.current = {
         roomId,
         start: textarea.selectionStart,
@@ -922,6 +945,31 @@ export function Composer({
     textRef.current = text;
   }, [text]);
 
+  const applyPendingComposerRestore = React.useCallback(() => {
+    const pending = pendingComposerRestoreRef.current;
+    if (!pending) return;
+    if (
+      pending.roomId !== roomId ||
+      !mayRestoreComposerSnapshot(
+        pending.expectedInteractionEpoch,
+        composerInteractionEpochRef.current,
+      )
+    ) {
+      pendingComposerRestoreRef.current = null;
+      applyingComposerSnapshotRef.current = false;
+      return;
+    }
+    const textarea = taRef.current;
+    // A changed controlled value is committed on the next React layout pass.
+    // Keep the restore guard raised until that exact value is in the DOM.
+    if (!textarea || textarea.value !== pending.text) return;
+    const start = Math.min(pending.start, textarea.value.length);
+    const end = Math.max(start, Math.min(pending.end, textarea.value.length));
+    textarea.setSelectionRange(start, end, pending.direction);
+    pendingComposerRestoreRef.current = null;
+    applyingComposerSnapshotRef.current = false;
+  }, [roomId]);
+
   const restoreComposerSnapshot = React.useCallback(
     (targetRoomId: string, expectedInteractionEpoch?: number) => {
       if (!mayRestoreComposerSnapshot(
@@ -931,27 +979,52 @@ export function Composer({
         return;
       }
       const snapshot = getDraftComposerState(targetRoomId);
+      applyingComposerSnapshotRef.current = true;
+      pendingComposerRestoreRef.current = {
+        roomId: targetRoomId,
+        text: snapshot.text,
+        start: snapshot.selectionStart,
+        end: snapshot.selectionEnd,
+        direction: snapshot.selectionDirection,
+        expectedInteractionEpoch,
+      };
       setText(snapshot.text);
-      // React owns the textarea value. Restore selection after that value has
-      // committed, clamping once more in case a legacy/corrupt record escaped
-      // normalization. This intentionally does not steal focus.
-      window.requestAnimationFrame(() => {
-        if (targetRoomId !== roomId) return;
-        if (!mayRestoreComposerSnapshot(
-          expectedInteractionEpoch,
-          composerInteractionEpochRef.current,
-        )) {
-          return;
-        }
-        const textarea = taRef.current;
-        if (!textarea || textarea.value !== snapshot.text) return;
-        const start = Math.min(snapshot.selectionStart, textarea.value.length);
-        const end = Math.max(start, Math.min(snapshot.selectionEnd, textarea.value.length));
-        textarea.setSelectionRange(start, end, snapshot.selectionDirection);
-      });
+      applyPendingComposerRestore();
     },
-    [roomId],
+    [applyPendingComposerRestore],
   );
+
+  // React owns the textarea value, so selection restoration belongs in the
+  // same pre-paint layout phase as that value commit. This also prevents the
+  // initial autoFocus event from overwriting a saved range with 0..0.
+  React.useLayoutEffect(() => {
+    applyPendingComposerRestore();
+  }, [applyPendingComposerRestore, recordingActive, text]);
+
+  React.useLayoutEffect(() => {
+    applyingComposerSnapshotRef.current = true;
+    restoreComposerSnapshot(roomId);
+  }, [restoreComposerSnapshot, roomId]);
+
+  // Realtime cloud updates flow into the same composer state without a dialog.
+  // A dirty local draft remains authoritative in drafts.ts, so only a clean
+  // adopted projection can replace the visible textarea here.
+  React.useEffect(() => {
+    if (
+      isEditing ||
+      draftSync.dirty ||
+      publishedDraftText === textRef.current
+    ) {
+      return;
+    }
+    restoreComposerSnapshot(roomId);
+  }, [
+    draftSync.dirty,
+    isEditing,
+    publishedDraftText,
+    restoreComposerSnapshot,
+    roomId,
+  ]);
 
   React.useEffect(() => {
     const focusDurabilityWarning = (event: globalThis.Event) => {
@@ -986,6 +1059,16 @@ export function Composer({
       setGifAcquisitions((current) =>
         current.filter((item) => item.entry.clientId !== clientId),
       );
+      const localUrl = voiceLocalUrlsRef.current.get(clientId);
+      if (localUrl) {
+        URL.revokeObjectURL(localUrl);
+        voiceLocalUrlsRef.current.delete(clientId);
+      }
+      void getVoiceDraft(roomId).then((draft) => {
+        if (draft?.clientId !== clientId) return;
+        setPendingVoice((current) => current?.clientId === clientId ? null : current);
+        return clearVoiceDraft(roomId);
+      }).catch(() => undefined);
     };
     window.addEventListener(MEDIA_OUTBOX_STAGED_EVENT, onStaged);
     window.addEventListener(MEDIA_OUTBOX_ACKNOWLEDGED_EVENT, onAcknowledged);
@@ -998,8 +1081,18 @@ export function Composer({
   // Recover a finalized voice note retained after a failed upload/reload.
   React.useEffect(() => {
     let alive = true;
-    void getVoiceDraft(roomId).then((draft) => {
-      if (alive && draft) setPendingVoice(draft);
+    const owner = authStore.getCarbon()?.carbon_id;
+    void Promise.all([
+      getVoiceDraft(roomId),
+      owner ? listOutbox(owner) : Promise.resolve([]),
+    ]).then(([draft, outbox]) => {
+      if (!alive || !draft) return;
+      // A matching outbox row already renders in the timeline and owns its
+      // retry/discard controls. Never duplicate it as a saved composer row.
+      const staged = outbox.some(
+        (entry) => entry.roomId === roomId && entry.clientId === draft.clientId,
+      );
+      if (!staged) setPendingVoice(draft);
     });
     return () => {
       alive = false;
@@ -1432,7 +1525,6 @@ export function Composer({
   React.useEffect(() => {
     let cancelled = false;
     const untouchedInteractionEpoch = composerInteractionEpochRef.current;
-    restoreComposerSnapshot(roomId, untouchedInteractionEpoch);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset room-scoped picker state with the room switch.
     setEmojiQuery(null);
     // Restore any uploaded attachments staged in this room's draft.
@@ -1611,6 +1703,11 @@ export function Composer({
   React.useLayoutEffect(() => {
     const el = taRef.current;
     if (!el) return;
+    const previousScrollTop = el.scrollTop;
+    const caretAtEnd =
+      document.activeElement === el &&
+      el.selectionStart === text.length &&
+      el.selectionEnd === text.length;
     const lineH = parseFloat(getComputedStyle(el).lineHeight) || 20;
     const padding =
       parseFloat(getComputedStyle(el).paddingTop) +
@@ -1622,7 +1719,12 @@ export function Composer({
     const next = Math.min(Math.max(contentH, minH), maxH);
     el.style.height = `${next}px`;
     el.style.overflowY = contentH > maxH ? "auto" : "hidden";
-  }, [text]);
+    // Resetting height to measure scrollHeight can also reset the textarea's
+    // internal viewport. Keep the caret in view at the end of a long draft;
+    // preserve an intentional mid-paragraph editing position otherwise.
+    el.scrollTop = caretAtEnd ? el.scrollHeight : previousScrollTop;
+    onLayoutChange?.();
+  }, [onLayoutChange, text]);
 
   const clearDelayTimer = React.useCallback(() => {
     if (delayTimerRef.current) {
@@ -2409,12 +2511,21 @@ export function Composer({
       if (gifUploadsInFlightRef.current === 1) {
         api.activity(roomId, "uploading", true).catch(() => undefined);
       }
-      const payload = await prepareMediaOutboxPayload(outboxOwner, entry);
-      const real = await api.sendEvent(roomId, payload, entry.clientId);
-      onAck(entry.clientId, real);
-      await acknowledgeMediaSend(outboxOwner, entry, undefined, {
-        roomId,
-        event: real,
+      await withOutboxClientLock(outboxOwner, entry.clientId, async () => {
+        const current = (await listOutbox(outboxOwner)).find(
+          (item) => item.clientId === entry.clientId,
+        );
+        // Another tab or the global recovery loop may already have committed
+        // and acknowledged this exact durable GIF intent.
+        if (!current) return;
+        entry = current;
+        const payload = await prepareMediaOutboxPayload(outboxOwner, entry);
+        const real = await api.sendEvent(roomId, payload, entry.clientId);
+        onAck(entry.clientId, real);
+        await acknowledgeMediaSend(outboxOwner, entry, undefined, {
+          roomId,
+          event: real,
+        });
       });
       track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
       onClearReply?.();
@@ -2820,12 +2931,16 @@ export function Composer({
     const replyEventId = replyTo?.event_id;
     let localUrl: string | null = null;
     let optimisticAdded = false;
-    let activityStarted = false;
     setBusy(true);
     try {
       const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
       if (!outboxOwner) throw new Error("Please sign in again before sending this voice note");
-      const filename = `voice-${clientId}.webm`;
+      const extension = mime.includes("mp4")
+        ? "m4a"
+        : mime.includes("ogg")
+          ? "ogg"
+          : "webm";
+      const filename = `voice-${clientId}.${extension}`;
       const peaks = await computePeaks(blob).catch(() => null);
       const resolvedDuration = peaks?.duration_ms || durationMs;
       const eventContent = {
@@ -2845,7 +2960,9 @@ export function Composer({
         optimisticContent: { ...eventContent, mime },
         eventContent,
         completionMeta: eventContent,
-        transcribe: true,
+        // Glass queues authoritative speech-to-text after accepting the
+        // message. Audio delivery must never wait on an optional STT provider.
+        transcribe: false,
         replyTo: replyEventId,
       });
       // The voice draft and media/outbox journals are now strict-commit safe.
@@ -2861,27 +2978,13 @@ export function Composer({
         { timeoutMs: sendTimeoutMs(blob.size) },
       );
       optimisticAdded = true;
-      api.activity(roomId, "uploading", true).catch(() => undefined);
-      activityStarted = true;
-      setVoiceUploadPct(0);
-      const payload = await prepareMediaOutboxPayload(
-        outboxOwner,
-        entry,
-        undefined,
-        (pct) => setVoiceUploadPct(pct),
-        voiceXhrRef,
-      );
-      const real = await api.sendEvent(roomId, payload, clientId); // §2.3
-      onAck(clientId, real);
-      await acknowledgeMediaSend(outboxOwner, entry, undefined, {
-        roomId,
-        event: real,
-      });
-      onClearReply?.();
-      // The media outbox retains its own source until acknowledgement. The
-      // redundant voice draft can now be cleared after authoritative success.
-      await clearVoiceDraft(roomId);
+      voiceLocalUrlsRef.current.set(clientId, localUrl);
+      localUrl = null;
+      // The page-level recovery worker exclusively owns upload, readiness
+      // polling, idempotency resolution, and acknowledgement from this point.
       setPendingVoice(null);
+      wakeOutboxRecovery(outboxOwner, clientId);
+      onClearReply?.();
       track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
       if (optimisticAdded) onFail(clientId, e);
@@ -2895,20 +2998,13 @@ export function Composer({
       }
     } finally {
       setBusy(false);
-      setVoiceUploadPct(null);
-      voiceXhrRef.current = null;
-      // §6.4 — Revoke the object URL in `finally` regardless of outcome. The
-      // optimistic bubble has already captured the bytes it needs (peaks +
-      // duration); leaving the URL live leaked blob memory on every failure.
       if (localUrl) URL.revokeObjectURL(localUrl);
-      if (activityStarted) api.activity(roomId, "uploading", false).catch(() => undefined);
     }
   };
 
   const onVoiceSubmit = (blob: Blob, durationMs: number) => {
     api.activity(roomId, "recording", false).catch(() => undefined);
     const draft = { blob, durationMs, savedAt: Date.now(), clientId: newClientId() };
-    setPendingVoice(draft);
     void (async () => {
       // Persist before beginning the upload so a refresh/crash during transfer
       // still leaves a recoverable copy.
@@ -2937,46 +3033,7 @@ export function Composer({
             ? "Uploading attachment"
             : composerAnnouncement}
       </div>
-      <Dialog
-        open={draftConflict !== null && dismissedDraftConflict !== draftConflictSignature}
-        onOpenChange={(open) => {
-          if (!open && draftConflictSignature) setDismissedDraftConflict(draftConflictSignature);
-        }}
-      >
-        <DialogContent className="w-[calc(100vw-2rem)] max-w-md">
-          <DialogHeader>
-            <DialogTitle>Draft changed on another device</DialogTitle>
-            <DialogDescription>
-              Choose which version to keep. Your draft on this device will remain saved until you decide.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="rounded-md border bg-muted/40 p-3 text-sm">
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Other device</div>
-            <div className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
-              {draftConflict?.text || (draftConflict?.cleared_at ? "The other device cleared this draft." : "Empty draft")}
-            </div>
-          </div>
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => resolveDraftConflict(roomId, "local")}
-            >
-              Keep this device
-            </Button>
-            <Button
-              type="button"
-              onClick={() => {
-                resolveDraftConflict(roomId, "remote");
-                restoreComposerSnapshot(roomId);
-              }}
-            >
-              Use other device
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-      {draftSync.error && draftSync.blocked && draftConflict === null && (
+      {draftSync.error && draftSync.blocked && (
         <div
           className="flex flex-wrap items-center justify-between gap-3 border border-input bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
           role="status"
@@ -3131,35 +3188,10 @@ export function Composer({
           )}
         </div>
       )}
-      {/* §6.3 — Voice upload progress + abort. */}
-      {voiceUploadPct !== null && (
-        <div className="flex items-center gap-3 border bg-card px-3 py-2 text-xs">
-          <Microphone className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <div className="min-w-0 flex-1">
-            <div className="label-mono text-[10px] text-muted-foreground">
-              sending voice note… {voiceUploadPct}%
-            </div>
-            <div className="mt-1 h-0.5 w-full bg-muted">
-              <div
-                className="h-full bg-primary transition-all"
-                style={{ width: `${voiceUploadPct}%` }}
-              />
-            </div>
-          </div>
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => voiceXhrRef.current?.abort()}
-            aria-label="cancel voice upload"
-          >
-            <X className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      )}
       {/* A finalized/failed voice note is durable. It can be previewed and sent
           after returning to the room; only this explicit discard deletes it. */}
-      {pendingVoice && voiceUploadPct === null && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border border-input bg-card px-3 py-2 text-xs">
+      {pendingVoice && (
+        <div className="flex items-center justify-between gap-3 border border-input bg-card px-3 py-2 text-xs">
           <div className="min-w-0 flex-1">
             <div className="label-mono mb-1 text-[10px] text-muted-foreground">
               saved voice note

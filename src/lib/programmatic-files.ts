@@ -129,5 +129,5 @@ export function hasRenderedSourcePreview(
   mime?: string | null,
 ): boolean {
   const lang = languageForFile(name, mime)?.id;
-  return lang === "html" || lang === "markdown" || lang === "svg";
+  return lang === "csv" || lang === "html" || lang === "markdown" || lang === "svg";
 }

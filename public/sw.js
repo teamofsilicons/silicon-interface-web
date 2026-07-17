@@ -2,7 +2,8 @@
 // Banners are suppressed when a tab is focused (the in-app UI already shows
 // the message); `tag` dedupes against the in-tab Notification fallback.
 
-self.SILICON_SHELL_CACHE = "silicon-interface-shell-v1";
+self.SILICON_SHELL_CACHE = "silicon-interface-shell-v4";
+const SILICON_REPLACING_WORKER = Boolean(self.registration.active);
 
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -12,14 +13,34 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const names = await caches.keys();
+      const olderShells = names.filter((name) =>
+        name.startsWith("silicon-interface-shell-") &&
+        name !== self.SILICON_SHELL_CACHE);
       await Promise.all(
-        names
-          .filter((name) =>
-            name.startsWith("silicon-interface-shell-") &&
-            name !== self.SILICON_SHELL_CACHE)
-          .map((name) => caches.delete(name)),
+        olderShells.map((name) => caches.delete(name)),
       );
       await self.clients.claim();
+      // Schema-changing releases cannot leave an already-open tab executing
+      // the older bundle: it would request an older IndexedDB version and stop
+      // room sync with VersionError. Reload each same-origin window exactly
+      // once whenever this worker replaces an existing controller. Cache-name
+      // detection remains a fallback for installations created by very old
+      // workers that did not expose a reliable active-controller marker.
+      if (SILICON_REPLACING_WORKER || olderShells.length > 0) {
+        const windows = await self.clients.matchAll({
+          type: "window",
+          includeUncontrolled: true,
+        });
+        await Promise.all(
+          windows.map(async (client) => {
+            try {
+              await client.navigate(client.url);
+            } catch {
+              // A closing tab is already leaving this worker's ownership.
+            }
+          }),
+        );
+      }
     })(),
   );
 });

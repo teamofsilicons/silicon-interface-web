@@ -47,6 +47,19 @@ export function IdAvatar({
   // always gets its own load attempt without synchronizing state in an effect.
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
   const failed = effective === failedSrc;
+  const fallbackKey = `${family}:${seed || "?"}:${effective ?? "none"}:${failed ? "failed" : "missing"}`;
+  const [readyFallbackKey, setReadyFallbackKey] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (effective && !failed) return;
+    // A missing URL on the first paint or a fast failure from an expired
+    // presigned URL usually means the authoritative profile refresh is still
+    // in flight. Keep a neutral square during that window so the generated
+    // identity mark never flashes before the real logo/photo arrives.
+    const delay = effective ? 2_000 : 1_200;
+    const timer = window.setTimeout(() => setReadyFallbackKey(fallbackKey), delay);
+    return () => window.clearTimeout(timer);
+  }, [effective, failed, fallbackKey]);
 
   if (effective && !failed) {
     return (
@@ -58,8 +71,23 @@ export function IdAvatar({
         width={size}
         height={size}
         style={style}
-        className={cn("sdr-media shrink-0 border object-cover", className)}
+        className={cn(
+          "sdr-media shrink-0 border bg-foreground/[0.06] object-cover",
+          className,
+        )}
         onError={() => setFailedSrc(effective)}
+      />
+    );
+  }
+  if (readyFallbackKey !== fallbackKey) {
+    return (
+      <span
+        aria-hidden
+        style={style}
+        className={cn(
+          "block shrink-0 border bg-foreground/[0.06]",
+          className,
+        )}
       />
     );
   }

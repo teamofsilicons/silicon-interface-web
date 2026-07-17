@@ -1,5 +1,18 @@
 import type { PresenceProjection } from "./types";
 
+function newestTimestamp(...values: string[]): string {
+  let newest = "";
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed) || parsed <= newestMs) continue;
+    newest = value;
+    newestMs = parsed;
+  }
+  return newest;
+}
+
 /** A server online claim is only valid while its short lease is unexpired. */
 export function presenceIsOnline(
   presence: PresenceProjection | undefined,
@@ -17,7 +30,18 @@ export function mergePresence(
   current: PresenceProjection | undefined,
   incoming: PresenceProjection,
 ): PresenceProjection {
-  if (!current || incoming.revision > current.revision) return incoming;
+  if (!current) return incoming;
+  if (incoming.revision > current.revision) {
+    // A message accepted after the last presence heartbeat is direct proof the
+    // peer was active at that instant. Preserve that observation across a
+    // newer offline heartbeat whose last_seen projection is lagging. Hidden
+    // remains an explicit privacy boundary and always clears derived activity.
+    if (incoming.state === "hidden" || current.state === "hidden") return incoming;
+    const lastSeen = newestTimestamp(incoming.last_seen_at, current.last_seen_at);
+    return lastSeen === incoming.last_seen_at
+      ? incoming
+      : { ...incoming, last_seen_at: lastSeen };
+  }
   if (incoming.revision < current.revision) return current;
   if (
     incoming.state === current.state &&
@@ -35,4 +59,18 @@ export function mergePresence(
     return { state: "offline", expires_at: "", last_seen_at: lastSeen, revision: current.revision };
   }
   return current;
+}
+
+/** Fold a message/event authored by the peer into the ephemeral presence
+ * projection. This cannot make somebody appear online and never bypasses the
+ * hidden privacy state; it only prevents an impossible "last seen 48m ago"
+ * label beside a message they sent four minutes ago. */
+export function observePresenceActivity(
+  presence: PresenceProjection | undefined,
+  activityAt: string,
+): PresenceProjection | undefined {
+  if (!presence || presence.state === "hidden" || !activityAt) return presence;
+  const lastSeen = newestTimestamp(presence.last_seen_at, activityAt);
+  if (!lastSeen || lastSeen === presence.last_seen_at) return presence;
+  return { ...presence, last_seen_at: lastSeen };
 }

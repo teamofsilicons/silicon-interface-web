@@ -36,7 +36,7 @@ export function LinkPreviewCard({ preview }: Props) {
       href={safeUrl}
       target="_blank"
       rel="noopener noreferrer"
-      className="mt-2 flex max-w-md items-stretch border bg-card text-foreground transition-colors hover:bg-accent"
+      className="mt-2 flex h-20 max-w-md items-stretch overflow-hidden border bg-card text-foreground transition-colors hover:bg-accent"
     >
       {safeImage && (
         // eslint-disable-next-line @next/next/no-img-element -- arbitrary OG URL
@@ -60,4 +60,24 @@ export function LinkPreviewCard({ preview }: Props) {
       </div>
     </a>
   );
+}
+
+/** Build the same fixed-height card immediately from message text while the
+ * authoritative Open Graph metadata is still arriving. Replacing this shell
+ * with the enriched projection never changes timeline geometry. */
+export function fallbackLinkPreview(rawUrl: string): LinkPreview | null {
+  const safeUrl = safeHttpUrl(rawUrl);
+  if (!safeUrl) return null;
+  try {
+    const parsed = new URL(safeUrl);
+    return {
+      url: safeUrl,
+      host: parsed.host,
+      title: parsed.host,
+      description: "",
+      image: "",
+    };
+  } catch {
+    return null;
+  }
 }

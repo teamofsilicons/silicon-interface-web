@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import type { AnnotationDraft } from "@/lib/types";
 
 import { AnnotationStudio } from "./annotation-studio/annotation-studio";
+import { CsvPreviewer } from "./csv-previewer";
 import { CustomVideoPlayer } from "./custom-video-player";
 import { MarkdownView } from "./markdown-view";
 import { PreviewModalComposer } from "./preview-modal-composer";
@@ -97,6 +98,7 @@ export function MediaPreviewer({
   );
   const [localStudioOpen, setLocalStudioOpen] = React.useState(false);
   const isMarkdown = language?.id === "markdown";
+  const isCsv = language?.id === "csv";
   const isHtmlDocument = language?.id === "html";
   const hasPreviewPane = hasRenderedSourcePreview(filename, mime);
   const isText = isTextLikeFile(filename, mime);
@@ -267,6 +269,8 @@ export function MediaPreviewer({
                 <div className="h-full min-w-0 max-w-full overflow-y-auto overflow-x-hidden px-4 py-5 [overscroll-behavior:contain] sm:p-6">
                   <MarkdownView source={textForUrl} className="mx-auto w-full min-w-0 max-w-3xl" />
                 </div>
+              ) : activeSourceMode === "preview" && isCsv ? (
+                <CsvPreviewer source={textForUrl} />
               ) : (
                 <SourceCodeViewer source={textForUrl} language={language} />
               )}

@@ -12,7 +12,10 @@ import {
   stageMediaUpload,
 } from "./media-upload-store";
 import { sendTimeoutMs } from "./send-timeout";
-import { missingMultipartParts } from "./multipart-resume";
+import {
+  missingMultipartParts,
+  verifiedMultipartCompletionParts,
+} from "./multipart-resume";
 
 /**
  * Upload to a presigned URL via XHR (fetch can't report upload progress).
@@ -315,6 +318,16 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
   throwIfUploadAborted(signal);
   const current = await api.multipartUpload(session.session_id);
   throwIfUploadAborted(signal);
+  const expectedPartChecksums = new Map<number, string>();
+  const expectedChecksum = async (number: number): Promise<string> => {
+    const cached = expectedPartChecksums.get(number);
+    if (cached) return cached;
+    const start = (number - 1) * session.part_size;
+    const part = source.slice(start, Math.min(start + session.part_size, source.size));
+    const checksum = (await sha256(part)).base64;
+    expectedPartChecksums.set(number, checksum);
+    return checksum;
+  };
   const currentByNumber = new Map(
     (current.uploaded_parts ?? [])
       .filter((part) => part.part_number >= 1 && part.part_number <= session.part_count)
@@ -325,7 +338,7 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
     throwIfUploadAborted(signal);
     const start = (number - 1) * session.part_size;
     const part = source.slice(start, Math.min(start + session.part_size, source.size));
-    const checksum = (await sha256(part)).base64;
+    const checksum = await expectedChecksum(number);
     const signed = await api.signMultipartParts(session.session_id, [
       { part_number: number, checksum_sha256: checksum },
     ]);
@@ -346,21 +359,25 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
   throwIfUploadAborted(signal);
   const uploadedState = await api.multipartUpload(session.session_id);
   throwIfUploadAborted(signal);
-  const finalByNumber = new Map(
-    (uploadedState.uploaded_parts ?? [])
-      .filter((part) => part.part_number >= 1 && part.part_number <= session.part_count)
-      .map((part) => [part.part_number, part] as const),
-  );
-  if (missingMultipartParts(session.part_count, [...finalByNumber.keys()]).length > 0) {
-    throw new Error("object storage did not acknowledge every upload part");
+  if (uploadedState.state === "completed") {
+    if (meta) await api.mediaComplete(uploadedState.media.media_id, meta);
+    await markMediaTransferComplete(
+      ownerId,
+      sourceClientId,
+      uploadedState.media.media_id,
+      Boolean(opts.retainSourceUntilEventAck),
+    );
+    onProgress?.(100, source.size);
+    return uploadedState.media.media_id;
   }
-  const completedParts = [...finalByNumber.values()]
-    .sort((a, b) => a.part_number - b.part_number)
-    .map((part) => ({
-      part_number: part.part_number,
-      etag: part.etag,
-      checksum_sha256: part.checksum_sha256,
-    }));
+  for (let number = 1; number <= session.part_count; number += 1) {
+    await expectedChecksum(number);
+  }
+  let completedParts = verifiedMultipartCompletionParts(
+    session.part_count,
+    uploadedState.uploaded_parts ?? [],
+    expectedPartChecksums,
+  );
   let completed;
   try {
     completed = await api.completeMultipartUpload(session.session_id, {
@@ -369,7 +386,31 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
     });
   } catch (error) {
     if (signal?.aborted) throw uploadAbortError();
-    throw error;
+    const body = error instanceof ApiError && error.body && typeof error.body === "object"
+      ? error.body as { code?: unknown; failure?: { code?: unknown } }
+      : null;
+    const code = body?.failure?.code ?? body?.code;
+    if (!(error instanceof ApiError) || error.status !== 409 || code !== "upload_checksum_mismatch") {
+      throw error;
+    }
+    // Another tab may have uploaded the same retained bytes after our first
+    // listing, replacing only the provider ETag. Re-read once, verify the
+    // provider checksum against our bytes, and finalize with that latest ETag.
+    const reconciled = await api.multipartUpload(session.session_id);
+    throwIfUploadAborted(signal);
+    if (reconciled.state === "completed") {
+      completed = reconciled;
+    } else {
+      completedParts = verifiedMultipartCompletionParts(
+        session.part_count,
+        reconciled.uploaded_parts ?? [],
+        expectedPartChecksums,
+      );
+      completed = await api.completeMultipartUpload(session.session_id, {
+        sha256: whole.hex,
+        parts: completedParts,
+      });
+    }
   }
   throwIfUploadAborted(signal);
   if (meta) await api.mediaComplete(completed.media.media_id, meta);

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useSearchParams } from "next/navigation";
-import { MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
+import { CircleNotch, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError, type GlobalNotificationPreferences } from "@/lib/api";
@@ -19,6 +19,10 @@ import {
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
 import { playReceived, playReceivedSilicon } from "@/lib/sounds";
+import {
+  isGenuinelyNewLiveEvent,
+  shouldPlayReceivedSound,
+} from "@/lib/live-event-notification";
 import type {
   AccountSyncUpdate,
   Contact,
@@ -39,11 +43,21 @@ import {
 import { evictCachedMedia } from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { projectRedactedWindow } from "@/lib/redaction-state";
-import { normalizeRoom, normalizeRooms } from "@/lib/room-shape";
+import {
+  mergeRoomReceiptProjection,
+  normalizeRoom,
+  normalizeRooms,
+  replaceRoomsPreservingReceiptFacts,
+} from "@/lib/room-shape";
 import { compareRoomListRows, roomVisibleInArchiveView } from "@/lib/room-list-projection";
+import { roomOpenReadTarget } from "@/lib/unread-boundary";
 import { useChatSocket } from "@/lib/ws";
-import { mergePresence } from "@/lib/presence-state";
+import { mergePresence, observePresenceActivity } from "@/lib/presence-state";
 import { readReceiptCoversEvent } from "@/lib/message-receipt";
+import {
+  mergeDeliverySummaries,
+  normalizeDeliverySummary,
+} from "@/lib/delivery-state";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
 import {
@@ -62,6 +76,7 @@ import {
 } from "@/lib/drafts";
 import {
   clearPendingAccountReplay,
+  completeDeliveryAcknowledgements,
   commitPendingAccountProjection,
   commitInitialSyncBundle,
   readAccountProjections,
@@ -71,7 +86,9 @@ import {
   rebuildReachableChatCache,
   storeEvents,
   loadStoredRoomEvents,
+  pendingDeliveryAcknowledgements,
   updateInitialRoomProjection,
+  updateStoredEventDeliveries,
   type PendingAccountReplay,
   type InitialSyncAccountData,
   type SyncRecoveryRecord,
@@ -115,6 +132,9 @@ function localNotificationPolicy(
   ownerId: string,
   global: GlobalNotificationPreferences,
 ): { allowed: boolean; preview: boolean; sound: boolean } {
+  // Observed rooms are read-only ambient context. They must never emit an
+  // in-app sound, browser notification, or toast regardless of saved defaults.
+  if (room.observed) return { allowed: false, preview: false, sound: false };
   const roomPolicy = room.notification_preferences;
   const preview = roomPolicy?.show_preview ?? true;
   const sound = roomPolicy?.sound ?? true;
@@ -166,6 +186,7 @@ import {
   classifySyncFailure,
   reportSyncRecovered,
   reportSyncRecovery,
+  shouldSurfaceSyncRecovery,
   syncRecoveryState,
   SYNC_RECOVERY_EVENT,
 } from "@/lib/sync-recovery";
@@ -448,7 +469,6 @@ function ChatPageInner() {
   const teamViewSlug = search.get("team");
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [projectionGeneration, setProjectionGeneration] = React.useState(0);
   // Mirror the total unread count to the desktop wrapper's Dock/taskbar badge.
   // No-op in plain browsers (the wrapper injects the hook this feeds).
   React.useEffect(() => {
@@ -582,7 +602,29 @@ function ChatPageInner() {
   const pageFrameRef = React.useRef<(f: WsFrame, opts?: { quiet?: boolean }) => void>(() => {});
   const seenEventKeysRef = React.useRef(new Set<string>());
   const seenEventOrderRef = React.useRef<string[]>([]);
+  // Revision dedup above preserves meaningful edits/finalizations. Sound,
+  // unread, and notification decisions need the stricter immutable event
+  // identity so a reconnect replay cannot masquerade as a new message.
+  const seenLiveEventIdentitiesRef = React.useRef(new Set<string>());
+  const seenLiveEventIdentityOrderRef = React.useRef<string[]>([]);
+  // A silicon streaming m.text is visible work-in-progress, not yet a received
+  // message. Hold its signaling metadata until Glass commits event.final so
+  // progress/delta traffic can never produce a message sound or OS alert.
+  const pendingFinalSignalsRef = React.useRef(new Map<
+    string,
+    { event: Event; quiet: boolean }
+  >());
+  const finalizedBeforeEventRef = React.useRef(new Set<string>());
   const dispatchFrame = React.useCallback((f: WsFrame, opts?: { quiet?: boolean }) => {
+    if (
+      (f.type === "delivery_receipt" ||
+        f.type === "read_receipt" ||
+        f.type === "thread_read_receipt") &&
+      f.deliveries
+    ) {
+      const owner = authStore.getCarbon()?.carbon_id;
+      if (owner) void updateStoredEventDeliveries(owner, f.deliveries).catch(() => undefined);
+    }
     if (f.type === "event") {
       const revision = f.event.stream_position ?? `${f.event.edited_at ?? ""}:${f.event.redacted_at ?? ""}`;
       const key = `${f.event.event_id}:${revision}`;
@@ -605,6 +647,25 @@ function ChatPageInner() {
   });
   const outboxWakeRef = React.useRef<(signal: OutboxWakeSignal) => void>(() => {});
   const durableFrameQueueRef = React.useRef<Promise<void>>(Promise.resolve());
+  const deliveryAckInflightRef = React.useRef(new Map<string, Promise<void>>());
+  const flushDeliveryAcknowledgements = React.useCallback((owner: string, traceparent = "") => {
+    const existing = deliveryAckInflightRef.current.get(owner);
+    if (existing) return existing;
+    const run = (async () => {
+      // Drain a bounded number of batches per wake. The retry effect below
+      // continues after failures/reloads without blocking message sync.
+      for (let batch = 0; batch < 20; batch += 1) {
+        const eventIds = await pendingDeliveryAcknowledgements(owner, 500);
+        if (!eventIds.length) return;
+        await api.acknowledgeDelivered(eventIds, batch === 0 ? traceparent : "");
+        await completeDeliveryAcknowledgements(owner, eventIds);
+      }
+    })().finally(() => {
+      deliveryAckInflightRef.current.delete(owner);
+    });
+    deliveryAckInflightRef.current.set(owner, run);
+    return run;
+  }, []);
   const onLiveFrame = React.useCallback(
     (frame: WsFrame) => {
       const owner = authStore.getCarbon()?.carbon_id;
@@ -624,13 +685,11 @@ function ChatPageInner() {
           }
           dispatchFrame(frame);
           if (durable) {
-            await api.acknowledgeDelivered(
-              [frame.event.event_id], frame.traceparent,
-            ).catch(() => undefined);
+            void flushDeliveryAcknowledgements(owner, frame.traceparent).catch(() => undefined);
           }
         });
     },
-    [dispatchFrame],
+    [dispatchFrame, flushDeliveryAcknowledgements],
   );
   const socket = useChatSocket({
     onFrame: onLiveFrame,
@@ -643,6 +702,19 @@ function ChatPageInner() {
   const { teams } = useTeams();
   const { carbon } = useAuth();
   const ownerId = carbon?.carbon_id ?? null;
+  React.useEffect(() => {
+    if (!ownerId) return;
+    const flush = () => void flushDeliveryAcknowledgements(ownerId).catch(() => undefined);
+    flush();
+    // A failed POST leaves the durable journal untouched. Retry quietly while
+    // this account is open and immediately when the browser regains network.
+    const interval = window.setInterval(flush, 5_000);
+    window.addEventListener("online", flush);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("online", flush);
+    };
+  }, [flushDeliveryAcknowledgements, ownerId, socket.ready]);
   React.useEffect(() => {
     if (!ownerId || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
     const receiveRedaction = (message: MessageEvent) => {
@@ -762,7 +834,14 @@ function ChatPageInner() {
     };
   }, [ownerId]);
   React.useEffect(() => {
-    if (storageIssue) {
+    // Durable outbox/media/draft degradation is already represented on the
+    // affected message or composer and remains safely retryable. A global
+    // outage banner for those transient local retries was noisy and misleading.
+    // Keep the header for truly blocked storage and timeline-wide recovery.
+    if (
+      storageIssue &&
+      (storageIssue.severity === "blocked" || storageIssue.area === "timeline")
+    ) {
       setGlobalIssue({
         kind: "storage",
         message: timelineRebuildBusy
@@ -783,7 +862,7 @@ function ChatPageInner() {
       });
       return;
     }
-    if (syncRecovery) {
+    if (syncRecovery && shouldSurfaceSyncRecovery(syncRecovery)) {
       setGlobalIssue({
         kind: "catching_up",
         message:
@@ -1012,7 +1091,10 @@ function ChatPageInner() {
       const idx = prev.findIndex((r) => r.room_id === normalized.room_id);
       if (idx === -1) return [...prev, normalized];
       const next = prev.slice();
-      next[idx] = { ...prev[idx], ...normalized };
+      next[idx] = mergeRoomReceiptProjection(prev[idx], {
+        ...prev[idx],
+        ...normalized,
+      });
       return next;
     });
   }, []);
@@ -1118,14 +1200,15 @@ function ChatPageInner() {
     for (const rawRoom of rawRooms) {
       validateInitialRoomNotificationProjection(rawRoom as Room);
     }
-    const next = normalizeRooms(rawRooms);
-    if (rawRooms.length > 0 && next.length !== rawRooms.length) {
+    const normalizedRooms = normalizeRooms(rawRooms);
+    if (rawRooms.length > 0 && normalizedRooms.length !== rawRooms.length) {
       throw new SyncIntegrityError(
         "account",
         "page_invariant",
         "Authoritative room projection contains malformed rows.",
       );
     }
+    const next = replaceRoomsPreservingReceiptFacts(roomsRef.current, normalizedRooms);
     await migrateLegacyDrafts(next.map((room) => room.room_id));
     if (ownerId) {
       const persisted = await updateInitialRoomProjection(ownerId, next, signal);
@@ -1139,7 +1222,7 @@ function ChatPageInner() {
       saveCachedRooms(ownerId, next);
     }
     if (signal?.aborted) throw new DOMException("Sync generation was superseded", "AbortError");
-    setRooms(next);
+    setRooms((current) => replaceRoomsPreservingReceiptFacts(current, next));
   }, [ownerId]);
   const refresh = React.useCallback(async () => {
     if (refreshInflightRef.current) return refreshInflightRef.current;
@@ -1147,12 +1230,17 @@ function ChatPageInner() {
       setRefreshing(true);
       try {
         await refreshRoomsAuthoritatively();
+        if (ownerId) void reportSyncRecovered(ownerId, undefined, ["account"]);
       } catch (e) {
-        toast.error(
-          e instanceof ApiError
-            ? e.message
-            : "We couldn’t refresh your chats. Your messages are still safe — try again.",
-        );
+        if (!(e instanceof DOMException && e.name === "AbortError") && ownerId) {
+          const failure = classifySyncFailure(e, "account");
+          void reportSyncRecovery(ownerId, {
+            phase: failure.action === "resnapshot" ? "rebuilding" : "degraded",
+            reason: failure.reason,
+            stream: failure.stream,
+            details: failure.details,
+          });
+        }
       } finally {
         roomsCacheOwnerRef.current = ownerId;
         roomsCacheReadyRef.current = true;
@@ -1167,6 +1255,148 @@ function ChatPageInner() {
       refreshInflightRef.current = null;
     }
   }, [ownerId, refreshRoomsAuthoritatively]);
+
+  const projectRoomRead = React.useCallback((roomId: string, streamPosition: number) => {
+    if (ownerId) markRoomNotificationsRead(ownerId, roomId);
+    setRooms((prev) => {
+      let changed = false;
+      const next = prev.map((candidate) => {
+        if (candidate.room_id !== roomId) return candidate;
+        const nextPosition = Math.max(
+          candidate.unread_boundary.last_read_stream_position,
+          streamPosition,
+        );
+        if (
+          !candidate.unread &&
+          (candidate.unread_count ?? 0) === 0 &&
+          candidate.unread_boundary.unread_count === 0 &&
+          candidate.unread_boundary.first_unread_event_id === null &&
+          candidate.unread_boundary.first_unread_stream_position === null &&
+          candidate.unread_boundary.first_unread_stream_writer === null &&
+          nextPosition === candidate.unread_boundary.last_read_stream_position
+        ) return candidate;
+        changed = true;
+        return {
+          ...candidate,
+          unread: false,
+          unread_count: 0,
+          unread_boundary: {
+            ...candidate.unread_boundary,
+            last_read_stream_position: nextPosition,
+            first_unread_event_id: null,
+            first_unread_stream_position: null,
+            first_unread_stream_writer: null,
+            unread_count: 0,
+          },
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [ownerId]);
+
+  const projectAcceptedRoomEvent = React.useCallback((roomId: string, event: Event) => {
+    const preview = eventPreview(event);
+    if (preview === null) return;
+    setRooms((current) => current.map((candidate) => {
+      if (candidate.room_id !== roomId) return candidate;
+      const last = candidate.last_event;
+      const sameEvent = last?.event_id === event.event_id;
+      const incomingEditVersion = Number.isSafeInteger(event.edit_version)
+        ? Number(event.edit_version)
+        : 0;
+      const projectedEditVersion = Number.isSafeInteger(last?.edit_version)
+        ? Number(last?.edit_version)
+        : 0;
+      if (sameEvent && incomingEditVersion < projectedEditVersion) return candidate;
+      const delivery = sameEvent
+        ? mergeDeliverySummaries(last?.delivery, event.delivery)
+        : (event.delivery ?? undefined);
+      const streamPosition = Number.isSafeInteger(event.stream_position)
+        ? Number(event.stream_position)
+        : candidate.list_projection.activity_stream_position;
+      let throughVector = candidate.list_projection.through_stream_vector;
+      if (throughVector && event.stream_writer && Number.isSafeInteger(event.stream_position)) {
+        try {
+          throughVector = streamVectorAdvanced(
+            throughVector,
+            event.stream_writer,
+            Number(event.stream_position),
+          );
+        } catch {
+          // The next authoritative room refresh repairs malformed legacy
+          // vector metadata; the accepted event still updates the visible row.
+        }
+      }
+      return mergeRoomReceiptProjection(candidate, {
+        ...candidate,
+        last_event: {
+          event_id: event.event_id,
+          preview,
+          at: event.created_at,
+          sender_handle: event.sender_handle,
+          sender_kind: event.sender_kind,
+          type: event.type,
+          ...(delivery ? { delivery } : {}),
+          read: delivery?.state === "read",
+          stream_position: event.stream_position,
+          stream_writer: event.stream_writer,
+          edit_version: incomingEditVersion,
+          edited_at: event.edited_at,
+        },
+        list_projection: {
+          ...candidate.list_projection,
+          // Activity identifies this exact last event. In a multi-writer room
+          // a newer event can have a smaller per-writer position, so taking a
+          // scalar max here creates an impossible projection and makes the
+          // next authoritative refresh fail integrity validation.
+          activity_stream_position: streamPosition,
+          through_stream_position: Math.max(
+            candidate.list_projection.through_stream_position,
+            streamPosition,
+          ),
+          ...(throughVector ? { through_stream_vector: throughVector } : {}),
+          activity_at: event.created_at,
+        },
+      });
+    }));
+  }, []);
+
+  // Opening a room is the read gesture. Clear its local projection before the
+  // first room paint, then persist the same boundary without waiting for
+  // timeline history or a visibility observer.
+  const openReadRequestsRef = React.useRef(new Set<string>());
+  const readOpenedSelectionRef = React.useRef<string | null>(null);
+  const markRoomReadImmediately = React.useCallback((roomId: string, projectedRoom?: Room) => {
+    const room = projectedRoom ?? roomsRef.current.find((candidate) => candidate.room_id === roomId);
+    if (!room) return false;
+    const target = roomOpenReadTarget(room);
+    if (!target) return false;
+    projectRoomRead(roomId, target.streamPosition);
+    if (!target.eventId) return true;
+
+    const requestKey = `${roomId}:${target.eventId}:${target.streamPosition}`;
+    if (openReadRequestsRef.current.has(requestKey)) return true;
+    openReadRequestsRef.current.add(requestKey);
+    if (openReadRequestsRef.current.size > 512) {
+      const stale = Array.from(openReadRequestsRef.current).slice(0, 256);
+      for (const key of stale) openReadRequestsRef.current.delete(key);
+    }
+    void api.read(roomId, target.eventId).catch(() => {
+      openReadRequestsRef.current.delete(requestKey);
+      if (selectedRef.current === roomId) readOpenedSelectionRef.current = null;
+      void refresh();
+    });
+    return true;
+  }, [projectRoomRead, refresh]);
+
+  React.useLayoutEffect(() => {
+    if (!selected) {
+      readOpenedSelectionRef.current = null;
+      return;
+    }
+    if (!selectedRoom || readOpenedSelectionRef.current === selected) return;
+    if (markRoomReadImmediately(selected)) readOpenedSelectionRef.current = selected;
+  }, [markRoomReadImmediately, selected, selectedRoom]);
 
   React.useEffect(() => {
     roomsCacheOwnerRef.current = null;
@@ -1213,6 +1443,14 @@ function ChatPageInner() {
       .then((room) => {
         if (!alive) return;
         upsertRoom(room);
+        if (selectedRef.current === selected && readOpenedSelectionRef.current !== selected) {
+          const normalized = normalizeRoom(room);
+          if (normalized) markRoomReadImmediately(selected, normalized);
+          // The room detail is authoritative even when there was nothing to
+          // clear. Seal this open gesture so later arrivals still use viewport
+          // visibility rather than being auto-read while the reader is above.
+          readOpenedSelectionRef.current = selected;
+        }
       })
       .catch(() => undefined)
       .finally(() => {
@@ -1223,7 +1461,7 @@ function ChatPageInner() {
     return () => {
       alive = false;
     };
-  }, [selected, upsertRoom]);
+  }, [markRoomReadImmediately, selected, upsertRoom]);
 
   // Load this user's personal folder store; persist on every change (but only
   // once the current owner's store has been read, mirroring the rooms cache).
@@ -1271,11 +1509,12 @@ function ChatPageInner() {
   } | null>(null);
   const activeBarrierGenerationRef = React.useRef(0);
   const snapshotInflightRef = React.useRef(new Map<string, Promise<void>>());
-  const acknowledgeStored = React.useCallback(async (eventIds: string[]) => {
-    for (let index = 0; index < eventIds.length; index += 500) {
-      await api.acknowledgeDelivered(eventIds.slice(index, index + 500)).catch(() => undefined);
-    }
-  }, []);
+  const acknowledgeStored = React.useCallback((owner: string) => {
+    void flushDeliveryAcknowledgements(owner).catch(() => undefined);
+  }, [flushDeliveryAcknowledgements]);
+  const acknowledgeStoredRoomHistory = React.useCallback(() => {
+    if (ownerId) acknowledgeStored(ownerId);
+  }, [acknowledgeStored, ownerId]);
   const persistEventFrames = React.useCallback(
     async (
       owner: string,
@@ -1306,7 +1545,7 @@ function ChatPageInner() {
       if (dispatch) {
         for (const frame of frames) dispatchFrame(frame, { quiet: true });
       }
-      if (durable) await acknowledgeStored(frames.map((frame) => frame.event.event_id));
+      if (durable) acknowledgeStored(owner);
     },
     [acknowledgeStored, dispatchFrame],
   );
@@ -1510,8 +1749,9 @@ function ChatPageInner() {
       if (!draftDurable) {
         throw new Error("Initial draft manifest could not be projected durably");
       }
-      setRooms(normalized);
-      saveCachedRooms(owner, normalized);
+      const next = replaceRoomsPreservingReceiptFacts(roomsRef.current, normalized);
+      setRooms((current) => replaceRoomsPreservingReceiptFacts(current, next));
+      saveCachedRooms(owner, next);
       for (const held of bundle.accountData.held_sends) {
         dispatchFrame({ type: "held_send", held_send: held }, { quiet: true });
       }
@@ -1520,7 +1760,6 @@ function ChatPageInner() {
         completedAt: bundle.completedAt,
         accountPosition: bundle.checkpoint.accountPosition,
       };
-      setProjectionGeneration((generation) => generation + 1);
       setLoading(false);
       return true;
     });
@@ -2337,36 +2576,42 @@ function ChatPageInner() {
             });
             continue;
           }
-          const payload = it.operation === "media"
-            ? await prepareMediaOutboxPayload(ownerId, it)
-            : {
-                type: it.type ?? "m.text",
-                content:
-                  it.type && it.type !== "m.text"
-                    ? { ...(it.content ?? {}) }
-                    : { ...(it.content ?? {}), body: it.body },
-                reply_to_event_id: it.replyTo,
-              };
-          const event = await api.sendEvent(
-            it.roomId,
-            payload,
-            it.clientId,
-          );
-          await persistEventFrames(
-            ownerId,
-            [{ type: "event", room_id: it.roomId, event }],
-          );
-          if (it.operation === "media") {
-            await acknowledgeMediaSend(ownerId, it, undefined, {
-              roomId: it.roomId,
-              event,
-            });
-          } else {
-            await ackOutbox(ownerId, it.clientId, {
-              roomId: it.roomId,
-              event,
-            });
-          }
+          await withOutboxClientLock(ownerId, it.clientId, async () => {
+            const current = (await listOutbox(ownerId)).find(
+              (entry) => entry.clientId === it.clientId,
+            );
+            if (!current) return;
+            const payload = current.operation === "media"
+              ? await prepareMediaOutboxPayload(ownerId, current)
+              : {
+                  type: current.type ?? "m.text",
+                  content:
+                    current.type && current.type !== "m.text"
+                      ? { ...(current.content ?? {}) }
+                      : { ...(current.content ?? {}), body: current.body },
+                  reply_to_event_id: current.replyTo,
+                };
+            const event = await api.sendEvent(
+              current.roomId,
+              payload,
+              current.clientId,
+            );
+            await persistEventFrames(
+              ownerId,
+              [{ type: "event", room_id: current.roomId, event }],
+            );
+            if (current.operation === "media") {
+              await acknowledgeMediaSend(ownerId, current, undefined, {
+                roomId: current.roomId,
+                event,
+              });
+            } else {
+              await ackOutbox(ownerId, current.clientId, {
+                roomId: current.roomId,
+                event,
+              });
+            }
+          });
         } catch (error) {
           const status = error instanceof ApiError ? error.status : 0;
           // Commit the original result before any ambiguity lookup so a crash
@@ -2541,6 +2786,16 @@ function ChatPageInner() {
       const ev = f.event;
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       const rid = f.room_id;
+      const liveIdentity = `${rid}:${ev.event_id}`;
+      const seenEventIdentity = seenLiveEventIdentitiesRef.current.has(liveIdentity);
+      if (!seenEventIdentity) {
+        seenLiveEventIdentitiesRef.current.add(liveIdentity);
+        seenLiveEventIdentityOrderRef.current.push(liveIdentity);
+        if (seenLiveEventIdentityOrderRef.current.length > 5_000) {
+          const stale = seenLiveEventIdentityOrderRef.current.splice(0, 1_000);
+          for (const identity of stale) seenLiveEventIdentitiesRef.current.delete(identity);
+        }
+      }
       setPeerActivity((prev) => {
         if (!(rid in prev) || prev[rid].note.indexOf(ev.sender_handle ?? "") < 0) return prev;
         const next = { ...prev };
@@ -2555,13 +2810,36 @@ function ChatPageInner() {
       const isOpen = selectedRef.current === rid;
       const updatesExistingEvent = Boolean(ev.edited_at);
       const patchesLastEvent = room.last_event?.event_id === ev.event_id;
+      const genuinelyNewEvent = isGenuinelyNewLiveEvent({
+        seenEventIdentity,
+        patchesProjectedLastEvent: patchesLastEvent,
+        edited: updatesExistingEvent,
+      });
       const notificationPolicy = ownerId
         ? localNotificationPolicy(room, ev, ownerId, globalNotificationsRef.current)
         : { allowed: false, preview: false, sound: false };
-      // Received-message sound — global (any room), once per new event.
+      const finalizedBeforeCreate = finalizedBeforeEventRef.current.delete(liveIdentity);
+      const signalReady = ev.is_final !== false || finalizedBeforeCreate;
+      if (
+        genuinelyNewEvent &&
+        !signalReady &&
+        !mine &&
+        isCountableEvent(ev)
+      ) {
+        pendingFinalSignalsRef.current.set(liveIdentity, { event: ev, quiet });
+      }
+      const genuinelyNewFinalMessage = genuinelyNewEvent && signalReady;
+      // Received-message sound — global (any room), once per finalized event.
       // §3a — hear who's talking: silicons get a synthetic timbre, carbons a sine.
-      if (!quiet && notificationPolicy.allowed && notificationPolicy.sound &&
-          !updatesExistingEvent && !mine && isCountableEvent(ev)) {
+      if (shouldPlayReceivedSound({
+        quiet,
+        notificationAllowed: notificationPolicy.allowed,
+        soundAllowed: notificationPolicy.sound,
+        mine,
+        countable: isCountableEvent(ev),
+        genuinelyNew: genuinelyNewFinalMessage,
+        observed: room.observed === true,
+      })) {
         if (ev.sender_kind === "silicon") playReceivedSilicon();
         else playReceived();
       }
@@ -2581,7 +2859,7 @@ function ChatPageInner() {
       // viewport-owned read path will clear it after this exact row is actually
       // visible; an open-but-scrolled-up room must retain the count.
       const countableIncoming =
-        !updatesExistingEvent && isCountableEvent(ev) && !mine && !room.observed;
+        genuinelyNewFinalMessage && isCountableEvent(ev) && !mine && !room.observed;
       const shouldNotify = countableIncoming && !attended;
       // Observer rooms (inter-silicon chats I only watch) never raise a
       // notification, browser alert, or toast — read-only visibility shouldn't
@@ -2621,9 +2899,17 @@ function ChatPageInner() {
       setRooms((prev) =>
         prev.map((r) => {
           if (r.room_id !== rid) return r;
+          const incomingEditVersion = Number.isSafeInteger(ev.edit_version)
+            ? Number(ev.edit_version)
+            : 0;
+          const projectedEditVersion = Number.isSafeInteger(r.last_event?.edit_version)
+            ? Number(r.last_event?.edit_version)
+            : 0;
+          const patchesLastRevision = !updatesExistingEvent ||
+            (patchesLastEvent && incomingEditVersion >= projectedEditVersion);
           const patchesProjectedActivity =
             preview !== null &&
-            (!updatesExistingEvent || patchesLastEvent) &&
+            !updatesExistingEvent &&
             Number.isSafeInteger(ev.stream_position) &&
             Number(ev.stream_position) > 0;
           const activityPosition = Number(ev.stream_position);
@@ -2655,20 +2941,45 @@ function ChatPageInner() {
           }
           // Counts toward unread only if it's a real message from someone
           // else and I'm not already looking at this room.
-          return {
+          const senderHandle = (ev.sender_handle ?? "").replace(/^@/, "");
+          const peers = r.peers.map((peer) => {
+            if (
+              ev.sender_kind !== "carbon" ||
+              peer.kind !== "carbon" ||
+              !peer.presence ||
+              ![peer.handle, peer.id].some(
+                (identity) => identity.replace(/^@/, "") === senderHandle,
+              )
+            ) return peer;
+            const presence = observePresenceActivity(peer.presence, ev.created_at);
+            return presence === peer.presence ? peer : { ...peer, presence };
+          });
+          return mergeRoomReceiptProjection(r, {
             ...r,
+            peers,
             last_event:
-              preview !== null && (!updatesExistingEvent || patchesLastEvent)
+              preview !== null && patchesLastRevision
                 ? {
                     event_id: ev.event_id,
                     preview,
-                    at: ev.created_at,
+                    at: updatesExistingEvent ? (r.last_event?.at ?? ev.created_at) : ev.created_at,
                     sender_handle: ev.sender_handle,
                     sender_kind: ev.sender_kind ?? null,
                     type: ev.type,
-                    read: updatesExistingEvent ? (r.last_event?.read ?? false) : false,
-                    stream_position: activityPosition,
-                    stream_writer: ev.stream_writer,
+                    delivery: updatesExistingEvent
+                      ? mergeDeliverySummaries(r.last_event?.delivery, ev.delivery)
+                      : (ev.delivery ?? undefined),
+                    read: updatesExistingEvent
+                      ? (r.last_event?.read === true || ev.delivery?.state === "read")
+                      : ev.delivery?.state === "read",
+                    stream_position: updatesExistingEvent
+                      ? r.last_event?.stream_position
+                      : activityPosition,
+                    stream_writer: updatesExistingEvent
+                      ? r.last_event?.stream_writer
+                      : ev.stream_writer,
+                    edit_version: incomingEditVersion,
+                    edited_at: ev.edited_at,
                   }
                 : r.last_event,
             list_projection: patchesProjectedActivity
@@ -2710,7 +3021,7 @@ function ChatPageInner() {
                   ...(nextUnreadVector ? { through_stream_vector: nextUnreadVector } : {}),
                 }
               : r.unread_boundary,
-          };
+          });
         }),
       );
       // A real event landed for this room — clear any "waiting" sidebar
@@ -2774,8 +3085,153 @@ function ChatPageInner() {
             }
           : room,
       ));
+    } else if (f.type === "event.final") {
+      const signalKey = `${f.room_id}:${f.event_id}`;
+      const pending = pendingFinalSignalsRef.current.get(signalKey);
+      if (pending) {
+        pendingFinalSignalsRef.current.delete(signalKey);
+        const ev = { ...pending.event, is_final: true };
+        const room = roomsRef.current.find((candidate) => candidate.room_id === f.room_id);
+        if (!room) {
+          void refresh();
+        } else {
+          const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
+          const notificationPolicy = ownerId
+            ? localNotificationPolicy(room, ev, ownerId, globalNotificationsRef.current)
+            : { allowed: false, preview: false, sound: false };
+          if (shouldPlayReceivedSound({
+            quiet: pending.quiet,
+            notificationAllowed: notificationPolicy.allowed,
+            soundAllowed: notificationPolicy.sound,
+            mine,
+            countable: isCountableEvent(ev),
+            genuinelyNew: true,
+            observed: room.observed === true,
+          })) {
+            if (ev.sender_kind === "silicon") playReceivedSilicon();
+            else playReceived();
+          }
+          const present = userPresent();
+          const attended = selectedRef.current === f.room_id && present;
+          const countableIncoming =
+            isCountableEvent(ev) && !mine && !room.observed;
+          if (
+            !pending.quiet &&
+            countableIncoming &&
+            !attended &&
+            ownerId &&
+            notificationPolicy.allowed
+          ) {
+            const body = notificationPolicy.preview
+              ? notificationBody(ev)
+              : "New message";
+            const display = notificationDisplay(room, contacts.byPeer);
+            const title = notificationPolicy.preview
+              ? display.title
+              : "Silicon Interface";
+            addNotification(ownerId, {
+              id: ev.event_id,
+              roomId: f.room_id,
+              eventId: ev.event_id,
+              title,
+              body,
+              at: ev.created_at,
+              avatarUrl: display.avatarUrl,
+              avatarSeed: display.avatarSeed,
+            });
+            showBrowserNotification(title, {
+              body,
+              tag: ev.event_id,
+              roomId: f.room_id,
+              silent: !notificationPolicy.sound,
+            });
+            if (present) {
+              toast.message(title, {
+                description: body,
+                action: {
+                  label: "open",
+                  onClick: () => navigate(`/chat?room=${encodeURIComponent(f.room_id)}`),
+                },
+              });
+            }
+          }
+          if (countableIncoming) {
+            setRooms((previous) => previous.map((candidate) => {
+              if (candidate.room_id !== f.room_id) return candidate;
+              return {
+                ...candidate,
+                unread: true,
+                unread_count: (candidate.unread_count ?? 0) + 1,
+                unread_boundary: {
+                  ...candidate.unread_boundary,
+                  first_unread_event_id:
+                    candidate.unread_boundary.unread_count > 0
+                      ? candidate.unread_boundary.first_unread_event_id
+                      : ev.event_id,
+                  first_unread_stream_position:
+                    candidate.unread_boundary.unread_count > 0
+                      ? candidate.unread_boundary.first_unread_stream_position
+                      : Number.isSafeInteger(ev.stream_position)
+                        ? Number(ev.stream_position)
+                        : null,
+                  first_unread_stream_writer:
+                    candidate.unread_boundary.unread_count > 0
+                      ? candidate.unread_boundary.first_unread_stream_writer
+                      : (ev.stream_writer ?? null),
+                  unread_count: candidate.unread_boundary.unread_count + 1,
+                },
+              };
+            }));
+          }
+        }
+      } else if (!seenLiveEventIdentitiesRef.current.has(signalKey)) {
+        // A different realtime lane may deliver final before the creating
+        // frame. Remember that single fact so the later event signals once.
+        finalizedBeforeEventRef.current.add(signalKey);
+        if (finalizedBeforeEventRef.current.size > 512) {
+          const oldest = finalizedBeforeEventRef.current.values().next().value;
+          if (oldest) finalizedBeforeEventRef.current.delete(oldest);
+        }
+      }
     } else if (f.type === "draft") {
       void applyServerDraft(f.draft);
+    } else if (f.type === "delivery_receipt") {
+      if (f.member_handle && f.member_handle === myUsername) return;
+      const deliveredIds = new Set(f.event_ids);
+      setRooms((previous) => {
+        let changed = false;
+        const next = previous.map((candidate) => {
+          const last = candidate.last_event;
+          if (
+            candidate.room_id !== f.room_id ||
+            !last?.event_id ||
+            last.sender_handle !== myUsername ||
+            !deliveredIds.has(last.event_id)
+          ) return candidate;
+          const incoming = f.deliveries?.[last.event_id];
+          // Direct rooms have exactly one recipient, so an event-id delivery
+          // frame is itself authoritative even when an older Glass node omits
+          // the aggregate map. Group totals still require Glass' aggregate.
+          if (!incoming && candidate.kind !== "direct") return candidate;
+          const delivery = incoming
+            ? mergeDeliverySummaries(last.delivery, incoming)!
+            : normalizeDeliverySummary(
+                Math.max(1, last.delivery?.recipient_count ?? 1),
+                Math.max(1, last.delivery?.delivered_count ?? 0),
+                last.delivery?.read_count ?? 0,
+              );
+          changed = true;
+          return {
+            ...candidate,
+            last_event: {
+              ...last,
+              delivery,
+              read: delivery.state === "read",
+            },
+          };
+        });
+        return changed ? next : previous;
+      });
     } else if (f.type === "read_receipt") {
       // Receipts are broadcast on EVERY mark-read — including my own, from any
       // device. A self-receipt (member_handle is mine) means I read this room
@@ -2831,6 +3287,7 @@ function ChatPageInner() {
       // message, flip its sidebar tick to "read". (My own auto-read only ever
       // advances to the last *received* message, never my own send — so a
       // receipt at/past my latest message must be from someone else.)
+      let missingAuthoritativeTail = false;
       setRooms((prev) => {
         let changed = false;
         const next = prev.map((r) => {
@@ -2839,14 +3296,42 @@ function ChatPageInner() {
           if (!le || le.read || le.sender_handle !== myUsername || !le.event_id) {
             return r;
           }
-          if (readReceiptCoversEvent(f, le)) {
+          const incoming = f.deliveries?.[le.event_id];
+          if (incoming) {
+            const delivery = mergeDeliverySummaries(le.delivery, incoming)!;
             changed = true;
-            return { ...r, last_event: { ...le, read: true } };
+            return {
+              ...r,
+              last_event: {
+                ...le,
+                delivery,
+                read: delivery.state === "read",
+              },
+            };
+          }
+          if (readReceiptCoversEvent(f, le)) {
+            if (r.kind === "direct") {
+              const delivery = normalizeDeliverySummary(
+                Math.max(1, le.delivery?.recipient_count ?? 1),
+                Math.max(1, le.delivery?.delivered_count ?? 0),
+                1,
+              );
+              changed = true;
+              return {
+                ...r,
+                last_event: { ...le, delivery, read: true },
+              };
+            }
+            // The vector proves activity, but only Glass' aggregate can tell a
+            // group-wide read from a partial read. Refetch instead of showing
+            // an opaque double tick that may be false.
+            missingAuthoritativeTail = true;
           }
           return r;
         });
         return changed ? next : prev;
       });
+      if (missingAuthoritativeTail) void refresh();
     } else if (f.type === "thread_read_receipt") {
       // Thread reads are selective: refreshing preserves the room's remaining
       // unread boundary instead of guessing from a linear timeline cutoff.
@@ -2972,12 +3457,13 @@ function ChatPageInner() {
     const onNavigate = (e: globalThis.Event) => {
       const detail = (e as CustomEvent<{ roomId?: string }>).detail;
       if (detail?.roomId) {
+        markRoomReadImmediately(detail.roomId);
         navigate(`/chat?room=${encodeURIComponent(detail.roomId)}`);
       }
     };
     window.addEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
     return () => window.removeEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
-  }, [navigate]);
+  }, [markRoomReadImmediately, navigate]);
 
   const filtered = React.useMemo(() => {
     const q = sidebarQuery.trim().toLowerCase();
@@ -3377,7 +3863,10 @@ function ChatPageInner() {
           myHandle={myUsername}
           contacts={contacts.byPeer}
           selectedId={selected}
-          onSelect={(id) => navigate(`/chat?room=${id}`)}
+          onSelect={(id) => {
+            markRoomReadImmediately(id);
+            navigate(`/chat?room=${encodeURIComponent(id)}`);
+          }}
           onNew={() => setDialogOpen(true)}
           loading={loading}
           hoverRoomId={hoverRoomId}
@@ -3398,7 +3887,11 @@ function ChatPageInner() {
 
       {selectedRoom ? (
         <RoomView
-          key={`${selectedRoom.room_id}:${projectionGeneration}`}
+          // Signal keeps the conversation surface mounted while account and
+          // message projections advance. Key only by room identity: remounting
+          // on a sync generation destroys both the reader's scroll ownership
+          // and the browser's live native Selection, then reopens at bottom.
+          key={selectedRoom.room_id}
           room={selectedRoom}
           allRooms={rooms}
           socket={{
@@ -3410,30 +3903,21 @@ function ChatPageInner() {
           contacts={contacts.byPeer}
           onContactsChanged={contacts.refresh}
           connectionStatePending={roomDetailRefreshing === selectedRoom.room_id}
-          onReadThrough={(_eventId, streamPosition) => {
-            if (ownerId) markRoomNotificationsRead(ownerId, selectedRoom.room_id);
-            setRooms((prev) => prev.map((candidate) =>
-              candidate.room_id === selectedRoom.room_id
-                ? {
-                    ...candidate,
-                    unread: false,
-                    unread_count: 0,
-                    unread_boundary: {
-                      ...candidate.unread_boundary,
-                      last_read_stream_position: Math.max(
-                        candidate.unread_boundary.last_read_stream_position,
-                        streamPosition,
-                      ),
-                      first_unread_event_id: null,
-                      first_unread_stream_position: null,
-                      first_unread_stream_writer: null,
-                      unread_count: 0,
-                    },
-                  }
-                : candidate
-            ));
-          }}
+          onEventAccepted={(event) => projectAcceptedRoomEvent(selectedRoom.room_id, event)}
+          onHistoryStored={acknowledgeStoredRoomHistory}
+          onReadThrough={(_eventId, streamPosition) =>
+            projectRoomRead(selectedRoom.room_id, streamPosition)}
         />
+      ) : selected ? (
+        // A deep-linked room resolves after the account snapshot. Keep a
+        // stable conversation shell during that interval instead of flashing
+        // the unrelated welcome screen and then replacing the entire layout.
+        <section className="flex flex-1 items-center justify-center bg-muted/20">
+          <div className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+            <CircleNotch className="h-4 w-4 animate-spin" />
+            Loading conversation…
+          </div>
+        </section>
       ) : viewedTeam ? (
         <TeamPanel
           slug={viewedTeam.slug}

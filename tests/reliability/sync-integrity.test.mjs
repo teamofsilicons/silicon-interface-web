@@ -7,6 +7,29 @@ const integrity = await import("../../src/lib/sync-integrity.ts");
 const { ApiError } = await import("../../src/lib/api.ts");
 const recovery = await import("../../src/lib/sync-recovery.ts");
 
+test("transient sync retries stay silent while real recovery remains visible", () => {
+  const base = {
+    ownerId: "owner",
+    stream: "events",
+    details: {},
+    detectedAt: 1,
+    updatedAt: 1,
+    recoveredAt: null,
+    occurrences: 1,
+    revision: 1,
+  };
+  assert.equal(recovery.shouldSurfaceSyncRecovery({
+    ...base,
+    phase: "degraded",
+    reason: "transient_failure",
+  }), false);
+  assert.equal(recovery.shouldSurfaceSyncRecovery({
+    ...base,
+    phase: "rebuilding",
+    reason: "position_discontinuity",
+  }), true);
+});
+
 function eventFrame(position, id = String(position).padStart(26, "0")) {
   return {
     type: "event",
@@ -548,6 +571,15 @@ test("room list projection is complete, bounded, and agrees with last-event iden
     held: { active_count: 2, attention_count: 1, next_release_at: "" },
   };
   assert.doesNotThrow(() => integrity.validateRoomListProjection(valid, last));
+  assert.doesNotThrow(() => integrity.validateRoomListProjection({
+    ...valid,
+    draft: {
+      active: true,
+      version: 4,
+      updated_at: "2026-07-12T00:00:00Z",
+      content_updated_at: "",
+    },
+  }, last));
   assert.throws(
     () => integrity.validateRoomListProjection({ ...valid, activity_stream_position: 11 }, last),
     /invalid activity coverage/,

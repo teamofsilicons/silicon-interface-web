@@ -5,12 +5,14 @@ import { Microphone, PaperPlaneRight, Pause, Trash } from "@phosphor-icons/react
 import { toast } from "sonner";
 
 import {
+  useVoiceRecordingPreviewUrl,
   useVoiceRecordingSession,
   useVoiceRecordingWaveform,
   voiceRecordingSession,
 } from "@/lib/voice-recording-session";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { SiliconAudio, VoiceWaveform } from "./silicon-audio";
 
 /**
  * Controls for the browser-tab-wide voice recording session.
@@ -22,23 +24,8 @@ import { cn } from "@/lib/utils";
 export function VoiceRecorder() {
   const session = useVoiceRecordingSession();
   const waveform = useVoiceRecordingWaveform();
+  const previewUrl = useVoiceRecordingPreviewUrl();
   const [elapsed, setElapsed] = React.useState(() => voiceRecordingSession.durationMs());
-  const wavesContainerRef = React.useRef<HTMLDivElement>(null);
-  const [barCount, setBarCount] = React.useState(48);
-  const waves = fitWaveform(waveform, barCount);
-
-  React.useEffect(() => {
-    const element = wavesContainerRef.current;
-    if (!element) return;
-    const measure = () => {
-      const width = element.clientWidth || 200;
-      setBarCount(Math.max(24, Math.floor(width / 5)));
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
 
   React.useEffect(() => {
     if (session.phase === "idle") return;
@@ -81,7 +68,7 @@ export function VoiceRecorder() {
       >
         <Trash />
       </Button>
-      <div className="flex min-w-0 flex-1 items-center gap-3">
+      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
         <span className="flex items-center gap-1.5 label-mono text-xs">
           <span className={cn(
             "inline-block h-2 w-2 bg-foreground",
@@ -89,15 +76,19 @@ export function VoiceRecorder() {
           )} />
           {session.phase === "requesting" ? "starting…" : formatElapsed(elapsed)}
         </span>
-        <div ref={wavesContainerRef} className="flex h-7 flex-1 items-center gap-[2px]">
-          {waves.map((value, index) => (
-            <span
-              key={index}
-              className="inline-block w-[3px] bg-foreground/70"
-              style={{ height: `${Math.max(3, value * 100)}%` }}
-            />
-          ))}
-        </div>
+        {session.phase === "paused" ? (
+          <SiliconAudio
+            url={previewUrl}
+            peaks={waveform}
+            durationMs={elapsed}
+            className="min-w-0 flex-1"
+          />
+        ) : (
+          <VoiceWaveform
+            samples={waveform}
+            className="h-7 min-w-0 flex-1 text-foreground/70"
+          />
+        )}
       </div>
       <Button
         size="icon"
@@ -122,12 +113,6 @@ export function VoiceRecorder() {
       </Button>
     </div>
   );
-}
-
-function fitWaveform(waveform: readonly number[], barCount: number): number[] {
-  const visible = waveform.slice(-barCount);
-  if (visible.length >= barCount) return [...visible];
-  return [...new Array(barCount - visible.length).fill(0), ...visible];
 }
 
 function formatElapsed(ms: number): string {

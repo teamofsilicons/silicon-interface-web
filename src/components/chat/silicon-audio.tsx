@@ -15,7 +15,7 @@ interface Props {
   /** Pre-computed peaks (0..1). When absent, the bars fall back to a flat
    *  line; once playback decodes, they stay flat (we trust server peaks for
    *  consistency between sender + receiver). */
-  peaks?: number[] | null;
+  peaks?: readonly number[] | null;
   /** Duration in ms — server-known, so the timer renders before audio loads. */
   durationMs?: number | null;
   autoPlay?: boolean;
@@ -26,7 +26,7 @@ interface Props {
  * Silicon-style audio bubble — same waveform language as the recorder.
  *
  *   ┌────────────────────────────────────────────┐
- *   │ ▶  ▁▂▄▆▇▆▄▂▁▂▄▆▇▆▄▂▁▂▄▆▇▆▄▂  00:42 / 01:24 │
+ *   │ ▶  ▁▂▄▆▇▆▄▂▁▂▄▆▇▆▄▂▁▂▄▆▇▆▄▂  01:24 │
  *   └────────────────────────────────────────────┘
  *
  * We render server-computed peaks immediately (so the bars exist before
@@ -50,37 +50,19 @@ export function SiliconAudio({ url, peaks, durationMs, autoPlay = false, classNa
       setPlaying(false);
     };
     pauseSelfRef.current = pause;
-    return registerMediaPauser(pause);
+    const unregister = registerMediaPauser(pause);
+    return () => {
+      pause();
+      unregister();
+    };
   }, []);
 
-  const bars = React.useMemo(() => {
-    const TARGET = 40; // a count that fits the compact player at any width
-    const raw =
-      peaks && peaks.length > 0
-        ? peaks
-        : // Synth a gentle wave so a missing peaks projection (older messages,
-          // metadata fetch failed, etc.) still looks intentional rather than
-          // empty. Static deterministic pattern.
-          Array.from({ length: TARGET }, (_, i) =>
-            0.25 + 0.5 * Math.abs(Math.sin(i * 0.6 + Math.cos(i * 0.13))),
-          );
-    if (raw.length <= TARGET) return raw;
-    // Downsample to TARGET buckets (averaging) so the *entire* waveform is
-    // always visible — flexible bars then fill the width exactly, no clipping.
-    const out: number[] = [];
-    const size = raw.length / TARGET;
-    for (let i = 0; i < TARGET; i++) {
-      const start = Math.floor(i * size);
-      const end = Math.max(start + 1, Math.floor((i + 1) * size));
-      let sum = 0;
-      let n = 0;
-      for (let j = start; j < end && j < raw.length; j++) {
-        sum += raw[j];
-        n += 1;
-      }
-      out.push(n ? sum / n : 0);
-    }
-    return out;
+  const samples = React.useMemo(() => {
+    if (peaks && peaks.length > 0) return peaks;
+    // Static deterministic fallback for older messages without server peaks.
+    return Array.from({ length: 96 }, (_, i) =>
+      0.2 + 0.5 * Math.abs(Math.sin(i * 0.47 + Math.cos(i * 0.11))),
+    );
   }, [peaks]);
 
   const dur = durationMs ?? internalDurMs ?? 0;
@@ -198,7 +180,7 @@ export function SiliconAudio({ url, peaks, durationMs, autoPlay = false, classNa
         // Borderless + transparent: the player inherits the bubble's theme via
         // currentColor (cream controls on a sent ink bubble, ink on a received
         // cream bubble), so a voice note reads like a normal message.
-        "flex w-full items-center gap-2",
+        "grid w-full grid-cols-[auto_minmax(0,1fr)_auto_auto_auto] items-center gap-2 overflow-hidden",
         className,
       )}
     >
@@ -210,10 +192,11 @@ export function SiliconAudio({ url, peaks, durationMs, autoPlay = false, classNa
       >
         {playing ? <Pause weight="fill" /> : <Play weight="fill" />}
       </button>
-      <Waveform bars={bars} progress={progress} seekable={dur > 0} onSeek={seekTo} />
-      <span className="shrink-0 label-mono text-[10px] opacity-60">
-        {formatTime(currentMs)}/{formatTime(dur)}
-      </span>
+      <Waveform samples={samples} progress={progress} seekable={dur > 0} onSeek={seekTo} />
+      {/* Keep the transport quiet and predictable: the waveform already
+          communicates playback progress, so the text label is the total
+          duration only. */}
+      <span className="shrink-0 label-mono text-[10px] opacity-60">{formatTime(dur)}</span>
       <div className="group/volume relative shrink-0">
         <button
           type="button"
@@ -246,19 +229,19 @@ export function SiliconAudio({ url, peaks, durationMs, autoPlay = false, classNa
       {url && (
         // The actual playback element. preload=metadata so duration arrives
         // without paying the full bytes cost up front.
-        <audio ref={audioRef} src={url} preload="metadata" />
+        <audio ref={audioRef} src={url} preload="metadata" className="hidden" />
       )}
     </div>
   );
 }
 
 function Waveform({
-  bars,
+  samples,
   progress,
   seekable,
   onSeek,
 }: {
-  bars: number[];
+  samples: readonly number[];
   progress: number;
   /** Whether duration is known yet — when false, seeking is a no-op so we
    *  don't expose a focusable but dead control. */
@@ -266,6 +249,20 @@ function Waveform({
   onSeek: (frac: number) => void;
 }) {
   const ref = React.useRef<HTMLDivElement | null>(null);
+  const [barCount, setBarCount] = React.useState(64);
+  React.useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      const count = Math.max(24, Math.min(768, Math.floor((element.clientWidth + 1) / 3)));
+      setBarCount((current) => (current === count ? current : count));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const bars = React.useMemo(() => resampleWaveform(samples, barCount), [samples, barCount]);
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = ref.current;
     if (!el || !seekable) return;
@@ -288,19 +285,17 @@ function Waveform({
     e.preventDefault();
     onSeek(Math.max(0, Math.min(1, next)));
   };
-  // Two identical bar rows stacked: a dim base, and a bright "played" copy
-  // clipped to the exact progress fraction. Because both rows lay out the same
-  // flexible bars, they align perfectly and the clip reveals the fill smoothly
-  // (sub-bar precision) instead of flipping whole bars.
+  // Two identical fixed-width bar rows are stacked: a dim base, and a bright
+  // "played" copy clipped to the exact progress fraction. Bar count follows
+  // the measured width, so wide players stay fine-grained instead of stretching
+  // a handful of bars into blocks.
   const renderBars = (bright: boolean) => (
-    <div className="flex h-full w-full items-center gap-[2px]">
+    <div className="flex h-full w-full items-center gap-px overflow-hidden">
       {bars.map((v, i) => (
         <span
           key={i}
           className={cn(
-            // flex-1 + a 2px floor: every bar is visible and the whole set
-            // fits the width without clipping or overflowing.
-            "min-w-[2px] flex-1",
+            "w-0.5 shrink-0",
             bright ? "bg-current" : "bg-current opacity-30",
           )}
           style={{ height: `${Math.max(8, Math.round(v * 100))}%` }}
@@ -322,7 +317,7 @@ function Waveform({
       aria-disabled={!seekable}
       tabIndex={seekable ? 0 : -1}
       className={cn(
-        "relative flex h-9 min-w-0 flex-1 items-center outline-none focus-visible:ring-1 focus-visible:ring-current",
+        "relative flex h-9 min-w-0 items-center overflow-hidden outline-none focus-visible:ring-1 focus-visible:ring-current",
         seekable ? "cursor-pointer" : "cursor-default",
       )}
     >
@@ -335,6 +330,67 @@ function Waveform({
       </div>
     </div>
   );
+}
+
+/** Thin, adaptive waveform used by the live recorder. It owns its observer, so
+ * pausing/unpausing can safely unmount and remount it without stale sizing. */
+export function VoiceWaveform({
+  samples,
+  className,
+}: {
+  samples: readonly number[];
+  className?: string;
+}) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const [barCount, setBarCount] = React.useState(64);
+  React.useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      const count = Math.max(24, Math.min(768, Math.floor((element.clientWidth + 1) / 3)));
+      setBarCount((current) => (current === count ? current : count));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const bars = React.useMemo(
+    () => resampleWaveform(samples, barCount),
+    [barCount, samples],
+  );
+
+  return (
+    <div
+      ref={ref}
+      aria-hidden
+      className={cn("flex items-center gap-px overflow-hidden", className)}
+    >
+      {bars.map((value, index) => (
+        <span
+          key={index}
+          className="w-0.5 shrink-0 bg-current"
+          style={{ height: `${Math.max(2, Math.round(value * 100))}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function resampleWaveform(samples: readonly number[], count: number): number[] {
+  if (count <= 0) return [];
+  if (samples.length === 0) return new Array(count).fill(0);
+  if (samples.length === 1) return new Array(count).fill(samples[0]);
+  if (samples.length === count) return [...samples];
+  const output: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const position = (index / Math.max(1, count - 1)) * (samples.length - 1);
+    const before = Math.floor(position);
+    const after = Math.min(samples.length - 1, before + 1);
+    const fraction = position - before;
+    output.push(samples[before] * (1 - fraction) + samples[after] * fraction);
+  }
+  return output;
 }
 
 function formatTime(ms: number): string {

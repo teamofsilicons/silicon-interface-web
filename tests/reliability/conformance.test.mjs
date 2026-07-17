@@ -8,7 +8,10 @@ import {
 } from "../../src/lib/delivery-state.ts";
 import { decideClientRetry } from "../../src/lib/retry-policy.ts";
 import { SyncBarrierBuffer } from "../../src/lib/sync-barrier-buffer.ts";
-import { missingMultipartParts } from "../../src/lib/multipart-resume.ts";
+import {
+  missingMultipartParts,
+  verifiedMultipartCompletionParts,
+} from "../../src/lib/multipart-resume.ts";
 import { resolveDraftChoice } from "../../src/lib/draft-conflict-policy.ts";
 import { protocolCompatibility } from "../../src/lib/protocol-window.ts";
 import {
@@ -212,6 +215,32 @@ test("web multipart resume satisfies the shared reliability contract", async () 
       row.id,
     );
   }
+});
+
+test("multipart completion adopts a newer provider ETag only for the same retained bytes", () => {
+  const checksums = new Map([[1, "same-bytes"], [2, "same-tail"]]);
+  assert.deepEqual(
+    verifiedMultipartCompletionParts(
+      2,
+      [
+        { part_number: 1, etag: '"new-etag"', checksum_sha256: "same-bytes" },
+        { part_number: 2, etag: '"tail-etag"', checksum_sha256: "same-tail" },
+      ],
+      checksums,
+    ),
+    [
+      { part_number: 1, etag: '"new-etag"', checksum_sha256: "same-bytes" },
+      { part_number: 2, etag: '"tail-etag"', checksum_sha256: "same-tail" },
+    ],
+  );
+  assert.throws(
+    () => verifiedMultipartCompletionParts(
+      1,
+      [{ part_number: 1, etag: '"foreign-etag"', checksum_sha256: "other-bytes" }],
+      new Map([[1, "our-bytes"]]),
+    ),
+    /checksum did not match/,
+  );
 });
 
 test("web draft conflict choices satisfy the shared reliability contract", async () => {

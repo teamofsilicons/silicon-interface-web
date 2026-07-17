@@ -68,6 +68,47 @@ test("offline timeline migrates v1 rows and remains chronological", async () => 
   );
 });
 
+test("delivery acknowledgements remain journaled until Glass accepts them", async () => {
+  await deleteDatabase("silicon-interface-chat-cache");
+  installBrowser();
+  const cache = await import("../../src/lib/chat-store.ts");
+  const incoming = event(
+    "01J00000000000000000000001",
+    "2026-01-01T00:00:01.000Z",
+    "durable before delivered",
+  );
+  await cache.storeEvents("delivery-owner", [{ roomId: "room", event: incoming }]);
+  assert.deepEqual(
+    await cache.pendingDeliveryAcknowledgements("delivery-owner"),
+    [incoming.event_id],
+  );
+  await cache.completeDeliveryAcknowledgements("delivery-owner", [incoming.event_id]);
+  assert.deepEqual(await cache.pendingDeliveryAcknowledgements("delivery-owner"), []);
+
+  const delivered = {
+    state: "delivered",
+    recipient_count: 1,
+    delivered_count: 1,
+    read_count: 0,
+  };
+  await cache.updateStoredEventDeliveries("delivery-owner", {
+    [incoming.event_id]: delivered,
+  });
+  await cache.storeEvents("delivery-owner", [{
+    roomId: "room",
+    event: { ...incoming, delivery: {
+      state: "sent",
+      recipient_count: 1,
+      delivered_count: 0,
+      read_count: 0,
+    } },
+  }]);
+  assert.deepEqual(
+    (await cache.loadStoredRoomEvents("delivery-owner", "room"))[0].delivery,
+    delivered,
+    "a stale history response cannot downgrade the durable receipt",
+  );
+});
 test("a newer database version reopens safely without losing cached history", async () => {
   await deleteDatabase("silicon-interface-chat-cache");
   installBrowser();

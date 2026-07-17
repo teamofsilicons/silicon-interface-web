@@ -1,4 +1,5 @@
 import type { Event } from "@/lib/types";
+import { mergeEventRevision } from "@/lib/event-revision";
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -45,6 +46,9 @@ export function recentLocalSearch<T extends Event>(events: T[], query: string): 
 /** Append a keyset page without allowing retries/overlap to duplicate a row. */
 export function mergeSearchPage<T extends Event>(existing: T[], page: T[]): T[] {
   const byId = new Map(existing.map((event) => [event.event_id, event]));
-  for (const event of page) byId.set(event.event_id, event);
+  for (const event of page) {
+    const current = byId.get(event.event_id);
+    byId.set(event.event_id, current ? mergeEventRevision(current, event) : event);
+  }
   return [...byId.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
 }

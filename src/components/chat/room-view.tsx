@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { ArrowDown, Check, Checks, Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
@@ -21,7 +21,7 @@ import {
   syncRecoveryState,
 } from "@/lib/sync-recovery";
 import { cn, dayLabel, relativeTimeAgo } from "@/lib/utils";
-import { presenceIsOnline } from "@/lib/presence-state";
+import { observePresenceActivity, presenceIsOnline } from "@/lib/presence-state";
 import { authStore, useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
 import { playSent, playAckTick, vibrate } from "@/lib/sounds";
@@ -45,6 +45,7 @@ import {
   updatePendingPreview,
   clearPendingPreview,
   failPendingPreview,
+  markPendingPreviewAccepted,
 } from "@/lib/pending-preview";
 import { track } from "@/lib/analytics";
 import {
@@ -85,8 +86,6 @@ import {
 import { ensureDeviceRegistration } from "@/lib/device-registration";
 import {
   isUnreadEligibleEvent,
-  roomOpenReadTarget,
-  selectUnreadDividerEventId,
   selectVisibleReadTarget,
 } from "@/lib/unread-boundary";
 import {
@@ -112,26 +111,33 @@ import {
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
 import { SILICON_TEXT_HOLD_MS } from "@/lib/silicon-hold";
 import { isGifMedia } from "@/lib/media-meta";
-import {
-  anchorPixelCorrection,
-  findVirtualAnchorIndex,
-} from "@/lib/virtualization-anchor";
+import { anchorPixelCorrection } from "@/lib/virtualization-anchor";
 import { countNovelHistoryRows, hasNovelHistoryRows } from "@/lib/history-window";
 import { belongsToSameTimelinePanel } from "@/lib/timeline-panel";
 import {
-  shouldLoadOlderDuringRangeChange,
-  timelineViewportPadding,
+  canApplyScheduledBottomScroll,
+  isTimelineAtBottom,
+  keyMovesTowardTimelineHistory,
+  selectionTouchesTimeline,
+  shouldPinOwnedTimelineTail,
+  shouldLoadOlderNearTimelineTop,
+  timelineTailMessageIsVisible,
+  touchMovesTowardTimelineHistory,
+  wheelMovesTowardTimelineHistory,
 } from "@/lib/timeline-text-selection";
 import { authoritativeEditConflict } from "@/lib/edit-conflict";
 import { reconcileReplyTarget } from "@/lib/reply-state";
 import { chatConnectingCopy } from "@/lib/connection-status";
-import { messageReceiptPresentation } from "@/lib/message-receipt";
+import {
+  messageReceiptPresentation,
+  strongestMessageReceiptStatus,
+} from "@/lib/message-receipt";
 import { mergeSearchPage, recentLocalSearch } from "@/lib/reliable-search";
 import {
   aggregateReactions,
   applyOwnReactionOverride,
   normalizeReactionEmoji,
-  ownReactionIsActive,
+  nextOwnReactionIntent,
   reactionIntentKey,
   reconcileReactionResult,
   retryReactionMutation,
@@ -146,9 +152,11 @@ import { useVoiceRecordingSession } from "@/lib/voice-recording-session";
 import { loadCachedTeamRoster, saveCachedTeamRoster } from "@/lib/sidebar-cache";
 import {
   canSendPlaintextToRoom,
+  mergeDeliverySummaries,
   normalizeDeliveryObject,
   normalizeDeliverySummary,
 } from "@/lib/delivery-state";
+import { mergeEventRevision } from "@/lib/event-revision";
 import { deviceId } from "@/lib/device-id";
 import {
   createModerationReportIntent,
@@ -225,6 +233,10 @@ interface Props {
   connectionStatePending?: boolean;
   /** Fired only after Glass commits a genuinely visible read target. */
   onReadThrough?: (eventId: string, streamPosition: number) => void;
+  /** Immediately projects the accepted event into the sidebar. */
+  onEventAccepted?: (event: Event) => void;
+  /** Flushes delivery acknowledgements after a history page is durably stored. */
+  onHistoryStored?: () => void;
 }
 
 type LocalEvent = TimelineEvent & {
@@ -391,21 +403,24 @@ const PROGRESS_STALE_HARD_MS = 100_000;
 const SEARCH_INTERVAL = 40;
 const SEARCH_DEBOUNCE_MS = 280;
 
-// The earlier-history connection indicator has constant height
-// (just fades in/out) so toggling it never shoves the list up/down.
-function ChatListHeader({ loadingOlder }: { loadingOlder: boolean }) {
+// Keep older-history progress attached to the viewport instead of the timeline
+// content. Short conversations are bottom-aligned, so a list child can sit far
+// below the viewport top and never paint before the prepend completes.
+function OlderHistoryLoadingOverlay({ loadingOlder }: { loadingOlder: boolean }) {
   return (
-    <div className="flex justify-center pb-2 pt-4">
+    <div
+      role="status"
+      aria-live="polite"
+      aria-hidden={!loadingOlder}
+      className={cn(
+        "pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2 border bg-background/95 px-3 py-1.5 shadow-sm backdrop-blur-sm transition-opacity",
+        loadingOlder ? "opacity-100" : "opacity-0",
+      )}
+    >
       <span
-        role="status"
-        aria-live="polite"
-        aria-hidden={!loadingOlder}
-        className={cn(
-          "label-mono text-[11px] text-muted-foreground transition-opacity",
-          loadingOlder ? "opacity-100" : "opacity-0",
-        )}
+        className="label-mono whitespace-nowrap text-[11px] text-muted-foreground"
       >
-        Connecting…
+        Loading older messages…
       </span>
     </div>
   );
@@ -416,6 +431,31 @@ const MAX_PROGRESS_LINE_CHARS = 64;
 // Matches ROOM_SNIPPET_LIMIT so the cache can paint roughly the same timeline
 // while the raw server events reconcile in the background.
 const PAGE_SIZE = 30;
+// Keep a fast cached response visible for long enough to produce a real paint.
+// This does not delay the request or the prepended messages themselves.
+const OLDER_LOADING_MIN_MS = 180;
+// The page-down arrow is an explicit navigation gesture, so it gets one short
+// spatial transition. Automatic follow corrections remain instantaneous.
+const PAGE_DOWN_ANIMATION_MS = 180;
+
+function waitForOlderHistoryIndicatorPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(fallback);
+      resolve();
+    };
+    // Two animation frames guarantee that the loading state committed in the
+    // previous task received a real browser paint before a cached history page
+    // can synchronously prepend. Background tabs use the bounded fallback.
+    const fallback = window.setTimeout(finish, 100);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(finish);
+    });
+  });
+}
 // Glass caps a room-events request at 200 rows. Once a raw page is dominated
 // by hidden metadata (progress, reactions, redactions), use the larger page to
 // reach the next visible messages without issuing dozens of tiny requests.
@@ -506,26 +546,11 @@ async function loadTimelineWindow(
 // and read receipts often land BEFORE the HTTP send ack, so an ack must never
 // knock a message back down to waiting. `bestStatus`
 // keeps whichever status is further along.
-const STATUS_RANK: Record<MessageStatus, number> = {
-  failed: -1,
-  pending: 0,
-  resolving: 0,
-  retry_wait: 0,
-  retrying: 0,
-  challenge: 0,
-  sent: 1,
-  partially_delivered: 2,
-  delivered: 3,
-  partially_read: 4,
-  read: 5,
-};
 function bestStatus(
   a: MessageStatus | undefined,
   b: MessageStatus | undefined,
 ): MessageStatus | undefined {
-  if (a == null) return b;
-  if (b == null) return a;
-  return STATUS_RANK[a] >= STATUS_RANK[b] ? a : b;
+  return strongestMessageReceiptStatus(a, b);
 }
 
 function serverDeliveryStatus(event: Event): MessageStatus {
@@ -541,6 +566,8 @@ export function RoomView({
   onContactsChanged,
   connectionStatePending = false,
   onReadThrough,
+  onEventAccepted,
+  onHistoryStored,
 }: Props) {
   "use no memo";
   // RoomView intentionally coordinates multiple durable journals, websocket
@@ -557,10 +584,36 @@ export function RoomView({
   const myUsername = carbon?.username ?? null;
   const timelineOwner = carbon?.carbon_id ?? "session";
   const timelineDevice = authStore.getBoundDeviceId() ?? deviceId();
+  // Transport phase changes are observational state, not room identity. Keep
+  // the latest value available to failure reporting without making the
+  // initial-history loader depend on every connecting/syncing/online tick.
+  const socketStateRef = React.useRef(socketState);
+  React.useLayoutEffect(() => {
+    socketStateRef.current = socketState;
+  }, [socketState]);
+  // Device registration can rotate the access token immediately after boot.
+  // That must not reopen the room or reclaim the reader's scroll position.
+  const timelineDeviceRef = React.useRef(timelineDevice);
+  React.useLayoutEffect(() => {
+    timelineDeviceRef.current = timelineDevice;
+  }, [timelineDevice]);
+  const historyFailureBurstRef = React.useRef({ count: 0, lastAt: 0 });
   const reportHistoryFailure = React.useCallback((error: unknown) => {
     const owner = carbon?.carbon_id;
     if (!owner) return;
     const decision = classifySyncFailure(error, "history");
+    if (decision.reason === "transient_failure") {
+      // One aborted fetch, cache miss, or reconnect race does not mean the
+      // conversation is corrupt. Keep serving the loaded timeline and let its
+      // normal retry path recover. Escalate only a repeat burst while the main
+      // socket itself is otherwise healthy.
+      if (socketStateRef.current !== "online") return;
+      const now = Date.now();
+      const previous = historyFailureBurstRef.current;
+      const count = now - previous.lastAt <= 20_000 ? previous.count + 1 : 1;
+      historyFailureBurstRef.current = { count, lastAt: now };
+      if (count < 3) return;
+    }
     void reportSyncRecovery(owner, {
       phase: "degraded",
       reason: decision.reason,
@@ -569,6 +622,7 @@ export function RoomView({
     });
   }, [carbon?.carbon_id, room.room_id]);
   const reportHistoryHealthy = React.useCallback(() => {
+    historyFailureBurstRef.current = { count: 0, lastAt: 0 };
     const owner = carbon?.carbon_id;
     if (!owner) return;
     void syncRecoveryState(owner).then((record) => {
@@ -593,11 +647,32 @@ export function RoomView({
     voiceSession.phase !== "idle" &&
     recordingRoomId !== null &&
     recordingRoomId !== room.room_id;
+  const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const peers = React.useMemo(() => (Array.isArray(room.peers) ? room.peers : []), [room.peers]);
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
   // header title (saved name vs @id), avatar, and the Save Contact button.
   const peer = room.kind === "direct" && peers.length === 1 ? peers[0] : null;
-  const carbonPresence = peer?.kind === "carbon" ? peer.presence : undefined;
+  const latestPeerActivityAt = React.useMemo(() => {
+    if (peer?.kind !== "carbon") return "";
+    const identities = new Set(
+      [peer.handle, peer.id].map((identity) => identity.replace(/^@/, "")),
+    );
+    let latest = "";
+    let latestMs = Number.NEGATIVE_INFINITY;
+    const consider = (sender: string | null | undefined, at: string) => {
+      if (!sender || !identities.has(sender.replace(/^@/, ""))) return;
+      const parsed = Date.parse(at);
+      if (!Number.isFinite(parsed) || parsed <= latestMs) return;
+      latest = at;
+      latestMs = parsed;
+    };
+    for (const event of events) consider(event.sender_handle, event.created_at);
+    consider(room.last_event?.sender_handle, room.last_event?.at ?? "");
+    return latest;
+  }, [events, peer, room.last_event]);
+  const carbonPresence = peer?.kind === "carbon"
+    ? observePresenceActivity(peer.presence, latestPeerActivityAt)
+    : undefined;
   const presenceOnline = presenceIsOnline(carbonPresence);
   const lastSeen = carbonPresence?.last_seen_at
     ? relativeTimeAgo(carbonPresence.last_seen_at)
@@ -673,16 +748,30 @@ export function RoomView({
     };
   }, [connectionStatePending, peer?.connection_state, peer?.kind, room.room_id]);
 
-  const [events, setEvents] = React.useState<LocalEvent[]>([]);
+  // Transport and reconciliation continue while text is selected, but the
+  // rendered conversation-cell projection stays on one immutable snapshot.
+  // This mirrors Signal's separation between its live model and visible cells:
+  // native Range endpoints never move, while no streaming delta is delayed.
+  const textSelectionActiveRef = React.useRef(false);
+  const eventProjectionRef = React.useRef(events);
+  React.useLayoutEffect(() => {
+    eventProjectionRef.current = events;
+  }, [events]);
+  const [selectionEventSnapshot, setSelectionEventSnapshot] =
+    React.useState<LocalEvent[] | null>(null);
   // While a desired-state mutation is in flight, this projection wins over
   // delayed/out-of-order WS echoes. Requests for the same reaction are chained
   // so rapid cross-device-style toggles converge in click order.
   const [reactionOverrides, setReactionOverrides] = React.useState<Record<string, boolean>>({});
+  // State paints the optimistic projection; the ref is the synchronous source
+  // of truth between rapid clicks that happen before React can render again.
+  const reactionOverridesRef = React.useRef<Record<string, boolean>>({});
   const reactionGenerationRef = React.useRef(new Map<string, number>());
   const reactionChainsRef = React.useRef(new Map<string, Promise<void>>());
   const reactionRoomRef = React.useRef(room.room_id);
   React.useEffect(() => {
     reactionRoomRef.current = room.room_id;
+    reactionOverridesRef.current = {};
     reactionGenerationRef.current.clear();
     reactionChainsRef.current.clear();
     queueMicrotask(() => {
@@ -748,7 +837,11 @@ export function RoomView({
   // Messages received while the user is reading history are counted on the
   // always-available jump-to-bottom control.
   const [unseenBelow, setUnseenBelow] = React.useState(0);
+  // Visual state for the page-down control. Bottom-follow ownership remains a
+  // separate hard latch: seeing the newest message hides the arrow but does
+  // not silently give programmatic scroll control back to the app.
   const [timelineAtBottom, setTimelineAtBottom] = React.useState(true);
+  const timelineTailVisibleRef = React.useRef(true);
   // §2.7 — "load older" pagination past the latest 100-event window.
   const [hasMore, setHasMore] = React.useState(false);
   const [historyCursor, setHistoryCursor] = React.useState<string | null>(null);
@@ -972,7 +1065,6 @@ export function RoomView({
   const searchCursorRef = React.useRef<string | null>(null);
   const searchGenerationRef = React.useRef(0);
   const messageNodeRefs = React.useRef(new Map<string, HTMLDivElement>());
-  const unreadDividerNodeRef = React.useRef<HTMLDivElement | null>(null);
   const [highlightedEventId, setHighlightedEventId] = React.useState<string | null>(null);
   const highlightTimerRef = React.useRef<number | null>(null);
   const [pendingJumpEventId, setPendingJumpEventId] = React.useState<string | null>(null);
@@ -1038,30 +1130,31 @@ export function RoomView({
   );
 
   const sectionRef = React.useRef<HTMLElement>(null);
-  // Virtuoso owns the long timeline DOM. We still retain its concrete scroller
-  // for visibility geometry/read receipts and exact pixel-anchor correction.
+  // History is paged, but every loaded row stays in the DOM. Native browser
+  // ranges cannot survive a virtualizer recycling their anchor/focus nodes,
+  // especially while selection auto-scrolls across the viewport.
   const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
-  const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
-  const timelineLengthRef = React.useRef(0);
-  // Native browser selection and a virtualized list normally fight each
-  // other: as the pointer auto-scrolls, Virtuoso recycles the DOM node that
-  // owns the selection anchor and the browser drops the highlight. While a
-  // timeline selection exists we retain the loaded window and pause structural
-  // history mutations/autoscrolls. This keeps selection native (including the
-  // platform copy menu) without making the full history expensive all the
-  // time.
-  const [textSelectionActive, setTextSelectionActive] = React.useState(false);
-  const textSelectionActiveRef = React.useRef(false);
+  const timelineContentRef = React.useRef<HTMLDivElement | null>(null);
+  const timelineInteractionRef = React.useRef<HTMLDivElement | null>(null);
+  // Selection is tracked imperatively so `selectstart` never schedules a
+  // React render or changes timeline geometry underneath the native Range.
   const activeRoomIdRef = React.useRef(room.room_id);
   React.useLayoutEffect(() => {
     activeRoomIdRef.current = room.room_id;
   }, [room.room_id]);
   const selectionGestureRef = React.useRef(false);
   const selectionEndWaitersRef = React.useRef(new Set<() => void>());
-  const updateTextSelectionActive = React.useCallback((active: boolean) => {
+  const updateTextSelectionActive = React.useCallback((active: boolean, renderLatest = true) => {
+    if (textSelectionActiveRef.current === active) return;
     textSelectionActiveRef.current = active;
-    setTextSelectionActive((current) => (current === active ? current : active));
+    if (active) {
+      setSelectionEventSnapshot((current) => current ?? eventProjectionRef.current);
+      timelineInteractionRef.current?.setAttribute("data-timeline-selection-active", "true");
+    } else {
+      if (renderLatest) setSelectionEventSnapshot(null);
+      timelineInteractionRef.current?.removeAttribute("data-timeline-selection-active");
+    }
     if (!active && selectionEndWaitersRef.current.size > 0) {
       const waiters = [...selectionEndWaitersRef.current];
       selectionEndWaitersRef.current.clear();
@@ -1076,55 +1169,236 @@ export function RoomView({
   }, []);
   // Tracks whether the user is parked at the bottom — gates "stick to bottom".
   const stickToBottomRef = React.useRef(true);
-  // Stable event + exact viewport pixel captured before a prepend. After
-  // Virtuoso receives the older page, we find that event's new virtual index
-  // and restore the same pixel—not merely an approximate scrollTop.
-  const pendingPrependRef = React.useRef<{ eventId: string; offset: number } | null>(null);
+  // A newly opened room owns one initial trip to the authoritative tail. Cache
+  // hydration and native scroll restoration may emit passive scroll events
+  // before that tail commits; those events must not strand reload in history.
+  const initialBottomPendingRef = React.useRef(true);
+  // Every manual interaction advances this epoch. Delayed resize/send frames
+  // must still own the same epoch before they may mutate scrollTop.
+  const scrollOwnershipEpochRef = React.useRef(0);
+  const pendingBottomScrollFrameRef = React.useRef<number | null>(null);
+  const bottomAnimationFrameRef = React.useRef<number | null>(null);
+  const lastTouchClientYRef = React.useRef<number | null>(null);
+  // A user-directed trip toward newer messages may explicitly renew follow
+  // ownership once it reaches the physical tail. Passive layout scrolls never
+  // set this flag, so media/reaction resizing cannot steal reader control.
+  const returningToBottomRef = React.useRef(false);
+  // The first visible event and its exact viewport pixel remain authoritative
+  // while a prepended page finishes sizing. Older media, previews, fonts, and
+  // sender regrouping can all change height after the first React commit.
+  const historyViewportAnchorRef = React.useRef<{
+    eventId: string | null;
+    offset: number;
+    scrollTop: number;
+    scrollHeight: number;
+    awaitingCommit: boolean;
+  } | null>(null);
+  const clearHistoryViewportAnchor = React.useCallback((force = false) => {
+    // Once a response has been accepted, its prepend and first layout
+    // correction are one atomic visual commit. A wheel event in the few
+    // milliseconds between them must not discard the anchor and expose the
+    // absolute scrollTop of the newly taller document.
+    if (!force && historyViewportAnchorRef.current?.awaitingCommit) return;
+    historyViewportAnchorRef.current = null;
+  }, []);
+  const captureHistoryViewportAnchor = React.useCallback((incoming: Event[]) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return false;
+    const knownEventIds = new Set(messageNodeRefs.current.keys());
+    if (!hasNovelHistoryRows(incoming, knownEventIds, isTimelineEvent)) return false;
+    const viewportTop = scroller.getBoundingClientRect().top;
+    const anchor = [...messageNodeRefs.current.entries()]
+      .map(([eventId, node]) => ({
+        eventId,
+        top: node.getBoundingClientRect().top,
+        bottom: node.getBoundingClientRect().bottom,
+      }))
+      .filter((item) => item.bottom > viewportTop)
+      .sort((a, b) => a.top - b.top)[0];
+    historyViewportAnchorRef.current = {
+      eventId: anchor?.eventId ?? null,
+      offset: anchor ? anchor.top - viewportTop : 0,
+      scrollTop: scroller.scrollTop,
+      scrollHeight: scroller.scrollHeight,
+      awaitingCommit: true,
+    };
+    return true;
+  }, []);
+  const preserveHistoryViewportAnchor = React.useCallback((committed = false) => {
+    const anchor = historyViewportAnchorRef.current;
+    const scroller = scrollerRef.current;
+    if (!anchor || !scroller) return false;
+    const node = anchor.eventId
+      ? messageNodeRefs.current.get(anchor.eventId)
+      : null;
+    if (node?.isConnected) {
+      const actual = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      scroller.scrollTop += anchorPixelCorrection(actual, anchor.offset);
+    } else {
+      // A ref may be briefly unavailable when a sender group is re-keyed. The
+      // height delta is an exact fallback until the stable event ref reattaches.
+      scroller.scrollTop =
+        anchor.scrollTop + (scroller.scrollHeight - anchor.scrollHeight);
+    }
+    anchor.scrollTop = scroller.scrollTop;
+    anchor.scrollHeight = scroller.scrollHeight;
+    // ResizeObserver may run for an unrelated header/media resize between
+    // capturing the anchor and React committing the prepended rows. It may
+    // correct the viewport, but only the timeline layout commit can release
+    // the guard that prevents wheel/pointer handlers from clearing the anchor.
+    if (committed) anchor.awaitingCommit = false;
+    return true;
+  }, []);
+  const cancelPendingBottomScroll = React.useCallback(() => {
+    if (pendingBottomScrollFrameRef.current === null) return;
+    window.cancelAnimationFrame(pendingBottomScrollFrameRef.current);
+    pendingBottomScrollFrameRef.current = null;
+  }, []);
+  const cancelBottomAnimation = React.useCallback(() => {
+    if (bottomAnimationFrameRef.current === null) return;
+    window.cancelAnimationFrame(bottomAnimationFrameRef.current);
+    bottomAnimationFrameRef.current = null;
+  }, []);
+  const releaseBottomStick = React.useCallback(() => {
+    initialBottomPendingRef.current = false;
+    stickToBottomRef.current = false;
+    returningToBottomRef.current = false;
+    scrollOwnershipEpochRef.current += 1;
+    clearHistoryViewportAnchor();
+    cancelPendingBottomScroll();
+    cancelBottomAnimation();
+  }, [cancelBottomAnimation, cancelPendingBottomScroll, clearHistoryViewportAnchor]);
 
-  const scrollToBottom = React.useCallback((behavior: "auto" | "smooth" = "auto") => {
-    const index = timelineLengthRef.current - 1;
-    if (index >= 0) virtuosoRef.current?.scrollToIndex({ index, align: "end", behavior });
+  const scrollToBottom = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || bottomAnimationFrameRef.current !== null) return;
+    // Instant assignment has no browser animation that can keep fighting a
+    // wheel or touch gesture after the reader takes ownership.
+    scroller.scrollTop = scroller.scrollHeight;
   }, []);
 
-  const requestBottomStick = React.useCallback(
-    (behavior: "auto" | "smooth" = "smooth") => {
-      if (textSelectionActiveRef.current) return;
-      stickToBottomRef.current = true;
-      setTimelineAtBottom(true);
-      setUnseenBelow(0);
-      requestAnimationFrame(() => scrollToBottom(behavior));
-    },
-    [scrollToBottom],
-  );
+  const animateToBottom = React.useCallback(() => {
+    cancelPendingBottomScroll();
+    cancelBottomAnimation();
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const startTop = scroller.scrollTop;
+    const initialTarget = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    if (
+      initialTarget - startTop <= 1 ||
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ) {
+      scroller.scrollTop = scroller.scrollHeight;
+      return;
+    }
+    const startedAt = performance.now();
+    const step = (now: number) => {
+      if (!stickToBottomRef.current || textSelectionActiveRef.current) {
+        bottomAnimationFrameRef.current = null;
+        return;
+      }
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / PAGE_DOWN_ANIMATION_MS));
+      const eased = 1 - Math.pow(1 - progress, 3);
+      // Re-read the target every frame so a message or media resize during the
+      // short flight is included instead of leaving the arrow one row short.
+      const target = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTop = startTop + (target - startTop) * eased;
+      if (progress < 1) {
+        bottomAnimationFrameRef.current = window.requestAnimationFrame(step);
+      } else {
+        bottomAnimationFrameRef.current = null;
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+    };
+    bottomAnimationFrameRef.current = window.requestAnimationFrame(step);
+  }, [cancelBottomAnimation, cancelPendingBottomScroll]);
 
-  // Keep all currently loaded message nodes mounted for the lifetime of a
-  // native selection. `selectstart` fires before the browser creates its
-  // range, so pin immediately; `selectionchange` then keeps the pin until the
-  // user actually clears/collapses that range. Pointer-up alone must not
-  // release it because the selected range is still live and copyable.
+  const scheduleBottomScroll = React.useCallback(() => {
+    cancelPendingBottomScroll();
+    const scheduledEpoch = scrollOwnershipEpochRef.current;
+    pendingBottomScrollFrameRef.current = window.requestAnimationFrame(() => {
+      pendingBottomScrollFrameRef.current = null;
+      if (!canApplyScheduledBottomScroll({
+        scheduledEpoch,
+        currentEpoch: scrollOwnershipEpochRef.current,
+        followingBottom: stickToBottomRef.current,
+        selectionActive: textSelectionActiveRef.current,
+      })) return;
+      scrollToBottom();
+    });
+  }, [cancelPendingBottomScroll, scrollToBottom]);
+
+  const activateBottomFollowFromArrow = React.useCallback(() => {
+    if (textSelectionActiveRef.current) return;
+    clearHistoryViewportAnchor(true);
+    initialBottomPendingRef.current = false;
+    scrollOwnershipEpochRef.current += 1;
+    stickToBottomRef.current = true;
+    timelineTailVisibleRef.current = true;
+    setTimelineAtBottom(true);
+    setUnseenBelow(0);
+    animateToBottom();
+  }, [animateToBottom, clearHistoryViewportAnchor]);
+
+  const acquireBottomFollowAtCurrentTail = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (
+      !scroller ||
+      textSelectionActiveRef.current ||
+      !isTimelineAtBottom({
+        scrollHeight: scroller.scrollHeight,
+        scrollTop: scroller.scrollTop,
+        clientHeight: scroller.clientHeight,
+      })
+    ) return false;
+    clearHistoryViewportAnchor(true);
+    initialBottomPendingRef.current = false;
+    returningToBottomRef.current = false;
+    if (!stickToBottomRef.current) scrollOwnershipEpochRef.current += 1;
+    stickToBottomRef.current = true;
+    timelineTailVisibleRef.current = true;
+    setTimelineAtBottom(true);
+    setUnseenBelow(0);
+    return true;
+  }, [clearHistoryViewportAnchor]);
+
+  const keepOwnedBottomPinned = React.useCallback(() => {
+    if (!shouldPinOwnedTimelineTail({
+      followingBottom: stickToBottomRef.current,
+      selectionActive: textSelectionActiveRef.current,
+    })) return false;
+    timelineTailVisibleRef.current = true;
+    setTimelineAtBottom(true);
+    setUnseenBelow(0);
+    if (bottomAnimationFrameRef.current !== null) return true;
+    scheduleBottomScroll();
+    return true;
+  }, [scheduleBottomScroll]);
+
+  // Pause structural history prepends and bottom-follow while a native Range
+  // owns timeline text. Pointer-up alone must not release the guard because
+  // the selected range remains live and copyable after the drag ends.
   React.useEffect(() => {
-    const root = scrollerRef.current;
+    const root = timelineInteractionRef.current;
     if (!root) return;
 
-    const selectionTouchesTimeline = () => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
-      const anchor = selection.anchorNode;
-      const focus = selection.focusNode;
-      return Boolean((anchor && root.contains(anchor)) || (focus && root.contains(focus)));
-    };
+    const hasTimelineSelection = () => selectionTouchesTimeline(window.getSelection(), root);
     const onSelectStart = (event: globalThis.Event) => {
       const target = event.target;
       if (!(target instanceof Node) || !root.contains(target)) return;
+      // A native selection gesture owns the viewport until the reader
+      // explicitly returns to the end. Never let a heartbeat or resize pull it.
+      releaseBottomStick();
       selectionGestureRef.current = true;
       updateTextSelectionActive(true);
     };
     const onSelectionChange = () => {
       if (selectionGestureRef.current) {
-        if (selectionTouchesTimeline()) updateTextSelectionActive(true);
+        if (hasTimelineSelection()) updateTextSelectionActive(true);
         return;
       }
-      updateTextSelectionActive(selectionTouchesTimeline());
+      const selectionActive = hasTimelineSelection();
+      updateTextSelectionActive(selectionActive);
     };
     const onPointerEnd = () => {
       selectionGestureRef.current = false;
@@ -1141,12 +1415,12 @@ export function RoomView({
       window.removeEventListener("pointerup", onPointerEnd);
       window.removeEventListener("pointercancel", onPointerEnd);
       selectionGestureRef.current = false;
-      updateTextSelectionActive(false);
+      updateTextSelectionActive(false, false);
     };
-  }, [hydrated, room.room_id, search, updateTextSelectionActive]);
+  }, [releaseBottomStick, room.room_id, updateTextSelectionActive]);
 
   // A history page that finishes while the user is selecting must not prepend
-  // and regroup the first virtual row underneath the browser's live Range.
+  // and regroup the first row underneath the browser's live Range.
   // Release any waiter on unmount/room change as well so no request is left
   // suspended behind a selection that belongs to an obsolete timeline.
   React.useEffect(() => () => {
@@ -1267,6 +1541,19 @@ export function RoomView({
     }
     return [...seen.values()];
   }, [allRooms, mentionCandidates]);
+  const persistHistoryEvents = React.useCallback(
+    async (history: Event[]) => {
+      if (!history.length || timelineOwner === "session") return;
+      await storeEvents(
+        timelineOwner,
+        history.map((event) => ({ roomId: room.room_id, event })),
+      );
+      // Device-aware Glass nodes only mark delivery after this durable commit.
+      // Rendering a history page is never enough evidence on its own.
+      onHistoryStored?.();
+    },
+    [onHistoryStored, room.room_id, timelineOwner],
+  );
   const contactForSender = React.useCallback(
     (kind: "carbon" | "silicon" | "system", handle: string | null) => {
       if (!handle || (kind !== "carbon" && kind !== "silicon")) return undefined;
@@ -1328,6 +1615,16 @@ export function RoomView({
   React.useLayoutEffect(() => {
     let mounted = true;
     const roomId = room.room_id;
+    const roomOpenTimelineDevice = timelineDeviceRef.current;
+    // Room navigation starts a fresh bottom-follow epoch. No frame scheduled
+    // by the previous room is allowed to move the new room's viewport.
+    scrollOwnershipEpochRef.current += 1;
+    cancelPendingBottomScroll();
+    cancelBottomAnimation();
+    initialBottomPendingRef.current = true;
+    stickToBottomRef.current = true;
+    const roomOpenScrollEpoch = scrollOwnershipEpochRef.current;
+    clearHistoryViewportAnchor(true);
     const cachedEvents = readRoomEventSnippet(roomId);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- room changes require one atomic pre-paint reset so stale timeline/outbox state never appears in the next room.
     setLoading(!cachedEvents?.some(isTimelineEvent));
@@ -1365,11 +1662,69 @@ export function RoomView({
     setFocusSender(null);
     setProfileOpen(false);
     setUnseenBelow(0);
+    timelineTailVisibleRef.current = true;
     setTimelineAtBottom(true);
     deltaBufferRef.current.clear();
     firstContactRef.current = false;
     let durableCacheAvailable = false;
     const cacheOwner = authStore.getCarbon()?.carbon_id;
+    const commitInitialTimelineRows = async (incoming: Event[]) => {
+      if (!mounted || incoming.length === 0) return;
+      // The initial snippet paints synchronously, but IndexedDB and the first
+      // authoritative page can arrive after the reader has already started
+      // scrolling. Treat those late older rows exactly like every subsequent
+      // prepend: paint progress first, then commit and restore one event/pixel
+      // atomically. This closes the one unguarded "first page" jump.
+      const protectReaderPosition =
+        !stickToBottomRef.current &&
+        hasNovelHistoryRows(
+          incoming,
+          new Set(messageNodeRefs.current.keys()),
+          isTimelineEvent,
+        );
+      let ownsOlderIndicator = false;
+      let indicatorVisibleAt = performance.now();
+      if (protectReaderPosition) {
+        await waitForTextSelectionEnd();
+        if (!mounted) return;
+        if (!loadingOlderRef.current) {
+          loadingOlderRef.current = true;
+          ownsOlderIndicator = true;
+          setLoadingOlder(true);
+          await waitForOlderHistoryIndicatorPaint();
+          indicatorVisibleAt = performance.now();
+          if (!mounted) return;
+        }
+        captureHistoryViewportAnchor(incoming);
+      }
+      flushSync(() => {
+        setEvents((prev) =>
+          mergeServerEvents(
+            prev,
+            incoming,
+            roomId,
+            myUsername,
+            timelineOwner,
+            roomOpenTimelineDevice,
+          ),
+        );
+      });
+      if (protectReaderPosition) preserveHistoryViewportAnchor(true);
+      if (ownsOlderIndicator) {
+        const remainingIndicatorMs = Math.max(
+          0,
+          OLDER_LOADING_MIN_MS - (performance.now() - indicatorVisibleAt),
+        );
+        if (remainingIndicatorMs > 0) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, remainingIndicatorMs);
+          });
+        }
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      }
+    };
+    let durableCachePromise: Promise<void> = Promise.resolve();
     if (cacheOwner) {
       void Promise.all([listOutbox(cacheOwner), listHeldCancellations(cacheOwner)]).then(([entries, cancellations]) => {
         if (!mounted || !myUsername) return;
@@ -1384,12 +1739,23 @@ export function RoomView({
             .map((row) => row.clientId),
         );
         const pending = entries
-          .filter(
-            (entry) =>
-              entry.roomId === roomId &&
-              !terminalCancellations.has(entry.clientId) &&
-              !(entry.operation === "media" && entry.media?.phase === "acquiring"),
-          )
+          .filter((entry) => {
+            if (
+              entry.roomId !== roomId ||
+              terminalCancellations.has(entry.clientId) ||
+              (entry.operation === "media" && entry.media?.phase === "acquiring")
+            ) {
+              return false;
+            }
+            // The authoritative event may have landed before this slower
+            // IndexedDB read completed. Never restore its stale outbox row as
+            // a failed sidebar preview after acceptance.
+            if (readTimelineIdentity(cacheOwner, entry.clientId)?.eventId) {
+              markPendingPreviewAccepted(roomId, entry.clientId);
+              return false;
+            }
+            return true;
+          })
           .map((entry): LocalEvent => {
             const timeoutMs = sendTimeoutMs();
             const identity =
@@ -1406,7 +1772,7 @@ export function RoomView({
                 : ensureTimelineIdentitySync(
                     cacheOwner,
                     entry.clientId,
-                    timelineDevice,
+                    roomOpenTimelineDevice,
                     entry.at,
                   );
             const placeholder: LocalEvent = {
@@ -1455,41 +1821,63 @@ export function RoomView({
           });
         }
         setEvents((prev) =>
-          mergeServerEvents(prev, pending, myUsername, timelineOwner, timelineDevice),
+          mergeServerEvents(
+            prev,
+            pending,
+            roomId,
+            myUsername,
+            timelineOwner,
+            roomOpenTimelineDevice,
+          ),
         );
         setLoading(false);
       }).catch(() => undefined);
-      void loadStoredRoomEvents(cacheOwner, roomId, 100).then((stored) => {
+      durableCachePromise = loadStoredRoomEvents(cacheOwner, roomId, 100).then(async (stored) => {
         if (!mounted || stored.length === 0) return;
         durableCacheAvailable = true;
-        setEvents((prev) =>
-          mergeServerEvents(prev, stored, myUsername, timelineOwner, timelineDevice),
-        );
+        await commitInitialTimelineRows(stored);
         setLoading(false);
-      });
+      }).catch(() => undefined);
     }
+    const finishInitialBottomPosition = () => {
+      if (
+        !mounted ||
+        !initialBottomPendingRef.current ||
+        !stickToBottomRef.current ||
+        scrollOwnershipEpochRef.current !== roomOpenScrollEpoch
+      ) return;
+      scheduleBottomScroll();
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (
+            mounted &&
+            initialBottomPendingRef.current &&
+            stickToBottomRef.current &&
+            scrollOwnershipEpochRef.current === roomOpenScrollEpoch
+          ) {
+            initialBottomPendingRef.current = false;
+          }
+        });
+      });
+    };
     loadTimelineWindow(roomId)
-      .then(({ events: evs, hasMore, cursor, boundaryEventId }) => {
+      .then(async ({ events: evs, hasMore, cursor, boundaryEventId }) => {
+        await durableCachePromise;
         if (!mounted) return;
         reportHistoryHealthy();
-        setEvents((prev) => {
-          // Loaded history is complete — mark final so it doesn't replay
-          // "streaming…" on open (live deltas still arrive via WS). Reconcile
-          // the full cached set so read/delivered ticks survive hydration.
-          const finalized = evs.map((e) => ({ ...e, is_final: true }));
-          return mergeServerEvents(
-            prev,
-            finalized,
-            myUsername,
-            timelineOwner,
-            timelineDevice,
-          );
-        });
+        // Loaded history is complete — mark final so it doesn't replay
+        // "streaming…" on open (live deltas still arrive via WS). Reconcile
+        // the full cached set so read/delivered ticks survive hydration.
+        const finalized = evs.map((e) => ({ ...e, is_final: true }));
+        await commitInitialTimelineRows(finalized);
+        void persistHistoryEvents(finalized).catch(() => undefined);
+        if (!mounted) return;
         setHasMore(hasMore);
         setHistoryCursor(cursor);
         setHistoryBoundaryEventId(boundaryEventId);
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
         setLoading(false);
+        finishInitialBottomPosition();
       })
       .catch((e) => {
         if (!mounted) return;
@@ -1498,19 +1886,30 @@ export function RoomView({
           toast.error(e instanceof ApiError ? e.message : String(e));
         }
         setLoading(false);
+        finishInitialBottomPosition();
       });
     return () => {
       mounted = false;
+      cancelPendingBottomScroll();
+      cancelBottomAnimation();
       clearReceiptTimer();
     };
   }, [
+    cancelBottomAnimation,
+    cancelPendingBottomScroll,
+    clearHistoryViewportAnchor,
     room.room_id,
     myUsername,
     clearReceiptTimer,
     reportHistoryFailure,
     reportHistoryHealthy,
-    timelineDevice,
+    captureHistoryViewportAnchor,
+    preserveHistoryViewportAnchor,
+    persistHistoryEvents,
+    scheduleBottomScroll,
+    setEvents,
     timelineOwner,
+    waitForTextSelectionEnd,
   ]);
 
   // The page-level worker owns retries even when the originating composer is
@@ -1546,7 +1945,7 @@ export function RoomView({
     window.addEventListener(OUTBOX_RETRY_SCHEDULED_EVENT, syncOutboxState);
     return () =>
       window.removeEventListener(OUTBOX_RETRY_SCHEDULED_EVENT, syncOutboxState);
-  }, [carbon?.carbon_id, room.room_id]);
+  }, [carbon?.carbon_id, room.room_id, setEvents]);
 
   React.useEffect(() => {
     if (loading) return;
@@ -1582,8 +1981,16 @@ export function RoomView({
       loadTimelineWindow(room.room_id)
         .then(({ events: evs }) => {
           reportHistoryHealthy();
+          void persistHistoryEvents(evs).catch(() => undefined);
           setEvents((prev) =>
-            mergeServerEvents(prev, evs, myUsername, timelineOwner, timelineDevice),
+            mergeServerEvents(
+              prev,
+              evs,
+              room.room_id,
+              myUsername,
+              timelineOwner,
+              timelineDevice,
+            ),
           );
           // §1.7 — after a (re)connect, resync the progress line from the cache
           // rather than blindly dropping it: this effect also fires on the first
@@ -1604,6 +2011,8 @@ export function RoomView({
     myUsername,
     reportHistoryFailure,
     reportHistoryHealthy,
+    persistHistoryEvents,
+    setEvents,
     timelineDevice,
     timelineOwner,
   ]);
@@ -1885,6 +2294,7 @@ export function RoomView({
         return mergeServerEvents(
           prev,
           [merged],
+          room.room_id,
           myUsername,
           timelineOwner,
           timelineDevice,
@@ -1901,7 +2311,7 @@ export function RoomView({
             }
             const incomingSummary = f.deliveries?.[event.event_id];
             const summary = incomingSummary
-              ? normalizeDeliveryObject(incomingSummary)
+              ? mergeDeliverySummaries(event.delivery, incomingSummary)!
               : normalizeDeliverySummary(
                   event.delivery?.recipient_count ?? 1,
                   Math.max(event.delivery?.delivered_count ?? 0, 1),
@@ -1987,7 +2397,7 @@ export function RoomView({
           const covered = incomingSummary != null || (cutoffIdx >= 0 && i <= cutoffIdx);
           if (covered && e.sender_handle === myUsername && e._status !== "read") {
             const summary = incomingSummary
-              ? normalizeDeliveryObject(incomingSummary)
+              ? mergeDeliverySummaries(e.delivery, incomingSummary)!
               : normalizeDeliverySummary(
                   e.delivery?.recipient_count ?? 1,
                   e.delivery?.delivered_count ?? 0,
@@ -2017,7 +2427,7 @@ export function RoomView({
         const next = previous.map((event) => {
           const incoming = f.deliveries?.[event.event_id];
           if (!incoming || event.sender_handle !== myUsername) return event;
-          const summary = normalizeDeliveryObject(incoming);
+          const summary = mergeDeliverySummaries(event.delivery, incoming)!;
           changed = true;
           return {
             ...event,
@@ -2110,11 +2520,11 @@ export function RoomView({
   }, [activeProgress]);
 
   // ----- Scroll + auto-read -----
-  // Opening a room consumes the room's current unread tail immediately. Later
-  // arrivals still require actual viewport exposure before advancing read.
+  // ChatPage owns the immediate read-on-open transition so the sidebar clears
+  // before this timeline mounts. Later arrivals still require actual viewport
+  // exposure before advancing the read boundary.
   const committedReadPositionRef = React.useRef(room.unread_boundary.last_read_stream_position);
   const pendingReadPositionRef = React.useRef(0);
-  const openedReadRoomRef = React.useRef<string | null>(null);
   const commitReadPosition = React.useCallback((
     eventId: string | null,
     streamPosition: number,
@@ -2152,13 +2562,6 @@ export function RoomView({
     if (!hasAuthoritativeEventId(target) || !Number.isSafeInteger(target.stream_position)) return;
     commitReadPosition(target.event_id, Number(target.stream_position));
   }, [commitReadPosition]);
-
-  React.useLayoutEffect(() => {
-    if (openedReadRoomRef.current === room.room_id || readOnly) return;
-    openedReadRoomRef.current = room.room_id;
-    const target = roomOpenReadTarget(room);
-    if (target) commitReadPosition(target.eventId, target.streamPosition, true);
-  }, [commitReadPosition, readOnly, room]);
 
   const markVisibleRead = React.useCallback(() => {
     if (readOnly || !hydrated) return;
@@ -2248,19 +2651,16 @@ export function RoomView({
     });
   }, []);
 
-  // A redaction can collapse a large row to a tiny tombstone. Virtuoso learns
-  // that new height on the next measurement pass; if the reader was already at
-  // the bottom, settle only after that pass so the viewport never flashes at a
-  // stale offset. Readers scrolled into history are left exactly where they are.
+  // A redaction can collapse a large row to a tiny tombstone. If the reader was
+  // already at the bottom, settle after the DOM commit. Readers scrolled into
+  // history are left exactly where they are.
   const settleTimelineAfterUnsend = React.useCallback(() => {
     if (!stickToBottomRef.current || textSelectionActiveRef.current) return;
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        if (!stickToBottomRef.current || textSelectionActiveRef.current) return;
-        virtuosoRef.current?.autoscrollToBottom();
-      });
+      if (!stickToBottomRef.current || textSelectionActiveRef.current) return;
+      scrollToBottom();
     });
-  }, []);
+  }, [scrollToBottom]);
 
   // Unsend is two-step for persisted events: clicking stages the target and
   // the confirm dialog performs backend redaction. Deleted content is never
@@ -2300,6 +2700,7 @@ export function RoomView({
             mergeServerEvents(
               prev,
               authoritative,
+              room.room_id,
               myUsername,
               timelineOwner,
               timelineDevice,
@@ -2373,17 +2774,22 @@ export function RoomView({
 
   const onReact = (ev: Event, rawEmoji: string) => {
     if (!hasAuthoritativeEventId(ev) || !myUsername) return;
-    if (ev.event_id === latestVisibleEventId) requestBottomStick();
     const emoji = normalizeReactionEmoji(rawEmoji);
     const key = reactionIntentKey(ev.event_id, emoji);
-    const desired = !ownReactionIsActive(
-      events,
+    const desired = nextOwnReactionIntent(
+      eventProjectionRef.current,
       ev.event_id,
       emoji,
       myUsername,
-      reactionOverrides[key],
+      reactionOverridesRef.current[key],
     );
-    setReactionOverrides((previous) => ({ ...previous, [key]: desired }));
+    const nextOverrides = { ...reactionOverridesRef.current, [key]: desired };
+    reactionOverridesRef.current = nextOverrides;
+    setReactionOverrides(nextOverrides);
+    // Returning to the physical tail by hand is an explicit follow gesture.
+    // Renew it before the reaction chip changes row height.
+    acquireBottomFollowAtCurrentTail();
+    keepOwnedBottomPinned();
 
     const generation = (reactionGenerationRef.current.get(key) ?? 0) + 1;
     reactionGenerationRef.current.set(key, generation);
@@ -2411,11 +2817,10 @@ export function RoomView({
           ),
         );
         if (reactionGenerationRef.current.get(key) === generation) {
-          setReactionOverrides((current) => {
-            const next = { ...current };
-            delete next[key];
-            return next;
-          });
+          const next = { ...reactionOverridesRef.current };
+          delete next[key];
+          reactionOverridesRef.current = next;
+          setReactionOverrides(next);
         }
       })
       .catch((error) => {
@@ -2423,11 +2828,10 @@ export function RoomView({
           reactionRoomRef.current !== roomId ||
           reactionGenerationRef.current.get(key) !== generation
         ) return;
-        setReactionOverrides((current) => {
-          const next = { ...current };
-          delete next[key];
-          return next;
-        });
+        const next = { ...reactionOverridesRef.current };
+        delete next[key];
+        reactionOverridesRef.current = next;
+        setReactionOverrides(next);
         toast.error(error instanceof ApiError ? error.message : String(error));
       })
       .finally(() => {
@@ -2442,7 +2846,6 @@ export function RoomView({
     if (!hasAuthoritativeEventId(ev)) return;
     setEditingEvent(null);
     updateReplyDraft(ev);
-    if (ev.event_id === latestVisibleEventId) requestBottomStick();
   };
 
   const roomIncludesSilicon = peers.some((p) => p.kind === "silicon");
@@ -2451,6 +2854,9 @@ export function RoomView({
       if (!isMyEvent(ev, myUsername)) return false;
       if (ev.redacted_at) return false;
       const local = ev as LocalEvent;
+      // A failed local row never reached the server, so there is nothing to
+      // unsend. Its recovery surface owns retry and discard instead.
+      if (local._status === "failed" || local._failure) return false;
       const isHeldOrPending = ev.event_id.startsWith("temp-") && Boolean(local._clientId);
       if (isHeldOrPending) return true;
       if (roomIncludesSilicon) return false;
@@ -2486,11 +2892,13 @@ export function RoomView({
       }
       const editedAt = new Date().toISOString();
       const snapshot = events.find((item) => item.event_id === ev.event_id);
+      const optimistic = withEditedText(snapshot ?? ev, body, editedAt);
       setEvents((prev) =>
         prev.map((item) =>
           item.event_id === ev.event_id ? withEditedText(item, body, editedAt) : item,
         ),
       );
+      onEventAccepted?.(optimistic);
       try {
         const real = await api.editEvent(ev.event_id, body, ev.edit_version ?? 0);
         setEvents((prev) =>
@@ -2504,6 +2912,7 @@ export function RoomView({
               : item,
           ),
         );
+        onEventAccepted?.(real);
       } catch (e) {
         const authoritative = authoritativeEditConflict(e, ev.event_id);
         if (authoritative) {
@@ -2512,12 +2921,14 @@ export function RoomView({
               ? { ...authoritative, _clientId: item._clientId, _status: item._status }
               : item,
           ));
+          onEventAccepted?.(authoritative);
           // Keep the replacement text in the composer, but advance the base
           // snapshot so a deliberate retry compares against the current row.
           setEditingEvent(authoritative);
           toast.error("This message changed on another device. Your edit is still here; review and save again.");
         } else if (snapshot) {
           setEvents((prev) => prev.map((item) => (item.event_id === snapshot.event_id ? snapshot : item)));
+          onEventAccepted?.(snapshot);
           toast.error(e instanceof ApiError ? e.message : String(e));
         } else {
           toast.error(e instanceof ApiError ? e.message : String(e));
@@ -2525,7 +2936,7 @@ export function RoomView({
         throw e;
       }
     },
-    [events, setEditingEvent, setEvents],
+    [events, onEventAccepted, setEditingEvent, setEvents],
   );
 
   // #17 — Forward picker. Setting `forwardingEvent` opens the dialog; the
@@ -2594,9 +3005,11 @@ export function RoomView({
     return out;
   }, [selectedEventIds, events]);
 
+  const renderedEvents = selectionEventSnapshot ?? events;
+
   // Aggregate reactions: target_event_id → { emoji → [sender_handle] }
   const reactionsByTarget = React.useMemo(() => {
-    const map = aggregateReactions(events);
+    const map = aggregateReactions(renderedEvents);
     if (myUsername) {
       for (const [key, desired] of Object.entries(reactionOverrides)) {
         const separator = key.indexOf("\u0000");
@@ -2612,14 +3025,17 @@ export function RoomView({
       }
     }
     return map;
-  }, [events, myUsername, reactionOverrides]);
+  }, [renderedEvents, myUsername, reactionOverrides]);
 
   // Visible events drop reactions (they render as chips under the target) and
   // deleted/redacted messages (hidden entirely — no "message deleted" row).
   // ALL progress events stay out of the timeline (live ones render as the
   // transient ProgressLine instead). Letting done-progress through used to
   // break the (sender, minute) run.
-  const visibleEvents = events.filter(isTimelineEvent);
+  const visibleEvents = React.useMemo(
+    () => renderedEvents.filter(isTimelineEvent),
+    [renderedEvents],
+  );
 
   const requestEditLast = () => {
     for (let i = visibleEvents.length - 1; i >= 0; i--) {
@@ -2634,9 +3050,9 @@ export function RoomView({
   // Lookup so a reply can render the message it's quoting.
   const eventById = React.useMemo(() => {
     const m = new Map<string, LocalEvent>();
-    for (const e of events) m.set(e.event_id, e);
+    for (const e of renderedEvents) m.set(e.event_id, e);
     return m;
-  }, [events]);
+  }, [renderedEvents]);
 
   React.useEffect(() => {
     if (!draftReply?.event_id) {
@@ -2707,19 +3123,20 @@ export function RoomView({
       const renderedId = renderedEventIdFor(eventId);
       const node = messageNodeRefs.current.get(renderedId);
       if (!node) return false;
-      node.scrollIntoView({ block: "center", behavior: "smooth" });
+      // A reply/search jump transfers ownership away from bottom-follow. Keep
+      // it instantaneous so subsequent reader input cannot race a browser
+      // smooth-scroll animation or a delayed second correction.
+      releaseBottomStick();
+      node.scrollIntoView({ block: "center", behavior: "auto" });
       node.focus({ preventScroll: true });
       setHighlightedEventId(renderedId);
       if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
       highlightTimerRef.current = window.setTimeout(() => {
         setHighlightedEventId((cur) => (cur === renderedId ? null : cur));
       }, 2300);
-      window.setTimeout(() => {
-        messageNodeRefs.current.get(renderedId)?.scrollIntoView({ block: "center", behavior: "smooth" });
-      }, 160);
       return true;
     },
-    [renderedEventIdFor],
+    [releaseBottomStick, renderedEventIdFor],
   );
 
   React.useEffect(() => {
@@ -2751,6 +3168,7 @@ export function RoomView({
     [search],
   );
 
+  /* eslint-disable react-hooks/immutability -- The history cursor and anchor below are callback-local primitives. React's immutability rule incorrectly taints them as the `room` prop after api.historyPage(). */
   const jumpToReplyTarget = React.useCallback(
     async (eventId: string) => {
       const loaded = eventById.get(eventId);
@@ -2772,11 +3190,11 @@ export function RoomView({
       setLoadingOlder(true);
       try {
         const loadedOldest = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
-        let cursor: string | undefined =
+        let lookupCursor: string | undefined =
           priorState?.status === "continue" && priorState.cursor
             ? priorState.cursor
             : "";
-        let anchor: string | undefined = cursor ? undefined : loadedOldest;
+        let lookupAnchor: string | undefined = lookupCursor ? undefined : loadedOldest;
         let traversal: HistoryTraversal = {
           throughEventId:
             priorState?.status === "continue"
@@ -2786,7 +3204,7 @@ export function RoomView({
           oldestEventId:
             priorState?.status === "continue"
               ? priorState.oldestEventId
-              : anchor,
+              : lookupAnchor,
         };
         let found: Event | null = null;
         const seenCursors = new Set<string>();
@@ -2794,8 +3212,8 @@ export function RoomView({
         let pages = 0;
         let recoveredExpiredCursor = false;
         let recoveredRejectedAnchor = false;
-        while ((cursor !== undefined || anchor) && pages < 15 && Date.now() < deadline) {
-          if (cursor && seenCursors.has(cursor)) {
+        while ((lookupCursor !== undefined || lookupAnchor) && pages < 15 && Date.now() < deadline) {
+          if (lookupCursor && seenCursors.has(lookupCursor)) {
             throw new SyncIntegrityError(
               "history",
               "page_invariant",
@@ -2803,15 +3221,15 @@ export function RoomView({
               { roomId: room.room_id },
             );
           }
-          if (cursor) seenCursors.add(cursor);
+          if (lookupCursor) seenCursors.add(lookupCursor);
           let page;
           try {
             page = await api.historyPage(
               room.room_id,
-              cursor ?? "",
+              lookupCursor ?? "",
               PAGE_SIZE,
               "backward",
-              cursor ? undefined : anchor,
+              lookupCursor ? undefined : lookupAnchor,
             );
           } catch (error) {
             const code =
@@ -2821,13 +3239,13 @@ export function RoomView({
                 : "";
             if (
               !recoveredRejectedAnchor &&
-              !cursor &&
-              anchor &&
+              !lookupCursor &&
+              lookupAnchor &&
               error instanceof ApiError &&
               error.status === 400
             ) {
               recoveredRejectedAnchor = true;
-              anchor = undefined;
+              lookupAnchor = undefined;
               traversal = {
                 throughEventId: undefined,
                 seenEventIds: new Set<string>(),
@@ -2843,12 +3261,12 @@ export function RoomView({
               throw error;
             }
             recoveredExpiredCursor = true;
-            cursor = "";
-            anchor = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
+            lookupCursor = "";
+            lookupAnchor = events.find((e) => !e.event_id.startsWith("temp-"))?.event_id;
             traversal = {
               throughEventId: undefined,
               seenEventIds: new Set<string>(),
-              oldestEventId: anchor,
+              oldestEventId: lookupAnchor,
             };
             seenCursors.clear();
             continue;
@@ -2859,7 +3277,7 @@ export function RoomView({
           const older = page.events;
           if (older.length === 0 && !page.has_more) {
             setHasMore(false);
-            cursor = undefined;
+            lookupCursor = undefined;
             break;
           }
           setEvents((prev) => {
@@ -2867,6 +3285,7 @@ export function RoomView({
             return mergeServerEvents(
               prev,
               finalized,
+              room.room_id,
               myUsername,
               timelineOwner,
               timelineDevice,
@@ -2876,11 +3295,11 @@ export function RoomView({
           if (found) break;
           if (!page.has_more || !page.cursor) {
             setHasMore(false);
-            cursor = undefined;
+            lookupCursor = undefined;
             break;
           }
-          cursor = page.cursor;
-          anchor = undefined;
+          lookupCursor = page.cursor;
+          lookupAnchor = undefined;
         }
         reportHistoryHealthy();
 
@@ -2894,10 +3313,10 @@ export function RoomView({
         } else {
           setReplyJumpState((prev) => ({
             ...prev,
-            [eventId]: cursor
+            [eventId]: lookupCursor
               ? {
                   status: "continue",
-                  cursor,
+                  cursor: lookupCursor,
                   throughEventId: traversal.throughEventId,
                   oldestEventId: traversal.oldestEventId,
                   message: "Still looking farther back. Click to continue.",
@@ -2930,8 +3349,10 @@ export function RoomView({
       timelineOwner,
       reportHistoryFailure,
       reportHistoryHealthy,
+      setEvents,
     ],
   );
+  /* eslint-enable react-hooks/immutability */
 
   // The studio hands off a flattened annotation set here: reply to the original
   // file message (so replies + the silicon have a clear reference) and stage the
@@ -3008,7 +3429,6 @@ export function RoomView({
         text: outgoingPreviewText(payload),
         status: "waiting",
       });
-      requestBottomStick("smooth");
       // No progress yet — we don't show anything until the message is actually
       // sent (see onAck → showReceipt).
       // Audible "sent" tone — small ascending chirp. Respects reduced-motion
@@ -3034,16 +3454,15 @@ export function RoomView({
     [
       myUsername,
       room.room_id,
-      requestBottomStick,
+      setEvents,
       timelineDevice,
       timelineOwner,
     ],
   );
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
-    requestBottomStick("smooth");
     // Sent — the sidebar's last_event will reflect it; drop the pending preview.
-    clearPendingPreview(room.room_id, clientId);
+    markPendingPreviewAccepted(room.room_id, clientId);
     let identity = bindAcceptedTimelineEvent(timelineOwner, clientId, real);
     if (!identity) {
       identity = ensureTimelineIdentitySync(
@@ -3055,6 +3474,7 @@ export function RoomView({
       identity = bindAcceptedTimelineEvent(timelineOwner, clientId, real) ?? identity;
     }
     const accepted = applyTimelineIdentity(real, identity, true) as LocalEvent;
+    onEventAccepted?.(accepted);
     appendRoomEventSnippet(room.room_id, {
       ...accepted,
       _status: "sent",
@@ -3067,6 +3487,7 @@ export function RoomView({
       mergeServerEvents(
         prev,
         [accepted],
+        room.room_id,
         myUsername,
         timelineOwner,
         timelineDevice,
@@ -3082,9 +3503,10 @@ export function RoomView({
     showReceipt,
     room.room_id,
     myUsername,
-    requestBottomStick,
+    setEvents,
     timelineDevice,
     timelineOwner,
+    onEventAccepted,
   ]);
 
   const onOptimisticUpdate = React.useCallback(
@@ -3104,14 +3526,31 @@ export function RoomView({
         ),
       );
     },
-    [room.room_id],
+    [room.room_id, setEvents],
   );
 
   const onFail = React.useCallback(
     (clientId: string, err: unknown) => {
+      const current = events.find((event) => event._clientId === clientId);
+      // A response/socket acceptance and a local request failure can race. An
+      // authoritative id always wins: do not persist, render, or preview the
+      // late failure after Glass has accepted this exact transaction.
+      if (
+        readTimelineIdentity(timelineOwner, clientId)?.eventId ||
+        (current && hasAuthoritativeEventId(current))
+      ) {
+        markPendingPreviewAccepted(room.room_id, clientId);
+        setEvents((prev) =>
+          prev.map((event) =>
+            event._clientId === clientId
+              ? { ...event, _failure: undefined, _nextAttemptAt: undefined }
+              : event,
+          ),
+        );
+        return;
+      }
       const owner = authStore.getCarbon()?.carbon_id;
       if (owner) void persistOutboxFailure(owner, clientId, err).catch(() => false);
-      const current = events.find((event) => event._clientId === clientId);
       const classified = classifySendFailure(err, {
         attempt: (current?._failure?.attempt ?? 0) + 1,
         now: Date.now(),
@@ -3129,9 +3568,14 @@ export function RoomView({
         !current ||
         statusAfterSendFailure(current._status, status, current.event_id) !== current._status;
       setEvents((prev) =>
-        prev.map((event) =>
-          event._clientId === clientId
-            ? {
+        prev.map((event) => {
+          if (event._clientId !== clientId) return event;
+          // Acceptance may have committed since the callback captured
+          // `events`; re-check inside the state update as the final guard.
+          if (hasAuthoritativeEventId(event)) {
+            return { ...event, _failure: undefined, _nextAttemptAt: undefined };
+          }
+          return {
                 ...event,
                 _status: statusAfterSendFailure(
                   event._status,
@@ -3140,9 +3584,8 @@ export function RoomView({
                 ) as MessageStatus | undefined,
                 _failure: classified.failure,
                 _nextAttemptAt: classified.failure.nextAttemptAt,
-              }
-            : event,
-        ),
+              };
+        }),
       );
       if ((status === "failed" || status === "challenge") && failureChangesVisibleState) {
         failPendingPreview(room.room_id, clientId);
@@ -3152,7 +3595,7 @@ export function RoomView({
         toast.error(sendFailureMessage(classified.failure));
       }
     },
-    [events, room.room_id],
+    [events, room.room_id, setEvents, timelineOwner],
   );
 
   // A lost response, stalled upload, dead worker, or sleeping tab must not
@@ -3203,7 +3646,7 @@ export function RoomView({
       }
     }, Math.max(0, nextDeadline - Date.now()) + 25);
     return () => window.clearTimeout(timer);
-  }, [events, room.room_id]);
+  }, [events, room.room_id, setEvents]);
 
   React.useEffect(() => {
     heldAckRef.current = onAck;
@@ -3425,7 +3868,7 @@ export function RoomView({
         }
       })();
     },
-    [room.room_id, onAck, onFail],
+    [room.room_id, onAck, onFail, setEvents],
   );
 
   const projectOutboxRevision = React.useCallback(
@@ -3464,7 +3907,7 @@ export function RoomView({
         status: row.state === "blocked" || row.state === "challenge" ? "failed" : "waiting",
       });
     },
-    [room.room_id],
+    [room.room_id, setEvents],
   );
 
   const releaseCorrection = React.useCallback(
@@ -3565,6 +4008,10 @@ export function RoomView({
             ? await discardMediaSend(owner, durableRow)
             : await discardOutbox(owner, clientId);
           if (!discarded) throw new Error("The discard could not be saved");
+          const localUrl = event.content.local_url;
+          if (typeof localUrl === "string" && localUrl.startsWith("blob:")) {
+            URL.revokeObjectURL(localUrl);
+          }
           clearPendingPreview(room.room_id, clientId);
           setEvents((current) => current.filter((item) => item._clientId !== clientId));
           return;
@@ -3653,6 +4100,7 @@ export function RoomView({
       copyEventToComposer,
       room.room_id,
       router,
+      setEvents,
       setPendingTextCorrection,
       setReplacementTarget,
     ],
@@ -3863,7 +4311,7 @@ export function RoomView({
   };
 
   // ----- Search filter -----
-  const filteredEvents = (() => {
+  const filteredEvents = React.useMemo(() => {
     // No active query (closed, or open-but-empty) → the normal loaded window.
     if (!search?.trim()) return visibleEvents;
     // Active query → server search results across the whole history, sorted
@@ -3871,7 +4319,7 @@ export function RoomView({
     return ([...(searchResults ?? [])] as LocalEvent[]).sort((a, b) =>
       a.created_at.localeCompare(b.created_at),
     );
-  })();
+  }, [search, searchResults, visibleEvents]);
 
   // Paint the durable local window immediately, then replace it with the
   // authoritative whole-history result when Glass responds.
@@ -3990,15 +4438,6 @@ export function RoomView({
       pinsByKey: pins,
     };
   }, [filteredEvents]);
-  // Freeze this anchor for the lifetime of the mounted room. Receipt refreshes
-  // may advance the live boundary, but the visual divider must not jump while
-  // the reader is paging. If the exact anchor was redacted, stream position is
-  // the durable fallback.
-  const [unreadBoundary] = React.useState(() => room.unread_boundary);
-  const unreadDividerEventId = React.useMemo(
-    () => selectUnreadDividerEventId(displayRows, unreadBoundary),
-    [displayRows, unreadBoundary],
-  );
   const cancelLatestHeld = () => {
     for (let i = visibleEvents.length - 1; i >= 0; i--) {
       const event = visibleEvents[i] as LocalEvent;
@@ -4008,8 +4447,6 @@ export function RoomView({
       return;
     }
   };
-  const latestVisibleEvent = visibleEvents[visibleEvents.length - 1] ?? null;
-  const latestVisibleEventId = latestVisibleEvent?.event_id ?? null;
   // Show the progress line whenever there's active progress for this room. We
   // no longer suppress it just because the latest visible event is from a
   // silicon: progress is cleared the moment a real message lands (both locally
@@ -4197,93 +4634,97 @@ export function RoomView({
     room.observed,
     activeAnchorId,
   ]);
+
+  const lastTimelineEventId = displayRows.length
+    ? displayRows[displayRows.length - 1].event_id
+    : null;
+  const newestMessageIsVisible = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    const node = lastTimelineEventId
+      ? messageNodeRefs.current.get(lastTimelineEventId)
+      : null;
+    if (!scroller || !node) return false;
+    const viewport = scroller.getBoundingClientRect();
+    const message = node.getBoundingClientRect();
+    return timelineTailMessageIsVisible({
+      viewportTop: viewport.top,
+      viewportBottom: viewport.bottom,
+      messageTop: message.top,
+      messageBottom: message.bottom,
+    });
+  }, [lastTimelineEventId]);
+
+  // Restore the exact event/pixel captured before a prepend. Keep the anchor
+  // alive after this first pre-paint correction: late media/preview sizing is
+  // corrected by the ResizeObserver below until the reader takes control.
   React.useLayoutEffect(() => {
-    timelineLengthRef.current = timelineItems.length;
-  }, [timelineItems.length]);
-
-  // Restore the exact event/pixel captured before a prepend. Stable keys alone
-  // are insufficient when a page boundary merges two sender groups into one
-  // virtual row, so the correction anchors to the actual event DOM node.
-  React.useLayoutEffect(() => {
-    const p = pendingPrependRef.current;
-    if (p) {
-      pendingPrependRef.current = null;
-      const index = findVirtualAnchorIndex(
-        timelineItems,
-        p.eventId,
-        (item) => item.kind === "panel"
-          ? item.events.map((event) => event.event_id)
-          : item.kind === "system"
-            ? [item.event.event_id]
-            : [],
-      );
-      if (index < 0) return;
-      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "auto" });
-      requestAnimationFrame(() => {
-        const scroller = scrollerRef.current;
-        const node = messageNodeRefs.current.get(p.eventId);
-        if (!scroller || !node) return;
-        const actual = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-        virtuosoRef.current?.scrollBy({
-          top: anchorPixelCorrection(actual, p.offset),
-          behavior: "auto",
-        });
-      });
-      return;
+    if (preserveHistoryViewportAnchor(true)) return;
+    if (shouldPinOwnedTimelineTail({
+      followingBottom: stickToBottomRef.current,
+      selectionActive: textSelectionActiveRef.current,
+    })) {
+      scrollToBottom();
     }
-    if (!textSelectionActiveRef.current && stickToBottomRef.current) {
-      virtuosoRef.current?.autoscrollToBottom();
-    }
-  }, [timelineItems]);
+  }, [preserveHistoryViewportAnchor, scrollToBottom, timelineItems]);
 
-  // Every room opens at the latest message. Repeating the snap across the first
-  // few layout passes absorbs late font/media measurement without briefly
-  // leaving the viewport stranded in the middle of the virtual list.
-  const didInitialBottomRef = React.useRef<string | null>(null);
-  React.useEffect(() => {
-    if (!hydrated || timelineItems.length === 0) return;
-    if (didInitialBottomRef.current === room.room_id) return;
-    didInitialBottomRef.current = room.room_id;
-    stickToBottomRef.current = true;
-    const jump = () => {
-      if (textSelectionActiveRef.current) return;
-      const index = timelineLengthRef.current - 1;
-      if (index >= 0) virtuosoRef.current?.scrollToIndex({ index, align: "end", behavior: "auto" });
-    };
-    const raf = requestAnimationFrame(() => requestAnimationFrame(jump));
-    const timers = [80, 250, 600].map((ms) => window.setTimeout(jump, ms));
-    return () => {
-      cancelAnimationFrame(raf);
-      timers.forEach((t) => window.clearTimeout(t));
-    };
-  }, [room.room_id, hydrated, timelineItems.length]);
-
-  // Composer/reply/attachment banners resize the timeline viewport. Preserve
-  // bottom-follow intent across those resizes; scrolling history disables it.
+  // Composer banners, fonts, and media can resize either the viewport or its
+  // contents. Preserve bottom-follow intent without timed repeat-jumps on
+  // initial load; scrolling into history disables the correction immediately.
   React.useEffect(() => {
     const scroller = scrollerRef.current;
+    const content = timelineContentRef.current;
     if (!scroller || typeof ResizeObserver === "undefined") return;
-    let height = scroller.clientHeight;
+    let viewportHeight = scroller.clientHeight;
+    let contentHeight = scroller.scrollHeight;
     const observer = new ResizeObserver(() => {
-      const nextHeight = scroller.clientHeight;
-      if (nextHeight === height) return;
-      height = nextHeight;
-      if (stickToBottomRef.current && !textSelectionActiveRef.current) {
-        requestAnimationFrame(() => scrollToBottom("auto"));
+      const nextViewportHeight = scroller.clientHeight;
+      const nextContentHeight = scroller.scrollHeight;
+      if (nextViewportHeight === viewportHeight && nextContentHeight === contentHeight) return;
+      viewportHeight = nextViewportHeight;
+      contentHeight = nextContentHeight;
+      if (preserveHistoryViewportAnchor()) {
+        const tailVisible = newestMessageIsVisible();
+        timelineTailVisibleRef.current = tailVisible;
+        setTimelineAtBottom(tailVisible);
+        return;
+      }
+      if (shouldPinOwnedTimelineTail({
+        followingBottom: stickToBottomRef.current,
+        selectionActive: textSelectionActiveRef.current,
+      })) {
+        keepOwnedBottomPinned();
+      } else {
+        const tailVisible = newestMessageIsVisible();
+        timelineTailVisibleRef.current = tailVisible;
+        setTimelineAtBottom(tailVisible);
       }
     });
     observer.observe(scroller);
-    return () => observer.disconnect();
-  }, [hydrated, room.room_id, scrollToBottom]);
+    if (content) observer.observe(content);
+    return () => {
+      cancelPendingBottomScroll();
+      observer.disconnect();
+    };
+  }, [
+    cancelPendingBottomScroll,
+    hydrated,
+    newestMessageIsVisible,
+    preserveHistoryViewportAnchor,
+    room.room_id,
+    keepOwnedBottomPinned,
+    timelineItems.length,
+  ]);
 
   const updateTimelineBottomState = React.useCallback(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 120;
-    stickToBottomRef.current = atBottom;
-    setTimelineAtBottom(atBottom);
-    if (atBottom) setUnseenBelow(0);
-  }, []);
+    // Scroll events can be generated by message/media/reaction/card geometry,
+    // browser anchoring, or our own correction. They are not evidence of user
+    // intent and therefore must never revoke bottom-follow ownership. Wheel,
+    // touch, pointer, keyboard, and selection handlers do that synchronously.
+    const tailVisible = newestMessageIsVisible();
+    timelineTailVisibleRef.current = tailVisible;
+    setTimelineAtBottom(tailVisible);
+    if (tailVisible) setUnseenBelow(0);
+  }, [newestMessageIsVisible]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -4330,7 +4771,7 @@ export function RoomView({
   );
 
   // §2.7 — load the previous page of history (the API supports a `before`
-  // cursor). Prepends older events; Virtuoso's firstItemIndex keeps the
+  // cursor). Prepends older events; the stable event/pixel snapshot keeps the
   // viewport anchored (see the prepend effect above).
   const loadOlder = React.useCallback(async () => {
     if (loadingOlderRef.current || !hasMore) return;
@@ -4339,7 +4780,11 @@ export function RoomView({
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     const requestedRoomId = room.room_id;
+    let indicatorVisibleAt = performance.now();
     try {
+      await waitForOlderHistoryIndicatorPaint();
+      indicatorVisibleAt = performance.now();
+      if (activeRoomIdRef.current !== requestedRoomId) return;
       const knownEventIds = new Set(
         events
           .filter((event) => !event.event_id.startsWith("temp-"))
@@ -4409,40 +4854,42 @@ export function RoomView({
       }
       // Snapshot scroll metrics right before the prepend so the layout effect
       // can restore the exact viewport (older messages add height ABOVE).
-      const addsTimelineRows = hasNovelHistoryRows(older, knownEventIds, isTimelineEvent);
-      const el = scrollerRef.current;
-      if (el && addsTimelineRows) {
-        const viewportTop = el.getBoundingClientRect().top;
-        const anchor = [...messageNodeRefs.current.entries()]
-          .map(([eventId, node]) => ({
-            eventId,
-            top: node.getBoundingClientRect().top,
-            bottom: node.getBoundingClientRect().bottom,
-          }))
-          .filter((item) => item.bottom > viewportTop)
-          .sort((a, b) => a.top - b.top)[0];
-        pendingPrependRef.current = anchor
-          ? { eventId: anchor.eventId, offset: anchor.top - viewportTop }
-          : null;
-      }
-      setEvents((prev) => {
-        const finalized = older.map((event) => ({ ...event, is_final: true }));
-        return mergeServerEvents(
-          prev,
-          finalized,
-          myUsername,
-          timelineOwner,
-          timelineDevice,
-        );
+      captureHistoryViewportAnchor(older);
+      // Commit the prepend and restore its saved event/pixel in one browser
+      // task. No intermediate paint can expose the absolute top of the newly
+      // taller document, even when the page came from IndexedDB or memory.
+      flushSync(() => {
+        setEvents((prev) => {
+          const finalized = older.map((event) => ({ ...event, is_final: true }));
+          return mergeServerEvents(
+            prev,
+            finalized,
+            room.room_id,
+            myUsername,
+            timelineOwner,
+            timelineDevice,
+          );
+        });
+        setHasMore(olderHasMore);
+        setHistoryCursor(olderCursor);
+        setHistoryBoundaryEventId(olderBoundaryEventId);
       });
-      setHasMore(olderHasMore);
-      setHistoryCursor(olderCursor);
-      setHistoryBoundaryEventId(olderBoundaryEventId);
+      preserveHistoryViewportAnchor(true);
       reportHistoryHealthy();
+      void persistHistoryEvents(older).catch(() => undefined);
     } catch (e) {
       reportHistoryFailure(e);
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
+      const remainingIndicatorMs = Math.max(
+        0,
+        OLDER_LOADING_MIN_MS - (performance.now() - indicatorVisibleAt),
+      );
+      if (remainingIndicatorMs > 0) {
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, remainingIndicatorMs);
+        });
+      }
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
@@ -4457,21 +4904,31 @@ export function RoomView({
     timelineOwner,
     reportHistoryFailure,
     reportHistoryHealthy,
+    captureHistoryViewportAnchor,
+    persistHistoryEvents,
+    preserveHistoryViewportAnchor,
+    setEvents,
     waitForTextSelectionEnd,
   ]);
 
-  // `rangeChanged` can fire while the initial live request is still resolving,
-  // when `hasMore` is false. If the cursor then appears while the viewport is
-  // already parked at the top, Virtuoso has no range transition left to emit.
-  // Recheck that edge whenever pagination becomes ready.
+  // If the history cursor arrives while the viewport is already parked at the
+  // top, no scroll event remains to trigger the first prepend. Recheck that
+  // edge whenever pagination becomes ready or a page finishes.
   React.useEffect(() => {
-    if (!hydrated || textSelectionActive || !hasMore || loadingOlderRef.current) return;
     const scroller = scrollerRef.current;
-    if (scroller && scroller.scrollTop <= 160) void loadOlder();
-  }, [hasMore, hydrated, historyCursor, loadOlder, textSelectionActive]);
+    if (!hydrated || !scroller) return;
+    if (shouldLoadOlderNearTimelineTop({
+      selectionActive: textSelectionActiveRef.current,
+      scrollTop: scroller.scrollTop,
+      hasMore,
+      loadingOlder: loadingOlderRef.current,
+    })) {
+      void loadOlder();
+    }
+  }, [hasMore, hydrated, historyCursor, loadOlder, loadingOlder]);
 
-  // One timeline item's content (day band + body). Shared by the virtualized
-  // main list (Virtuoso itemContent) and the non-virtualized search list.
+  // One timeline item's content (day band + body). Shared by the main history
+  // list and the bounded search-results list.
   type TimelineRow = (typeof timelineItems)[number];
   const renderTimelineItem = (item: TimelineRow): React.ReactNode => {
     const dayBand = item.dayLabel ? (
@@ -4481,17 +4938,26 @@ export function RoomView({
       return (
         <>
           {dayBand}
-          <MessageBubble
-            event={item.event}
-            isMine={isMyEvent(item.event, myUsername)}
-            myHandle={myUsername}
-            isDirect={room.kind === "direct"}
-            mentionTargets={messageMentionTargets}
-            onMentionClick={openSenderProfile}
-            roomId={room.room_id}
-            onAttachAnnotations={readOnly ? undefined : onAttachAnnotations}
-            onOpenAnnotation={readOnly ? undefined : onOpenAnnotation}
-          />
+          <div
+            ref={(node) => {
+              if (node) messageNodeRefs.current.set(item.event.event_id, node);
+              else messageNodeRefs.current.delete(item.event.event_id);
+            }}
+            data-event-id={item.event.event_id}
+            data-stream-position={item.event.stream_position}
+          >
+            <MessageBubble
+              event={item.event}
+              isMine={isMyEvent(item.event, myUsername)}
+              myHandle={myUsername}
+              isDirect={room.kind === "direct"}
+              mentionTargets={messageMentionTargets}
+              onMentionClick={openSenderProfile}
+              roomId={room.room_id}
+              onAttachAnnotations={readOnly ? undefined : onAttachAnnotations}
+              onOpenAnnotation={readOnly ? undefined : onOpenAnnotation}
+            />
+          </div>
         </>
       );
     }
@@ -4532,19 +4998,6 @@ export function RoomView({
             const authoritative = hasAuthoritativeEventId(e);
             return (
               <React.Fragment key={timelineRenderKey(e)}>
-                {renderedId === unreadDividerEventId ? (
-                  <div
-                    ref={unreadDividerNodeRef}
-                    data-unread-divider="true"
-                    role="separator"
-                    aria-label="Unread messages"
-                    className="my-3 flex items-center gap-3 text-[10px] font-medium uppercase tracking-[0.14em] text-primary"
-                  >
-                    <span className="h-px flex-1 bg-primary/50" />
-                    <span>Unread messages</span>
-                    <span className="h-px flex-1 bg-primary/50" />
-                  </div>
-                ) : null}
                 <div
                   ref={(node) => {
                     if (node) messageNodeRefs.current.set(renderedId, node);
@@ -4569,7 +5022,14 @@ export function RoomView({
                   onJumpToEvent={jumpToReplyTarget}
                   replyJumpState={e.reply_to_event_id ? replyJumpState[e.reply_to_event_id] : undefined}
                   isDirect={room.kind === "direct"}
-                  status={e._status}
+                  status={isMyEvent(e, myUsername)
+                    ? bestStatus(
+                        bestStatus(e._status, e.delivery?.state),
+                        room.last_event?.event_id === e.event_id
+                          ? room.last_event.delivery?.state
+                          : undefined,
+                      )
+                    : e._status}
                   failure={e._failure}
                   failureMessage={
                     e._heldChallengeDeviceMismatch
@@ -4630,7 +5090,7 @@ export function RoomView({
     );
   };
 
-  // The composer's "holding…" pre-send state — rendered in the Virtuoso footer.
+  // The composer's "holding…" pre-send state — rendered at the timeline tail.
   const holdingLabel =
     editingEvent?.event_id.startsWith("temp-")
       ? "holding this message until you finish editing."
@@ -4831,8 +5291,8 @@ export function RoomView({
       {/* data-private masks all message text out of PostHog session replays
           (see instrumentation-client.ts maskTextSelector). */}
       <div
+        ref={timelineInteractionRef}
         className="relative flex min-h-0 min-w-0 flex-1"
-        data-timeline-selection-active={textSelectionActive ? "true" : undefined}
       >
       {searching ? (
         // Search results are a small, bounded set — a plain scroll area is fine
@@ -4880,7 +5340,7 @@ export function RoomView({
           </div>
         </ScrollArea>
       ) : loading && filteredEvents.length === 0 ? (
-        <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">Connecting…</div>
+        <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">Loading…</div>
       ) : filteredEvents.length === 0 ? (
         <div className="flex-1 px-6 py-4">
           {/* §2b — first-contact prompt with a one-click Say Hi. */}
@@ -4896,65 +5356,112 @@ export function RoomView({
           </div>
         </div>
       ) : (
-        <Virtuoso
+        <div
           key={room.room_id}
-          ref={virtuosoRef}
-          data={timelineItems}
-          computeItemKey={(_index, item) => item.key}
-          defaultItemHeight={96}
-          increaseViewportBy={timelineViewportPadding(textSelectionActive)}
-          alignToBottom
-          initialTopMostItemIndex={{ index: "LAST", align: "end" }}
-          followOutput={(isAtBottom) => isAtBottom ? "auto" : false}
-          atBottomThreshold={120}
-          atBottomStateChange={(atBottom) => {
-            if (atBottom) {
-              stickToBottomRef.current = true;
-              setTimelineAtBottom(true);
-              setUnseenBelow(0);
+          ref={(node) => {
+            scrollerRef.current = node;
+          }}
+          data-private
+          className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [overflow-anchor:none] [overscroll-behavior-y:contain]"
+          onPointerDownCapture={(event) => {
+            if (event.button === 0 && event.target === event.currentTarget) {
+              // A pointer on the bare scroll surface includes scrollbar drags.
+              // Revoke synchronously; the later scroll event is too late to
+              // beat a resize/incoming-message bottom correction.
+              releaseBottomStick();
+              returningToBottomRef.current = true;
             }
           }}
-          rangeChanged={({ startIndex }) => {
-            if (shouldLoadOlderDuringRangeChange({
-              selectionActive: textSelectionActive,
-              startIndex,
+          onWheelCapture={(event) => {
+            clearHistoryViewportAnchor();
+            if (
+              initialBottomPendingRef.current ||
+              wheelMovesTowardTimelineHistory(event.deltaY)
+            ) {
+              releaseBottomStick();
+            } else {
+              returningToBottomRef.current = event.deltaY > 0;
+              cancelPendingBottomScroll();
+            }
+          }}
+          onTouchStartCapture={(event) => {
+            clearHistoryViewportAnchor();
+            if (initialBottomPendingRef.current) releaseBottomStick();
+            else cancelPendingBottomScroll();
+            returningToBottomRef.current = false;
+            lastTouchClientYRef.current = event.touches[0]?.clientY ?? null;
+          }}
+          onTouchMoveCapture={(event) => {
+            const currentY = event.touches[0]?.clientY;
+            const previousY = lastTouchClientYRef.current;
+            if (
+              currentY !== undefined &&
+              previousY !== null &&
+              touchMovesTowardTimelineHistory(previousY, currentY)
+            ) {
+              releaseBottomStick();
+            } else {
+              returningToBottomRef.current =
+                currentY !== undefined &&
+                previousY !== null &&
+                previousY - currentY > 1;
+              cancelPendingBottomScroll();
+            }
+            lastTouchClientYRef.current = currentY ?? null;
+          }}
+          onTouchEndCapture={() => {
+            lastTouchClientYRef.current = null;
+          }}
+          onTouchCancelCapture={() => {
+            lastTouchClientYRef.current = null;
+          }}
+          onKeyDownCapture={(event) => {
+            clearHistoryViewportAnchor();
+            if (
+              initialBottomPendingRef.current ||
+              keyMovesTowardTimelineHistory(event.key, event.shiftKey)
+            ) {
+              releaseBottomStick();
+            } else if (["ArrowDown", "PageDown", "End", " "].includes(event.key)) {
+              returningToBottomRef.current = true;
+              cancelPendingBottomScroll();
+            }
+          }}
+          onScroll={(event) => {
+            const scroller = event.currentTarget;
+            if (returningToBottomRef.current) acquireBottomFollowAtCurrentTail();
+            updateTimelineBottomState();
+            if (shouldLoadOlderNearTimelineTop({
+              selectionActive: textSelectionActiveRef.current,
+              scrollTop: scroller.scrollTop,
               hasMore,
-              loadingOlder,
+              loadingOlder: loadingOlderRef.current,
             })) {
               void loadOlder();
             }
             markVisibleRead();
           }}
-          scrollerRef={(ref) => {
-            scrollerRef.current = ref instanceof HTMLElement ? ref as HTMLDivElement : null;
-          }}
-          data-private
-          className="min-h-0 min-w-0 flex-1"
-          onScroll={() => {
-            updateTimelineBottomState();
-            markVisibleRead();
-          }}
-          components={{
-            Header: () => <ChatListHeader loadingOlder={loadingOlder} />,
-            Footer: () => (
-              <>
-                {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
-                <div className="h-4" />
-              </>
-            ),
-          }}
-          itemContent={(_index, item) => (
-            <div className="px-6" style={{ display: "flow-root" }}>
-              {renderTimelineItem(item)}
-            </div>
-          )}
-        />
+        >
+          <div ref={timelineContentRef} className="flex min-h-full flex-col justify-end">
+            {timelineItems.map((item) => (
+              <div key={item.key} className="px-6" style={{ display: "flow-root" }}>
+                {renderTimelineItem(item)}
+              </div>
+            ))}
+            {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
+            <div className="h-4 shrink-0" />
+          </div>
+        </div>
       )}
+
+      {!searching && filteredEvents.length > 0 ? (
+        <OlderHistoryLoadingOverlay loadingOlder={loadingOlder} />
+      ) : null}
 
       {/* Keep the affordance mounted so both its entrance and exit ease. */}
       <div
         className={cn(
-          "absolute bottom-4 right-6 z-10 transition-all duration-200 ease-out",
+          "timeline-page-down absolute bottom-4 right-6 z-10 transition-all duration-200 ease-out",
           !timelineAtBottom && !searching
             ? "translate-y-0 scale-100 opacity-100"
             : "pointer-events-none translate-y-2 scale-95 opacity-0",
@@ -4963,7 +5470,7 @@ export function RoomView({
         <button
           type="button"
           onClick={() => {
-            requestBottomStick("smooth");
+            activateBottomFollowFromArrow();
           }}
           aria-label={unseenBelow > 0
             ? `go to bottom, ${unseenBelow} new ${unseenBelow === 1 ? "message" : "messages"}`
@@ -5064,6 +5571,7 @@ export function RoomView({
                 ? "Update to an E2EE-capable client before sending in this private room."
                 : "This silicon is not available right now."
             }
+            onLayoutChange={keepOwnedBottomPinned}
           />
         </>
       )}
@@ -5698,6 +6206,7 @@ function formatActivities(
 function mergeServerEvents(
   prev: LocalEvent[],
   server: Event[],
+  roomId: string,
   myUsername: string | null,
   ownerId: string,
   currentDevice: string | null,
@@ -5708,18 +6217,31 @@ function mergeServerEvents(
     currentDevice,
     directClientId,
     merge: (existing, incoming) => {
-      const mine = Boolean(incoming.sender_handle && incoming.sender_handle === myUsername);
+      const revised = mergeEventRevision(existing, incoming);
+      const mine = Boolean(revised.sender_handle && revised.sender_handle === myUsername);
+      const accepted = hasAuthoritativeEventId(revised);
       return {
-        ...incoming,
+        ...revised,
+        delivery: mine
+          ? mergeDeliverySummaries(existing.delivery, revised.delivery)
+          : revised.delivery,
         _status: mine
-          ? bestStatus(existing._status, serverDeliveryStatus(incoming))
+          ? bestStatus(existing._status, serverDeliveryStatus(revised))
           : existing._status,
-        _sendTimeoutAt: existing._sendTimeoutAt,
+        // Attempt-local failures and retry timers must disappear as soon as
+        // this row has an authoritative id. Keeping them created the impossible
+        // UI state "read/delivered, but failed — sign in".
+        _failure: accepted ? undefined : existing._failure,
+        _nextAttemptAt: accepted ? undefined : existing._nextAttemptAt,
+        _heldChallengeDeviceMismatch: accepted
+          ? undefined
+          : existing._heldChallengeDeviceMismatch,
+        _sendTimeoutAt: accepted ? undefined : existing._sendTimeoutAt,
         _sendTimeoutMs: existing._sendTimeoutMs,
       };
     },
   });
-  return reconciled.map((event) => {
+  const merged = reconciled.map((event) => {
     if (
       event._status == null &&
       hasAuthoritativeEventId(event) &&
@@ -5730,4 +6252,22 @@ function mergeServerEvents(
     }
     return event;
   });
+  const acceptedClientIds = merged
+    .filter(
+      (event) =>
+        hasAuthoritativeEventId(event) &&
+        event._clientId &&
+        event.sender_handle === myUsername,
+    )
+    .map((event) => event._clientId as string);
+  if (acceptedClientIds.length > 0) {
+    // Do not update the sidebar's external store from inside React's state
+    // updater. Reconcile it immediately after this update commits instead.
+    queueMicrotask(() => {
+      for (const clientId of acceptedClientIds) {
+        markPendingPreviewAccepted(roomId, clientId);
+      }
+    });
+  }
+  return merged;
 }

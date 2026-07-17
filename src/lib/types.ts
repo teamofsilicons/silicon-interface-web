@@ -199,8 +199,13 @@ export interface RoomLastEvent {
   /** True when someone other than the sender has read up to this event —
    *  drives the sent (✓) vs read (✓✓) tick on my own latest message. */
   read?: boolean;
+  /** Authoritative aggregate for the exact tail event, exposed only when the
+   * signed-in member authored it. Sidebar and timeline consume this verbatim. */
+  delivery?: Event["delivery"];
   stream_position?: number;
   stream_writer?: string;
+  edit_version?: number;
+  edited_at?: string | null;
 }
 
 export interface UnreadBoundary {

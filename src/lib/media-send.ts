@@ -359,7 +359,12 @@ export async function prepareMediaOutboxPayload(
     onProgress,
     xhrRef,
   });
-  const transcript = spec.transcribe ? await dependencies.transcribe(mediaId) : null;
+  // Voice delivery is authoritative once its bytes reach Glass. Older durable
+  // outbox rows may still carry the retired `transcribe: true` flag; ignore it
+  // for voice so retrying a pre-release failure cannot be blocked by STT.
+  const transcript = spec.transcribe && spec.kind !== "voice"
+    ? await dependencies.transcribe(mediaId)
+    : null;
   return {
     type: entry.type ?? (spec.kind === "image" ? "m.image" : spec.kind === "voice" ? "m.voice" : "m.file"),
     content: {

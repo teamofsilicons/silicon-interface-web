@@ -11,7 +11,7 @@ async function waitFor(predicate, timeoutMs = 1_000) {
   }
 }
 
-test("remote draft conflict is preserved until an explicit choice", async () => {
+test("an active local draft silently rebases over a passive remote update", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "alice" }));
@@ -30,7 +30,7 @@ test("remote draft conflict is preserved until an explicit choice", async () => 
   }));
 
   const drafts = await import("../../src/lib/drafts.ts");
-  drafts.applyServerDraft({
+  const remote = {
     room_id: "room",
     text: "remote copy",
     attachments: [],
@@ -39,15 +39,19 @@ test("remote draft conflict is preserved until an explicit choice", async () => 
     version: 4,
     updated_at: "2026-07-11T00:00:00Z",
     origin_device: "another-device",
-  });
+  };
+  await drafts.applyServerDraft(remote);
 
   assert.equal(drafts.getDraft("room"), "local copy");
-  drafts.resolveDraftConflict("room", "remote");
-  assert.equal(drafts.getDraft("room"), "remote copy");
-  const saved = JSON.parse(storage.getItem("silicon-interface:draft-v2:carbon:alice:room"));
-  assert.equal(saved.dirty, false);
+  let saved = JSON.parse(storage.getItem("silicon-interface:draft-v2:carbon:alice:room"));
+  assert.equal(saved.dirty, true);
   assert.equal(saved.pendingRemote, null);
   assert.equal(saved.version, 4);
+  assert.equal(saved.syncBlocked, false);
+
+  await drafts.applyServerDraft({ ...remote, text: "local copy", version: 5 }, { ack: true });
+  saved = JSON.parse(storage.getItem("silicon-interface:draft-v2:carbon:alice:room"));
+  assert.equal(saved.dirty, false);
 });
 
 test("an older authored draft re-saved later never prompts over a newer local edit", async () => {
@@ -103,7 +107,7 @@ test("an older authored draft re-saved later never prompts over a newer local ed
   });
 });
 
-test("draft prompt requires two non-empty drafts and a gap greater than 30 seconds", async () => {
+test("draft reconciliation never prompts, regardless of authored-time gap", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "gap-rule" }));
@@ -157,11 +161,19 @@ test("draft prompt requires two non-empty drafts and a gap greater than 30 secon
 
   local("over-gap");
   await drafts.applyServerDraft(remote("over-gap", "remote", "2026-07-16T02:00:31Z"));
-  const prompted = JSON.parse(storage.getItem(
+  const reconciled = JSON.parse(storage.getItem(
     "silicon-interface:draft-v2:carbon:gap-rule:over-gap",
   ));
-  assert.equal(prompted.pendingRemote.text, "remote");
-  assert.equal(prompted.syncBlocked, true);
+  assert.equal(reconciled.text, "local");
+  assert.equal(reconciled.pendingRemote, null);
+  assert.equal(reconciled.syncBlocked, false);
+
+  for (const roomId of ["exact-gap", "empty-remote", "over-gap"]) {
+    await drafts.applyServerDraft(
+      { ...remote(roomId, "local", "2026-07-16T04:00:00Z"), version: 4 },
+      { ack: true },
+    );
+  }
 });
 
 test("auto-focus does not turn a clean remote clear into a conflict", async () => {
@@ -375,7 +387,7 @@ test("legacy repair discards malformed pending snapshots against a version-zero 
   }
 });
 
-test("legacy dirty repair drops stale frames, acknowledges matches, and promotes R25 equal conflicts", async () => {
+test("legacy dirty repair drops stale frames, acknowledges matches, and silently rebases equal conflicts", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "dirty-legacy" }));
@@ -431,10 +443,10 @@ test("legacy dirty repair drops stale frames, acknowledges matches, and promotes
     assert.equal(stale.syncError, undefined);
 
     const equalNonExplicit = JSON.parse(storage.getItem(`${prefix}equal-non-explicit`));
-    assert.equal(equalNonExplicit.pendingRemote.version, 20);
+    assert.equal(equalNonExplicit.pendingRemote, null);
     assert.equal(equalNonExplicit.dirty, true);
-    assert.equal(equalNonExplicit.syncBlocked, true);
-    assert.equal(equalNonExplicit.syncError, "conflict");
+    assert.equal(equalNonExplicit.syncBlocked, false);
+    assert.equal(equalNonExplicit.syncError, undefined);
 
     const equalMatching = JSON.parse(storage.getItem(`${prefix}equal-matching`));
     assert.equal(equalMatching.pendingRemote, null);
@@ -442,15 +454,16 @@ test("legacy dirty repair drops stale frames, acknowledges matches, and promotes
     assert.equal(equalMatching.syncBlocked, false);
 
     const equalExplicit = JSON.parse(storage.getItem(`${prefix}equal-explicit`));
-    assert.equal(equalExplicit.pendingRemote.version, 20);
-    assert.equal(equalExplicit.syncBlocked, true);
-    assert.equal(equalExplicit.syncError, "conflict");
+    assert.equal(equalExplicit.pendingRemote, null);
+    assert.equal(equalExplicit.dirty, true);
+    assert.equal(equalExplicit.syncBlocked, false);
+    assert.equal(equalExplicit.syncError, undefined);
   } finally {
     api.putDraft = originalPut;
   }
 });
 
-test("same-version replay after Keep this device does not reopen the conflict", async () => {
+test("same-version replay after a silent local rebase does not regress the composer", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "rebase-user" }));
@@ -485,7 +498,6 @@ test("same-version replay after Keep this device does not reopen the conflict", 
   api.putDraft = () => new Promise(() => {});
   try {
     await drafts.applyServerDraft(remote);
-    drafts.resolveDraftConflict("rebase-room", "local");
     await drafts.applyServerDraft(remote); // Initial-load / websocket replay of v4.
 
     const saved = JSON.parse(
@@ -625,6 +637,61 @@ test("an idempotent 409 acknowledges an already-saved draft without a modal", as
   }
 });
 
+test("a bodyless 409 rereads the server and resumes draft sync", async () => {
+  const storage = new MemoryStorage();
+  installBrowser(storage);
+  storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "bodyless-409-user" }));
+  const key = "silicon-interface:draft-v2:carbon:bodyless-409-user:bodyless-409-room";
+  const { api, ApiError } = await import("../../src/lib/api.ts");
+  const drafts = await import("../../src/lib/drafts.ts");
+  const originalPut = api.putDraft;
+  const originalGet = api.draft;
+  let puts = 0;
+  let gets = 0;
+  api.draft = async (roomId) => {
+    gets += 1;
+    return {
+      room_id: roomId,
+      text: "other device base",
+      attachments: [],
+      reply_to_event_id: "",
+      reply_to_snapshot: {},
+      version: 4,
+      updated_at: "2026-07-16T08:00:00Z",
+      origin_device: "other-device",
+    };
+  };
+  api.putDraft = async (roomId, payload) => {
+    puts += 1;
+    if (puts === 1) throw new ApiError(409, {}, "version conflict");
+    assert.equal(payload.base_version, 4);
+    return {
+      room_id: roomId,
+      text: payload.text,
+      attachments: payload.attachments,
+      reply_to_event_id: payload.reply_to_event_id,
+      reply_to_snapshot: {},
+      version: 5,
+      updated_at: "2026-07-16T08:00:01Z",
+      origin_device: "this-device",
+    };
+  };
+  try {
+    await drafts.setDraft("bodyless-409-room", "keep my unsent text");
+    drafts.flushDraft("bodyless-409-room");
+    await waitFor(() => puts === 2 && drafts.draftSyncStatus("bodyless-409-room").dirty === false);
+    const saved = JSON.parse(storage.getItem(key));
+    assert.equal(gets, 1);
+    assert.equal(saved.text, "keep my unsent text");
+    assert.equal(saved.version, 5);
+    assert.equal(saved.syncBlocked, false);
+    assert.equal(saved.pendingRemote, null);
+  } finally {
+    api.putDraft = originalPut;
+    api.draft = originalGet;
+  }
+});
+
 test("an already-cleared 409 completes a send clear without a conflict", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
@@ -739,7 +806,7 @@ test("lost pre-send PUT response rebases one matching 409 and clears without a m
   }
 });
 
-test("a divergent conflict arriving while clear waits for PUT prevents every DELETE attempt", async () => {
+test("a divergent draft arriving while clear waits for PUT cancels DELETE and restores remote", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "wait-race-clear" }));
@@ -787,17 +854,18 @@ test("a divergent conflict arriving while clear waits for PUT prevents every DEL
 
     const saved = JSON.parse(storage.getItem(key));
     assert.equal(deletes, 0);
-    assert.equal(saved.pendingClearAfterSend.text, "message already sent");
-    assert.equal(saved.pendingRemote.text, "new divergent remote draft");
-    assert.equal(saved.syncBlocked, true);
-    assert.equal(saved.syncError, "conflict");
+    assert.equal(saved.text, "new divergent remote draft");
+    assert.equal(saved.pendingClearAfterSend, null);
+    assert.equal(saved.pendingRemote, null);
+    assert.equal(saved.syncBlocked, false);
+    assert.equal(saved.version, 4);
   } finally {
     api.putDraft = originalPut;
     api.deleteDraft = originalDelete;
   }
 });
 
-test("post-send clear preserves a genuinely divergent current draft as a conflict", async () => {
+test("post-send clear silently restores a genuinely divergent current draft", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "divergent-clear" }));
@@ -824,13 +892,13 @@ test("post-send clear preserves a genuinely divergent current draft as a conflic
   try {
     await drafts.setDraft("divergent-room", "message that was sent");
     await drafts.clearDraftAfterSend("divergent-room");
-    await waitFor(() => drafts.draftSyncStatus("divergent-room").blocked);
+    await waitFor(() => drafts.getDraft("divergent-room") === "different unsent draft");
     const saved = JSON.parse(storage.getItem(key));
     assert.equal(deletes, 1);
-    assert.equal(saved.text, "");
-    assert.equal(saved.pendingClearAfterSend.text, "message that was sent");
-    assert.equal(saved.pendingRemote.text, "different unsent draft");
-    assert.equal(saved.syncError, "conflict");
+    assert.equal(saved.text, "different unsent draft");
+    assert.equal(saved.pendingClearAfterSend, null);
+    assert.equal(saved.pendingRemote, null);
+    assert.equal(saved.syncBlocked, false);
   } finally {
     api.deleteDraft = originalDelete;
   }
@@ -974,7 +1042,7 @@ test("only a direct DELETE acknowledgement may complete base-zero recovery with 
   }
 });
 
-test("a persisted divergent clear conflict cannot be deleted by reload, flush, or retry", async () => {
+test("a persisted divergent clear race restores remote without issuing DELETE", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "clear-conflict-reload" }));
@@ -1018,16 +1086,17 @@ test("a persisted divergent clear conflict cannot be deleted by reload, flush, o
     throw new Error("must not delete before explicit choice");
   };
   try {
-    assert.equal(drafts.getDraft("clear-conflict-room"), "");
+    assert.equal(drafts.getDraft("clear-conflict-room"), "different remote draft");
     drafts.flushDraft("clear-conflict-room");
     drafts.retryDraftSync("clear-conflict-room");
     await new Promise((resolve) => setTimeout(resolve, 30));
     const saved = JSON.parse(storage.getItem(key));
     assert.equal(deletes, 0);
-    assert.equal(saved.pendingClearAfterSend.text, "message already sent");
-    assert.equal(saved.pendingRemote.text, "different remote draft");
-    assert.equal(saved.syncBlocked, true);
-    assert.equal(saved.syncError, "conflict");
+    assert.equal(saved.text, "different remote draft");
+    assert.equal(saved.pendingClearAfterSend, null);
+    assert.equal(saved.pendingRemote, null);
+    assert.equal(saved.syncBlocked, false);
+    assert.equal(saved.syncError, undefined);
   } finally {
     api.deleteDraft = originalDelete;
   }
@@ -1062,6 +1131,18 @@ test("a transient DELETE retries automatically and then saves a newer local edit
     };
   };
   api.putDraft = async (roomId, payload) => {
+    if (roomId !== "clear-retry-room") {
+      return {
+        room_id: roomId,
+        text: payload.text,
+        attachments: payload.attachments,
+        reply_to_event_id: payload.reply_to_event_id,
+        reply_to_snapshot: {},
+        version: payload.base_version + 1,
+        updated_at: "2026-07-15T00:12:00Z",
+        origin_device: "this-device",
+      };
+    }
     puts += 1;
     assert.equal(payload.text, "next local edit");
     assert.equal(payload.base_version, 1);
@@ -1236,7 +1317,7 @@ test("recovery rebases to a matching PUT and cannot be completed by older frames
   }
 });
 
-test("an authoritative recovery clear supersedes an older divergent barrier and saves the next edit", async () => {
+test("an authoritative recovery clear supersedes an older divergent barrier and auto-saves the next edit", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "superseded-clear-conflict" }));
@@ -1276,6 +1357,18 @@ test("an authoritative recovery clear supersedes an older divergent barrier and 
   const originalPut = api.putDraft;
   let puts = 0;
   api.putDraft = async (roomId, payload) => {
+    if (roomId !== "superseded-room") {
+      return {
+        room_id: roomId,
+        text: payload.text,
+        attachments: payload.attachments,
+        reply_to_event_id: payload.reply_to_event_id,
+        reply_to_snapshot: {},
+        version: payload.base_version + 1,
+        updated_at: "2026-07-15T00:17:00Z",
+        origin_device: "this-device",
+      };
+    }
     puts += 1;
     assert.equal(payload.text, "new local edit");
     assert.equal(payload.base_version, 6);
@@ -1302,15 +1395,15 @@ test("an authoritative recovery clear supersedes an older divergent barrier and 
       cleared_at: "2026-07-15T00:16:00Z",
       origin_device: "another-device",
     });
+    await waitFor(() => puts === 1 && drafts.draftSyncStatus("superseded-room").dirty === false);
     let saved = JSON.parse(storage.getItem(key));
     assert.equal(saved.pendingClearAfterSend, null);
     assert.equal(saved.pendingRemote, null);
     assert.equal(saved.text, "new local edit");
-    assert.equal(saved.dirty, true);
+    assert.equal(saved.dirty, false);
     assert.equal(saved.syncBlocked, false);
 
     drafts.flushDraft("superseded-room");
-    await waitFor(() => puts === 1 && drafts.draftSyncStatus("superseded-room").dirty === false);
     saved = JSON.parse(storage.getItem(key));
     assert.equal(saved.version, 7);
     assert.equal(saved.text, "new local edit");
@@ -1319,7 +1412,7 @@ test("an authoritative recovery clear supersedes an older divergent barrier and 
   }
 });
 
-test("a late save acknowledgement cannot erase a newer remote conflict", async () => {
+test("a late save acknowledgement cannot erase a silently rebased local draft", async () => {
   const storage = new MemoryStorage();
   installBrowser(storage);
   storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "late-ack-user" }));
@@ -1328,18 +1421,36 @@ test("a late save acknowledgement cannot erase a newer remote conflict", async (
   const drafts = await import("../../src/lib/drafts.ts");
   const originalPut = api.putDraft;
   let releasePut;
-  api.putDraft = (roomId, payload) => new Promise((resolve) => {
-    releasePut = () => resolve({
+  let calls = 0;
+  api.putDraft = (roomId, payload) => {
+    if (roomId !== "late-ack-room") {
+      return Promise.resolve({
+        room_id: roomId,
+        text: payload.text,
+        attachments: payload.attachments,
+        reply_to_event_id: payload.reply_to_event_id,
+        reply_to_snapshot: {},
+        version: payload.base_version + 1,
+        updated_at: "2026-07-15T00:00:00Z",
+        origin_device: "this-device",
+      });
+    }
+    calls += 1;
+    const response = {
       room_id: roomId,
       text: payload.text,
       attachments: payload.attachments,
       reply_to_event_id: payload.reply_to_event_id,
       reply_to_snapshot: {},
-      version: 4,
+      version: calls === 1 ? 4 : 6,
       updated_at: "2026-07-15T00:00:00Z",
       origin_device: "this-device",
+    };
+    if (calls > 1) return Promise.resolve(response);
+    return new Promise((resolve) => {
+      releasePut = () => resolve(response);
     });
-  });
+  };
   try {
     storage.setItem(key, JSON.stringify({
       room_id: "late-ack-room",
@@ -1367,12 +1478,14 @@ test("a late save acknowledgement cannot erase a newer remote conflict", async (
       origin_device: "another-device",
     });
     releasePut();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitFor(() => drafts.draftSyncStatus("late-ack-room").dirty === false);
     const saved = JSON.parse(storage.getItem(key));
-    assert.equal(saved.version, 5);
-    assert.equal(saved.pendingRemote.version, 5);
-    assert.equal(saved.syncBlocked, true);
-    assert.equal(saved.syncError, "conflict");
+    assert.equal(calls, 2);
+    assert.equal(saved.text, "local edit");
+    assert.equal(saved.version, 6);
+    assert.equal(saved.pendingRemote, null);
+    assert.equal(saved.syncBlocked, false);
+    assert.equal(saved.syncError, undefined);
   } finally {
     api.putDraft = originalPut;
   }
@@ -1400,6 +1513,18 @@ test("PUT websocket-before-HTTP acknowledgement rebases a newer local edit", asy
     origin_device: "this-device",
   };
   api.putDraft = async (roomId, payload) => {
+    if (roomId !== "put-ws-room") {
+      return {
+        room_id: roomId,
+        text: payload.text,
+        attachments: payload.attachments,
+        reply_to_event_id: payload.reply_to_event_id,
+        reply_to_snapshot: {},
+        version: payload.base_version + 1,
+        updated_at: "2026-07-15T00:10:00Z",
+        origin_device: "this-device",
+      };
+    }
     calls += 1;
     if (calls === 1) {
       return new Promise((resolve) => {
@@ -1487,14 +1612,79 @@ test("a persisted same-device echo is repaired without reopening a conflict", as
   // later test's API stub.
   await drafts.applyServerDraft({
     room_id: "same-device-repair-room",
-    text: "a genuine remote edit",
+    text: "newer text still being typed",
     attachments: [],
     reply_to_event_id: "",
     reply_to_snapshot: {},
     version: 4,
     updated_at: "2026-07-15T00:02:00Z",
     origin_device: "another-device",
-  });
+  }, { ack: true });
+});
+
+test("a stale cloud draft cannot resurrect after a newer local clear", async () => {
+  const storage = new MemoryStorage();
+  installBrowser(storage);
+  storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: "stale-draft-clear" }));
+  const roomId = "stale-draft-room";
+  const key = `silicon-interface:draft-v2:carbon:stale-draft-clear:${roomId}`;
+  storage.setItem(key, JSON.stringify({
+    room_id: roomId,
+    text: "",
+    attachments: [],
+    reply_to_event_id: "",
+    reply_to_snapshot: {},
+    version: 7,
+    updated_at: "2026-07-16T23:20:00.000Z",
+    content_updated_at: "",
+    dirty: false,
+    lastLocalEditAt: Date.parse("2026-07-16T23:30:00.000Z"),
+    localClearedAt: Date.parse("2026-07-16T23:30:00.000Z"),
+    lastServerSyncAt: Date.parse("2026-07-16T23:20:00.000Z"),
+  }));
+  const { api } = await import("../../src/lib/api.ts");
+  const drafts = await import("../../src/lib/drafts.ts");
+  const originalDelete = api.deleteDraft;
+  let deletes = 0;
+  api.deleteDraft = async (requestedRoomId, payload) => {
+    deletes += 1;
+    assert.equal(requestedRoomId, roomId);
+    assert.equal(payload.base_version, 8);
+    return {
+      room_id: roomId,
+      text: "",
+      attachments: [],
+      reply_to_event_id: "",
+      reply_to_snapshot: {},
+      version: 9,
+      updated_at: "2026-07-16T23:31:00.000Z",
+      content_updated_at: "",
+      cleared_at: "2026-07-16T23:31:00.000Z",
+      origin_device: "this-device",
+    };
+  };
+  try {
+    await drafts.applyServerDraft({
+      room_id: roomId,
+      text: ":beer",
+      attachments: [],
+      reply_to_event_id: "",
+      reply_to_snapshot: {},
+      version: 8,
+      updated_at: "2026-07-16T23:29:30.000Z",
+      content_updated_at: "2026-07-16T23:25:00.000Z",
+      origin_device: "older-tab",
+    });
+    await waitFor(() => deletes === 1 && drafts.draftSyncStatus(roomId).dirty === false);
+    const saved = JSON.parse(storage.getItem(key));
+    assert.equal(drafts.getDraft(roomId), "");
+    assert.equal(saved.pendingRemote, null);
+    assert.equal(saved.pendingClearAfterSend, null);
+    assert.equal(saved.version, 9);
+    assert.equal(saved.syncBlocked, false);
+  } finally {
+    api.deleteDraft = originalDelete;
+  }
 });
 
 test("DELETE websocket-before-HTTP acknowledgement preserves and saves the next edit", async () => {
@@ -1523,6 +1713,18 @@ test("DELETE websocket-before-HTTP acknowledgement preserves and saves the next 
     releaseDelete = () => resolve(clearAck);
   });
   api.putDraft = async (roomId, payload) => {
+    if (roomId !== "delete-ws-room") {
+      return {
+        room_id: roomId,
+        text: payload.text,
+        attachments: payload.attachments,
+        reply_to_event_id: payload.reply_to_event_id,
+        reply_to_snapshot: {},
+        version: payload.base_version + 1,
+        updated_at: "2026-07-15T00:12:00Z",
+        origin_device: "this-device",
+      };
+    }
     putCalls += 1;
     assert.equal(payload.text, "next edit");
     assert.equal(payload.base_version, 1);

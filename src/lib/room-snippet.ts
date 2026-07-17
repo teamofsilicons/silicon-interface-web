@@ -1,5 +1,6 @@
 import type { Event } from "./types";
 import type { TimelineEvent } from "./timeline-identity";
+import { mergeEventRevision } from "./event-revision";
 
 /**
  * A small per-room cache of the most recent events, in localStorage, so a
@@ -105,18 +106,19 @@ export function appendRoomEventSnippet(roomId: string, event: Event): void {
   if (idx >= 0) {
     const local = existing[idx] as TimelineEvent;
     const authoritativeAt = (event as TimelineEvent)._authoritativeCreatedAt ?? event.created_at;
+    const revision = mergeEventRevision(local, event as TimelineEvent);
     const reconciled: TimelineEvent = {
-      ...event,
-      _localKey: local._localKey ?? (event as TimelineEvent)._localKey,
-      _localSequence: local._localSequence ?? (event as TimelineEvent)._localSequence,
-      _originDevice: local._originDevice ?? (event as TimelineEvent)._originDevice,
-      _localCreatedAt: local._localCreatedAt ?? (event as TimelineEvent)._localCreatedAt,
+      ...revision,
+      _localKey: local._localKey ?? revision._localKey,
+      _localSequence: local._localSequence ?? revision._localSequence,
+      _originDevice: local._originDevice ?? revision._originDevice,
+      _localCreatedAt: local._localCreatedAt ?? revision._localCreatedAt,
       _authoritativeCreatedAt: authoritativeAt,
       _clientId: local._clientId ?? clientId ?? undefined,
       created_at:
         local._localCreatedAt ??
-        (event as TimelineEvent)._localCreatedAt ??
-        event.created_at,
+        revision._localCreatedAt ??
+        revision.created_at,
     };
     const next = [...existing];
     next[idx] = reconciled;

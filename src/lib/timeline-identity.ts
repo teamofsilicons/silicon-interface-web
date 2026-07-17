@@ -371,7 +371,12 @@ export function decorateAuthoritativeTimelineEvent<T extends Event>(
       ? event.transaction_id
       : null;
   if (!transactionId) return event as T & TimelineEvent;
-  const identity = readTimelineIdentity(ownerId, transactionId);
+  // A device-scoped transaction id is authoritative acceptance. Persist the
+  // server event binding immediately so reload/outbox recovery cannot later
+  // reinterpret this already-accepted send as a local failure.
+  const identity =
+    bindAcceptedTimelineEvent(ownerId, transactionId, event) ??
+    readTimelineIdentity(ownerId, transactionId);
   return identity ? applyTimelineIdentity(event, identity, true) : (event as T & TimelineEvent);
 }
 
@@ -414,11 +419,30 @@ function compareTimelineOrder(left: TimelineEvent, right: TimelineEvent): number
     const rightKey = right._localKey ?? right.event_id;
     return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
   }
-  // Glass' event_id is a monotonic ULID and is the authority used by history
-  // pages and room.last_event. Once both rows are accepted, keep the same
-  // order here even if client clocks or preserved optimistic timestamps differ.
+  // The numeric stream position is Glass' cross-writer commit authority. ULIDs
+  // are monotonic only within one generator, so two web workers accepting in
+  // the same millisecond can produce lexical IDs in the opposite order. That
+  // used to insert forwarded/live events into the middle of the conversation.
   const leftAccepted = Boolean(left.event_id && !left.event_id.startsWith("temp-"));
   const rightAccepted = Boolean(right.event_id && !right.event_id.startsWith("temp-"));
+  // stream_position advances for edits/redactions. accepted_at never does, so
+  // an old message mutation cannot move its row or disturb scroll anchoring.
+  if (leftAccepted && rightAccepted && left.accepted_at && right.accepted_at) {
+    const acceptedOrder = left.accepted_at.localeCompare(right.accepted_at);
+    if (acceptedOrder !== 0) return acceptedOrder;
+    if (left.event_id !== right.event_id) return left.event_id < right.event_id ? -1 : 1;
+  }
+  if (
+    leftAccepted &&
+    rightAccepted &&
+    Number.isSafeInteger(left.stream_position) &&
+    Number.isSafeInteger(right.stream_position) &&
+    left.stream_position !== right.stream_position
+  ) {
+    return Number(left.stream_position) - Number(right.stream_position);
+  }
+  // Legacy cached rows may predate stream positions. Keep their established
+  // server ULID order rather than allowing skewed client clocks to reshuffle.
   if (leftAccepted && rightAccepted && left.event_id !== right.event_id) {
     return left.event_id < right.event_id ? -1 : 1;
   }

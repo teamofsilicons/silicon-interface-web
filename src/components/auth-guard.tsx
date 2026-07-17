@@ -12,6 +12,7 @@ import {
 } from "@/lib/session-bootstrap";
 
 const RESTORE_RETRY_MS = 1_500;
+const RESTORE_RETRY_MAX_MS = 60_000;
 const ANONYMOUS_CONFIRM_MS = 500;
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -22,11 +23,16 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     let retryTimer: number | null = null;
     let running = false;
     let anonymousConfirmations = 0;
+    let retryDelay = RESTORE_RETRY_MS;
 
     const schedule = (delay: number) => {
       if (!alive) return;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       retryTimer = window.setTimeout(() => void boot(), delay);
+    };
+    const scheduleRetry = () => {
+      schedule(retryDelay);
+      retryDelay = Math.min(retryDelay * 2, RESTORE_RETRY_MAX_MS);
     };
     const restoreAuthority = async (): Promise<WebSessionRestoreState> => {
       if (authStore.getAccess() || authStore.getSiliconKey()) return "restored";
@@ -38,6 +44,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       try {
         const state = await restoreAuthority();
         if (!alive) return;
+        if (state === "restored") retryDelay = RESTORE_RETRY_MS;
         anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
         const decision = sessionBootDecision(
           state,
@@ -45,6 +52,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           anonymousConfirmations,
         );
         if (decision === "login") {
+          authStore.clear();
           router.replace("/auth/login");
           return;
         }
@@ -54,7 +62,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         }
         if (decision === "retry" || decision === "enter-and-retry") {
           if (decision === "enter-and-retry") setOk(true);
-          schedule(RESTORE_RETRY_MS);
+          scheduleRetry();
           return;
         }
 
@@ -64,20 +72,30 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           } catch (error) {
             const rejected =
               error instanceof ApiError &&
-              (error.status === 400 || error.status === 401 || error.status === 403);
-            if (rejected) authStore.expireAccess();
+              error.status === 401;
+            if (rejected) {
+              // `api.me()` has already attempted one renewable-cookie refresh.
+              // A second 401 is authoritative invalid-session evidence.
+              authStore.clear();
+              router.replace("/auth/login");
+              return;
+            }
             if (authStore.getCarbon()) setOk(true);
-            schedule(rejected ? ANONYMOUS_CONFIRM_MS : RESTORE_RETRY_MS);
+            scheduleRetry();
             return;
           }
         }
-        await ensureDeviceRegistration().catch(() => false);
-        await navigator.storage?.persist?.().catch(() => false);
+        // Token validity is the entry gate. Installation registration and
+        // durable-storage permission are important follow-up work, but neither
+        // should hold a valid returning user behind the boot screen on a slow
+        // network. Both operations are idempotent and continue in background.
         if (alive) setOk(true);
+        void ensureDeviceRegistration().catch(() => false);
+        void navigator.storage?.persist?.().catch(() => false);
       } catch {
         // Fetch/CORS/runtime failures are availability failures, not logout.
         if (authStore.getCarbon()) setOk(true);
-        schedule(RESTORE_RETRY_MS);
+        scheduleRetry();
       } finally {
         running = false;
       }
@@ -87,6 +105,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     // session until the guard happens to remount. Registration is idempotent
     // and coalesced, so every online transition is a safe retry point.
     const onOnline = () => {
+      retryDelay = RESTORE_RETRY_MS;
       schedule(0);
     };
     window.addEventListener("online", onOnline);

@@ -313,6 +313,49 @@ test("prepared media is deterministic and cleanup waits for a durable ack", asyn
   assert.equal(await readMediaUpload(`carbon:${owner}`, entry.clientId), null);
 });
 
+test("a legacy failed voice retry never waits for transcription", async () => {
+  await deleteDatabase("silicon-interface-media-outbox");
+  installBrowser();
+  const owner = "legacy-voice-retry-owner";
+  const blob = new Blob(["encoded voice"], { type: "audio/webm" });
+  const entry = await stageMediaSendIntent({
+    outboxOwnerId: owner,
+    mediaOwnerId: `carbon:${owner}`,
+    roomId: "voice-room",
+    clientId: "legacy-voice-client",
+    blob,
+    kind: "voice",
+    type: "m.voice",
+    filename: "voice.webm",
+    mime: "audio/webm",
+    optimisticContent: { duration_ms: 1_000 },
+    eventContent: { duration_ms: 1_000 },
+    completionMeta: { duration_ms: 1_000 },
+    transcribe: true,
+  });
+  let transcriptionCalls = 0;
+  const payload = await prepareMediaOutboxPayload(owner, entry, {
+    ensure: async () => entry,
+    read: readMediaUpload,
+    upload: async () => "voice-media-id",
+    transcribe: async () => {
+      transcriptionCalls += 1;
+      throw new Error("retired STT gate must not run");
+    },
+  });
+
+  assert.equal(transcriptionCalls, 0);
+  assert.deepEqual(payload, {
+    type: "m.voice",
+    content: {
+      duration_ms: 1_000,
+      media_id: "voice-media-id",
+      mime: "audio/webm",
+      filename: "voice.webm",
+    },
+  });
+});
+
 test("cleanup marker failure retains the idempotent outbox and all source bytes", async () => {
   installBrowser();
   const owner = "media-marker-failure-owner";

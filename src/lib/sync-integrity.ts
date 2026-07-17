@@ -722,6 +722,7 @@ export function validateRoomListProjection(value: unknown, lastEvent: Room["last
         ? Number(draft.version) > 0 &&
           Number.isFinite(Date.parse(draft.updated_at as string)) &&
           (draft.content_updated_at === undefined ||
+            draft.content_updated_at === "" ||
             Number.isFinite(Date.parse(draft.content_updated_at as string)))
         : draft.version === 0 && draft.updated_at === "" &&
           (draft.content_updated_at === undefined || draft.content_updated_at === "")),

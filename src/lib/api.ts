@@ -6,6 +6,7 @@ import { outboxTraceparent } from "./outbox";
 import { newTraceparent, validTraceparent } from "./trace-context";
 import {
   classifySessionRestoreFailure,
+  compatibilityRestoreAllowsEntry,
   type WebSessionRestoreState,
 } from "./session-bootstrap";
 import {
@@ -205,6 +206,7 @@ async function call<T>(
   opts: {
     auth?: boolean;
     _retried?: boolean;
+    _staleTokenRetried?: boolean;
     signal?: AbortSignal;
     traceparent?: string;
     includeDeviceId?: boolean;
@@ -220,9 +222,10 @@ async function call<T>(
   if (body !== undefined && !(body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
+  let usedAccess: string | null = null;
   if (opts.auth !== false) {
-    const tok = authStore.getAccess();
-    if (tok) headers["Authorization"] = `Bearer ${tok}`;
+    usedAccess = authStore.getAccess();
+    if (usedAccess) headers["Authorization"] = `Bearer ${usedAccess}`;
     const silKey = authStore.getSiliconKey();
     if (silKey) headers["X-Silicon-Key"] = silKey;
     const boundDeviceId = opts.includeDeviceId === false ? null : authStore.getBoundDeviceId();
@@ -244,12 +247,29 @@ async function call<T>(
   if (
     resp.status === 401 &&
     opts.auth !== false &&
-    !opts._retried &&
     !authStore.getSiliconKey()
   ) {
-    const refreshState = await tryRefresh();
-    if (refreshState === "restored") {
-      return call<T>(method, path, body, { ...opts, _retried: true, traceparent });
+    const currentAccess = authStore.getAccess();
+    // A concurrent request may have already renewed the session while this
+    // request (sent with the previous access token) was still in flight. Replay
+    // with that newer token before rotating the shared refresh cookie again.
+    if (
+      !opts._staleTokenRetried &&
+      usedAccess &&
+      currentAccess &&
+      currentAccess !== usedAccess
+    ) {
+      return call<T>(method, path, body, {
+        ...opts,
+        _staleTokenRetried: true,
+        traceparent,
+      });
+    }
+    if (!opts._retried) {
+      const refreshState = await tryRefresh();
+      if (refreshState === "restored") {
+        return call<T>(method, path, body, { ...opts, _retried: true, traceparent });
+      }
     }
   }
   const ct = resp.headers.get("content-type") || "";
@@ -271,7 +291,11 @@ async function call<T>(
   return parsed as T;
 }
 
-async function callBlob(path: string, retried = false): Promise<Blob> {
+async function callBlob(
+  path: string,
+  retried = false,
+  staleTokenRetried = false,
+): Promise<Blob> {
   const headers: Record<string, string> = {
     "X-Chat-Protocol": "1",
     "X-Silicon-Web-Session": "1",
@@ -284,6 +308,10 @@ async function callBlob(path: string, retried = false): Promise<Blob> {
   if (boundDeviceId) headers["X-Device-ID"] = boundDeviceId;
   const resp = await fetch(`${env.apiBase}${path}`, { headers, credentials: "include" });
   if (resp.status === 401 && !retried && tok) {
+    const currentAccess = authStore.getAccess();
+    if (!staleTokenRetried && currentAccess && currentAccess !== tok) {
+      return callBlob(path, false, true);
+    }
     const refreshState = await tryRefresh();
     if (refreshState === "restored") return callBlob(path, true);
   }
@@ -427,7 +455,7 @@ export const api = {
   // transient-failure access; only an authoritative anonymous result is false.
   restoreWebSession: async () => {
     const state = await tryRefresh();
-    return state === "restored" || (state === "unavailable" && Boolean(authStore.getCarbon()));
+    return compatibilityRestoreAllowsEntry(state, Boolean(authStore.getCarbon()));
   },
 
   // -------- profile --------

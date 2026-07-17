@@ -220,7 +220,7 @@ export function PaymentBanner() {
             ? "warn"
             : "info";
 
-  const { title, line } = copy(identity.name, d, daysToPause, amount, paused);
+  const timing = paymentTimingCopy(d, daysToPause, paused);
   const multiple = rows.length > 1;
 
   return (
@@ -228,7 +228,7 @@ export function PaymentBanner() {
       role="alert"
       className={cn(
         // px-6 + 36px mark to line up with the folder / chat rows below.
-        "flex gap-3 border-b py-3 pl-6 pr-4",
+        "flex items-center gap-3 border-b py-4 pl-6 pr-4",
         tier === "critical" && "bg-destructive text-white",
         tier === "urgent" && "bg-warning/60 text-foreground",
         tier === "warn" && "bg-warning/25 text-foreground",
@@ -241,34 +241,38 @@ export function PaymentBanner() {
           src={identity.logo_url}
           size={36}
           family="team"
-          className={cn("mt-0.5 h-9 w-9 shrink-0 border-0", tier === "critical" ? "bg-white/15" : "bg-muted")}
+          className={cn("h-9 w-9 shrink-0 border-0", tier === "critical" ? "bg-white/15" : "bg-muted")}
         />
       ) : (
         <span
           aria-hidden
-          className={cn("mt-0.5 h-9 w-9 shrink-0 animate-pulse", tier === "critical" ? "bg-white/15" : "bg-muted")}
+          className={cn("h-9 w-9 shrink-0 animate-pulse", tier === "critical" ? "bg-white/15" : "bg-muted")}
         />
       )}
       <div className="min-w-0 flex-1">
         <div className={cn("truncate text-sm", tier === "info" ? "font-medium" : "font-semibold")}>
-          {title}
+          Payment due for {identity.name}
         </div>
         <div className={cn("mt-0.5 truncate text-xs", tier === "critical" ? "text-white/85" : "text-muted-foreground")}>
-          {line}
+          {timing}
         </div>
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 min-w-0 truncate text-base font-semibold tracking-tight tabular-nums">
+          {amount}
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-col items-center justify-center">
           <Button
             size="sm"
             onClick={() => payNow(r)}
             className={cn(
-              "h-8 px-4 text-xs",
+              "h-9 shrink-0 px-4 text-xs",
               tier === "critical" && "bg-white text-destructive hover:bg-white/90",
             )}
           >
-            Pay now
+            Pay Now
           </Button>
-          {multiple && (
-            <div className="flex items-center gap-0.5">
+        {multiple && (
+            <div className="mt-1 flex items-center justify-center gap-0.5">
               <button
                 type="button"
                 aria-label="previous notification"
@@ -289,57 +293,24 @@ export function PaymentBanner() {
                 <CaretRight className="h-4 w-4" weight="bold" />
               </button>
             </div>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );
 }
 
-function copy(
-  team: string,
+function paymentTimingCopy(
   d: number | null,
   daysToPause: number | null,
-  amount: string,
   paused: boolean,
-): { title: string; line: string } {
+): string {
   const plural = (n: number) => (n === 1 ? "" : "s");
-  if (paused) {
-    return {
-      title: `${team} — services paused`,
-      line: `${amount} overdue. Pay now to bring your silicons back online.`,
-    };
-  }
+  if (paused) return "Services paused · Pay to bring your silicons back online";
   if (d !== null && d < 0) {
-    // Past the due date, still inside the grace window.
-    return {
-      title: `${team} — payment overdue`,
-      line:
-        daysToPause !== null && daysToPause >= 0
-          ? `${amount} overdue · silicons stop working in ${daysToPause} day${plural(daysToPause)} if unpaid.`
-          : `${amount} overdue · silicons will stop working if unpaid.`,
-    };
+    return daysToPause !== null && daysToPause >= 0
+      ? `Overdue · ${daysToPause} day${plural(daysToPause)} until services pause`
+      : "Payment overdue";
   }
-  if (d === 0) {
-    return {
-      title: `${team} — Last Day to pay`,
-      line: `${amount} due today · silicons will stop working if this isn't paid.`,
-    };
-  }
-  if (d !== null && d <= 2) {
-    return {
-      title: `Payment due for the month — ${team}`,
-      line: `Only ${d} day${plural(d)} left · ${amount} · silicons will stop working very soon if unpaid.`,
-    };
-  }
-  if (d !== null && d <= 7) {
-    return {
-      title: `Payment due for the month — ${team}`,
-      line: `${d} days remaining · ${amount} · silicons will stop working if this isn't paid.`,
-    };
-  }
-  return {
-    title: `Payment due for the month — ${team}`,
-    line: d !== null ? `${d} days remaining · ${amount}` : `${amount} due soon`,
-  };
+  if (d === 0) return "Due today";
+  return d !== null ? `${d} day${plural(d)} remaining` : "Due soon";
 }

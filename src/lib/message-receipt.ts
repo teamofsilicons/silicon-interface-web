@@ -16,6 +16,31 @@ export type MessageReceiptPresentation = {
   label: string;
 };
 
+const RECEIPT_STATUS_RANK: Record<MessageReceiptStatus, number> = {
+  failed: -1,
+  pending: 0,
+  resolving: 0,
+  retry_wait: 0,
+  retrying: 0,
+  challenge: 0,
+  sent: 1,
+  partially_delivered: 2,
+  delivered: 3,
+  partially_read: 4,
+  read: 5,
+};
+
+export function strongestMessageReceiptStatus(
+  current: MessageReceiptStatus | undefined,
+  incoming: MessageReceiptStatus | undefined,
+): MessageReceiptStatus | undefined {
+  if (current == null) return incoming;
+  if (incoming == null) return current;
+  return RECEIPT_STATUS_RANK[current] >= RECEIPT_STATUS_RANK[incoming]
+    ? current
+    : incoming;
+}
+
 export type ReadReceiptCoverage = {
   event_id: string;
   read_stream_position: number;
@@ -69,7 +94,7 @@ export function messageReceiptPresentation(
     return { visual: "delivered", label: "delivered · read by some" };
   }
   if (status === "partially_delivered") {
-    return { visual: "waiting", label: "waiting · delivered to some" };
+    return { visual: "delivered", label: "delivered to some" };
   }
   return { visual: "waiting", label: "waiting" };
 }

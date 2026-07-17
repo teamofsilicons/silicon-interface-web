@@ -123,4 +123,3 @@ function runAsIgnoreCommand() {
 const isMain = process.argv[1]
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) runAsIgnoreCommand();
-

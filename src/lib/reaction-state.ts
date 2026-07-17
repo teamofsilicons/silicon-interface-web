@@ -45,6 +45,25 @@ export function ownReactionIsActive(
   );
 }
 
+/** Resolve the next click from the latest synchronous intent, not merely the
+ * last rendered server projection. This makes two rapid clicks add then remove
+ * even when React has not had a chance to commit between them. */
+export function nextOwnReactionIntent(
+  events: readonly Event[],
+  targetEventId: string,
+  emoji: string,
+  senderHandle: string,
+  currentIntent?: boolean,
+): boolean {
+  return !ownReactionIsActive(
+    events,
+    targetEventId,
+    emoji,
+    senderHandle,
+    currentIntent,
+  );
+}
+
 /** Fold an authoritative desired-state response into the event collection
  * before an optimistic override is removed, preventing a one-frame flicker. */
 export function reconcileReactionResult<T extends Event>(

@@ -28,12 +28,12 @@ test("the global banner is reserved for application-wide connection failures", (
   }
 });
 
-test("Connecting is scoped to a chat with no usable timeline yet", () => {
+test("Loading is scoped to a chat with no usable timeline yet", () => {
   for (const state of ["connecting", "authenticating", "syncing"]) {
     assert.equal(chatConnectingCopy(state), null);
-    assert.equal(chatConnectingCopy(state, true), "Connecting…");
+    assert.equal(chatConnectingCopy(state, true), "Loading…");
   }
-  assert.equal(chatConnectingCopy("online", true), "Connecting…");
+  assert.equal(chatConnectingCopy("online", true), "Loading…");
   assert.equal(chatConnectingCopy("offline", true), null);
   assert.equal(chatConnectingCopy("offline"), null);
   assert.equal(chatConnectingCopy("online"), null);

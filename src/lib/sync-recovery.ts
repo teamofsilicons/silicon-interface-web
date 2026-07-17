@@ -24,6 +24,13 @@ export type SyncFailureDecision = {
   details: SyncIntegrityDetails;
 };
 
+/** Transient page retries are repaired silently while the cached chat remains
+ * usable. Connectivity has its own sustained-state banner; surfacing every
+ * short retry here made the global warning flap during healthy reconnects. */
+export function shouldSurfaceSyncRecovery(record: SyncRecoveryRecord): boolean {
+  return record.phase === "rebuilding" || record.reason !== "transient_failure";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

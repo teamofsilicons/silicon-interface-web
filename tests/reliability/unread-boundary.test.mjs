@@ -87,7 +87,22 @@ test("opening a room clears its projected unread tail before history hydration",
     eventId: event(8).event_id,
     streamPosition: 9,
   });
-  assert.equal(unread.roomOpenReadTarget({ ...room, unread: false, unread_count: 0 }), null);
+  assert.deepEqual(
+    unread.roomOpenReadTarget({ ...room, unread: false, unread_count: 0 }),
+    { eventId: event(8).event_id, streamPosition: 9 },
+    "a stale top-level count must not mask an authoritative unread boundary",
+  );
+  assert.equal(unread.roomOpenReadTarget({
+    ...room,
+    unread: false,
+    unread_count: 0,
+    unread_boundary: {
+      ...room.unread_boundary,
+      first_unread_event_id: null,
+      first_unread_stream_position: null,
+      unread_count: 0,
+    },
+  }), null);
   assert.equal(unread.roomOpenReadTarget({ ...room, observed: true }), null);
 });
 

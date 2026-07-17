@@ -101,6 +101,9 @@ export function MediaAttachment({
   );
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
+  // A late metadata refresh is allowed to improve a rendered preview, never
+  // to replace one that already worked with a transient "unavailable" card.
+  const hasSuccessfulPreviewRef = React.useRef(Boolean(localUrl ?? seeded?.download_url));
 
   // Mini first-page preview for PDF attachments. Declared at the top (before the
   // status/loading early returns) to keep the Hook order stable.
@@ -181,6 +184,7 @@ export function MediaAttachment({
         errors = 0;
         setMedia(r.media);
         setUrl(r.download_url);
+        if (r.download_url) hasSuccessfulPreviewRef.current = true;
         // Keep polling only while the object is still being produced and we
         // don't yet have a usable URL. Terminal states (ready/infected/failed)
         // — or any state that already yielded a URL — stop the loop.
@@ -203,7 +207,7 @@ export function MediaAttachment({
           timer = setTimeout(poll, 1000 * errors);
           return;
         }
-        setFailed(true);
+        if (!hasSuccessfulPreviewRef.current) setFailed(true);
       }
     };
     void poll();

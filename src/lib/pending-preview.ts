@@ -16,6 +16,7 @@ export interface PendingPreview {
 }
 
 const cache = new Map<string, PendingPreview | null>();
+const acceptedClients = new Map<string, Set<string>>();
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -23,6 +24,10 @@ function emit() {
 }
 
 export function setPendingPreview(roomId: string, entry: PendingPreview): void {
+  // Network completion and durable-outbox restoration can race at startup.
+  // Once Glass has accepted this exact client id, a stale outbox row must not
+  // resurrect it as waiting/failed in the sidebar.
+  if (acceptedClients.get(roomId)?.has(entry.clientId)) return;
   const prev = cache.get(roomId) ?? null;
   if (
     prev &&
@@ -47,6 +52,19 @@ export function clearPendingPreview(roomId: string, clientId: string): void {
   }
 }
 
+/** Record authoritative acceptance before clearing the optimistic preview.
+ * Unlike a plain clear, this is monotonic for the lifetime of the page and
+ * therefore also blocks a slower IndexedDB/outbox read from reintroducing it. */
+export function markPendingPreviewAccepted(roomId: string, clientId: string): void {
+  let accepted = acceptedClients.get(roomId);
+  if (!accepted) {
+    accepted = new Set<string>();
+    acceptedClients.set(roomId, accepted);
+  }
+  accepted.add(clientId);
+  clearPendingPreview(roomId, clientId);
+}
+
 /** Update the preview text for a still-pending message (e.g. held-queue merge),
  *  only if it's still the current one. */
 export function updatePendingPreview(roomId: string, clientId: string, text: string): void {
@@ -67,6 +85,7 @@ export function dropPendingPreview(roomId: string): void {
 }
 
 export function failPendingPreview(roomId: string, clientId: string): void {
+  if (acceptedClients.get(roomId)?.has(clientId)) return;
   const prev = cache.get(roomId) ?? null;
   if (prev && prev.clientId === clientId && prev.status !== "failed") {
     cache.set(roomId, { ...prev, status: "failed" });

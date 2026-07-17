@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   aggregateReactions,
   applyOwnReactionOverride,
+  nextOwnReactionIntent,
   ownReactionIsActive,
   reactionIntentKey,
   reconcileReactionResult,
@@ -47,6 +48,13 @@ test("optimistic desired state overrides stale websocket projections", () => {
   assert.equal(ownReactionIsActive(events, "message-1", "é", "alice", false), false);
   assert.deepEqual(applyOwnReactionOverride(["alice", "bob"], "alice", false), ["bob"]);
   assert.deepEqual(applyOwnReactionOverride(["bob"], "alice", true), ["bob", "alice"]);
+});
+
+test("rapid clicks alternate from synchronous intent before React rerenders", () => {
+  const first = nextOwnReactionIntent([], "message-1", "é", "alice");
+  const second = nextOwnReactionIntent([], "message-1", "é", "alice", first);
+  const third = nextOwnReactionIntent([], "message-1", "é", "alice", second);
+  assert.deepEqual([first, second, third], [true, false, true]);
 });
 
 test("authoritative desired-state results replace duplicates and preserve tombstones", () => {

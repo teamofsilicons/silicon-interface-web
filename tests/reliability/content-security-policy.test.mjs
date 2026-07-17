@@ -38,6 +38,7 @@ test("production CSP permits Next's prerendered bootstrap without relaxing eval"
     assert.equal(parsed.get("script-src"), "'self' 'unsafe-inline'");
     assert.doesNotMatch(policy, /'unsafe-eval'/);
     assert.equal(parsed.get("object-src"), "'none'");
+    assert.equal(parsed.get("connect-src"), "'self' blob: https: wss:");
     assert.equal(parsed.get("frame-src"), "blob: https://challenges.cloudflare.com");
     assert.equal(parsed.get("base-uri"), "'self'");
     assert.equal(parsed.get("form-action"), "'self'");

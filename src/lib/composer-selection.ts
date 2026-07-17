@@ -11,3 +11,12 @@ export function mayRestoreComposerSnapshot(
   return expectedInteractionEpoch === undefined ||
     expectedInteractionEpoch === currentInteractionEpoch;
 }
+
+/** Native autoFocus/select events can fire before a controlled textarea has
+ * received its restored value. They must not replace the saved draft range. */
+export function mayPersistComposerSelection(
+  editingMessage: boolean,
+  applyingDraftSnapshot: boolean,
+): boolean {
+  return !editingMessage && !applyingDraftSnapshot;
+}

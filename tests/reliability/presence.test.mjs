@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergePresence, presenceIsOnline } from "../../src/lib/presence-state.ts";
+import {
+  mergePresence,
+  observePresenceActivity,
+  presenceIsOnline,
+} from "../../src/lib/presence-state.ts";
 
 test("online presence is bounded by the server lease", () => {
   const presence = {
@@ -46,4 +50,31 @@ test("equal-revision contradictions fail closed to hidden then offline", () => {
     revision: 31,
   };
   assert.equal(mergePresence(online, offline).state, "offline");
+});
+
+test("accepted peer activity prevents an impossible stale last-seen label", () => {
+  const stale = {
+    state: "offline",
+    expires_at: "",
+    last_seen_at: "2026-07-16T22:45:00.000Z",
+    revision: 40,
+  };
+  const observed = observePresenceActivity(stale, "2026-07-16T23:29:00.000Z");
+  assert.equal(observed.last_seen_at, "2026-07-16T23:29:00.000Z");
+
+  const heartbeat = mergePresence(observed, {
+    state: "offline",
+    expires_at: "",
+    last_seen_at: "2026-07-16T22:46:00.000Z",
+    revision: 41,
+  });
+  assert.equal(heartbeat.last_seen_at, "2026-07-16T23:29:00.000Z");
+});
+
+test("observed activity never bypasses hidden presence privacy", () => {
+  const hidden = { state: "hidden", expires_at: "", last_seen_at: "", revision: 50 };
+  assert.equal(
+    observePresenceActivity(hidden, "2026-07-16T23:29:00.000Z"),
+    hidden,
+  );
 });

@@ -17,6 +17,8 @@ import {
 } from "./sync-integrity";
 import { clearStorageIssue, reportStorageIssue } from "./storage-health";
 import { decorateAuthoritativeTimelineEvent } from "./timeline-identity";
+import { mergeDeliverySummaries } from "./delivery-state";
+import { mergeEventRevision } from "./event-revision";
 
 const DB_NAME = "silicon-interface-chat-cache";
 // v8 shipped in pre-release/dev builds. Never request an older IndexedDB
@@ -118,6 +120,13 @@ interface StoredEvent {
   storedAt: number;
 }
 
+interface PendingDeliveryAcknowledgement {
+  key: string;
+  ownerId: string;
+  eventId: string;
+  queuedAt: number;
+}
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
@@ -150,7 +159,7 @@ function openDb(): Promise<IDBDatabase> {
       reportStorageIssue({
         severity: "degraded",
         area: "timeline",
-        message: "We couldn’t load saved chat history on this device. Your messages are still safe and will reconnect from Glass.",
+        message: "We couldn’t load saved chat history on this device. Your messages are still safe and will reconnect.",
       });
       reject(error);
     };
@@ -402,7 +411,7 @@ export async function storeEvents(
     : null;
   if (typeof window.indexedDB === "undefined") throw new Error("IndexedDB unavailable");
   const db = await openDb();
-  const storeNames = [EVENTS];
+  const storeNames = [EVENTS, DELIVERY_ACKS];
   if (checkpoint) storeNames.push(SYNC_CHECKPOINTS, PENDING_ACCOUNT_REPLAY);
   const transaction = db.transaction(
     storeNames,
@@ -454,7 +463,28 @@ export async function storeEvents(
     }
   }
   const store = transaction.objectStore(EVENTS);
-  for (const row of preparedRows) store.put(row);
+  const existingRows = await Promise.all(preparedRows.map((row) =>
+    new Promise<StoredEvent | null>((resolve, reject) => {
+      const request = store.get(row.key);
+      request.onsuccess = () => resolve((request.result as StoredEvent | undefined) ?? null);
+      request.onerror = () => reject(request.error);
+    })
+  ));
+  const deliveryStore = transaction.objectStore(DELIVERY_ACKS);
+  for (const [index, prepared] of preparedRows.entries()) {
+    const previous = existingRows[index];
+    const event = previous
+      ? mergeEventRevision(previous.event, prepared.event)
+      : prepared.event;
+    const row: StoredEvent = { ...prepared, event };
+    store.put(row);
+    deliveryStore.put({
+      key: `${ownerId}:${row.eventId}`,
+      ownerId,
+      eventId: row.eventId,
+      queuedAt: storedAt,
+    } satisfies PendingDeliveryAcknowledgement);
+  }
   if (checkpoint) {
     const hasEventPosition = "eventPosition" in checkpoint;
     const hasAccountPosition = "accountPosition" in checkpoint;
@@ -546,6 +576,75 @@ export async function writeSyncCheckpoint(
     throw new Error("Event vector does not match its compatibility position");
   }
   await storeEvents(ownerId, [], checkpoint);
+}
+
+/** Delivery is acknowledged only after the event is durably stored. Pending
+ * rows survive reloads and are deleted only after Glass accepts the batch. */
+export async function pendingDeliveryAcknowledgements(
+  ownerId: string,
+  limit = 500,
+): Promise<string[]> {
+  if (!ownerId || typeof window.indexedDB === "undefined") return [];
+  const db = await openDb();
+  const transaction = db.transaction(DELIVERY_ACKS, "readonly");
+  const index = transaction.objectStore(DELIVERY_ACKS).index(DELIVERY_ACK_OWNER);
+  const eventIds: string[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const request = index.openCursor(IDBKeyRange.only(ownerId));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || eventIds.length >= Math.max(1, Math.min(500, limit))) {
+        resolve();
+        return;
+      }
+      const row = cursor.value as PendingDeliveryAcknowledgement;
+      if (row.ownerId === ownerId && typeof row.eventId === "string" && row.eventId) {
+        eventIds.push(row.eventId);
+      }
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error);
+  });
+  return eventIds;
+}
+
+export async function completeDeliveryAcknowledgements(
+  ownerId: string,
+  eventIds: readonly string[],
+): Promise<void> {
+  if (!ownerId || !eventIds.length || typeof window.indexedDB === "undefined") return;
+  const db = await openDb();
+  const transaction = db.transaction(DELIVERY_ACKS, "readwrite", { durability: "strict" });
+  const store = transaction.objectStore(DELIVERY_ACKS);
+  for (const eventId of new Set(eventIds)) store.delete(`${ownerId}:${eventId}`);
+  await transactionDone(transaction);
+}
+
+export async function updateStoredEventDeliveries(
+  ownerId: string,
+  deliveries: Record<string, NonNullable<Event["delivery"]>>,
+): Promise<void> {
+  if (!ownerId || typeof window.indexedDB === "undefined") return;
+  const entries = Object.entries(deliveries).slice(0, 500);
+  if (!entries.length) return;
+  const db = await openDb();
+  const transaction = db.transaction(EVENTS, "readwrite", { durability: "strict" });
+  const store = transaction.objectStore(EVENTS);
+  await Promise.all(entries.map(([eventId, incoming]) =>
+    new Promise<void>((resolve, reject) => {
+      const request = store.get(`${ownerId}:${eventId}`);
+      request.onsuccess = () => {
+        const row = (request.result as StoredEvent | undefined) ?? null;
+        if (row) {
+          const delivery = mergeDeliverySummaries(row.event.delivery, incoming);
+          if (delivery) store.put({ ...row, event: { ...row.event, delivery } });
+        }
+        resolve();
+      };
+      request.onerror = () => reject(request.error);
+    })
+  ));
+  await transactionDone(transaction);
 }
 
 export async function deleteSyncCursors(ownerId: string, signal?: AbortSignal): Promise<void> {
@@ -797,6 +896,7 @@ export async function commitInitialSyncBundle(
       PENDING_ACCOUNT_REPLAY,
       ACCOUNT_PROJECTIONS,
       INITIAL_SYNC_BUNDLES,
+      DELIVERY_ACKS,
     ],
     "readwrite",
     { durability: "strict" },
@@ -851,7 +951,16 @@ export async function commitInitialSyncBundle(
     };
     request.onerror = () => reject(request.error);
   });
-  for (const row of preparedRows) eventStore.put(row);
+  const deliveryStore = transaction.objectStore(DELIVERY_ACKS);
+  for (const row of preparedRows) {
+    eventStore.put(row);
+    deliveryStore.put({
+      key: `${ownerId}:${row.eventId}`,
+      ownerId,
+      eventId: row.eventId,
+      queuedAt: storedAt,
+    } satisfies PendingDeliveryAcknowledgement);
+  }
   transaction.objectStore(ACCOUNT_PROJECTIONS).put({
     ownerId,
     updates: [...latest.values()],

@@ -14,7 +14,9 @@ const contentSecurityPolicy = [
   "img-src 'self' data: blob: https:",
   "media-src 'self' blob: https:",
   "font-src 'self' data:",
-  `connect-src 'self' https: wss:${developmentConnectSources}`,
+  // Annotation export reads locally rendered object URLs back through fetch()
+  // before upload. Browsers enforce that operation through connect-src.
+  `connect-src 'self' blob: https: wss:${developmentConnectSources}`,
   "worker-src 'self' blob:",
   // PDFs are fetched through the authenticated media endpoint and framed from
   // a local object URL. Remote frames remain limited to the abuse challenge.

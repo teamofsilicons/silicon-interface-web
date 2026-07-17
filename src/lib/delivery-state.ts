@@ -40,6 +40,25 @@ export function normalizeDeliveryObject(summary: DeliverySummary): DeliverySumma
   );
 }
 
+/**
+ * Delivery and read receipts are monotonic facts for one immutable event.
+ * Network snapshots can arrive out of order, so an older `sent` projection
+ * must never overwrite a delivery/read receipt already seen by this client.
+ */
+export function mergeDeliverySummaries(
+  current: DeliverySummary | null | undefined,
+  incoming: DeliverySummary | null | undefined,
+): DeliverySummary | undefined {
+  if (!current && !incoming) return undefined;
+  if (!current) return normalizeDeliveryObject(incoming!);
+  if (!incoming) return normalizeDeliveryObject(current);
+  return normalizeDeliverySummary(
+    Math.max(current.recipient_count, incoming.recipient_count),
+    Math.max(current.delivered_count, incoming.delivered_count),
+    Math.max(current.read_count, incoming.read_count),
+  );
+}
+
 export function canSendPlaintextToRoom(mode: string): boolean {
   return mode === "server_managed";
 }

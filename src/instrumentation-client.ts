@@ -4,14 +4,11 @@
 // apiKey=...> (that would double-init); components read the singleton with
 // `import posthog from "posthog-js"`.
 //
-// Config posture: capture product analytics broadly, but session replay is
-// PRIVACY-HARDENED. High-ticket / GDPR-sensitive clients must never have a
-// live bearer token, OTP code, or private DM content liftable from a replay.
-// Concretely that means: inputs are masked, chat surfaces are masked
-// (`[data-private]`, applied to the message list), console capture is off (it
-// can echo tokens from debug logs), and the auth/silicon-key headers + request
-// & response bodies are stripped from captured network requests. Network
-// *timing* is still kept (it lives in performance capture, not the replay body).
+// Config posture: capture lightweight product analytics, but never run session
+// replay in the chat client. Replay uploads are disproportionately expensive
+// for long, live-updating conversations and privacy browsers commonly block
+// them, producing a permanent `/ingest/s` retry storm. Network timing remains
+// available through performance capture without recording the DOM/session.
 import posthog from "posthog-js";
 import type { CapturedNetworkRequest } from "posthog-js";
 
@@ -85,8 +82,8 @@ if (token) {
     // ---- error tracking ----
     capture_exceptions: true, // unhandled errors + rejections + console.error
 
-    // ---- session replay: privacy-hardened (see header note) ----
-    disable_session_recording: false,
+    // ---- session replay: disabled for private, live-updating chat ----
+    disable_session_recording: true,
     enable_recording_console_log: false, // console can echo tokens — never record
     session_recording: {
       maskAllInputs: true, // never record what users type (composer, OTP, forms)

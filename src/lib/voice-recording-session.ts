@@ -79,6 +79,8 @@ class VoiceRecordingSession {
   private readonly listeners = new Set<() => void>();
   private waveform: readonly number[] = EMPTY_WAVEFORM;
   private readonly waveformListeners = new Set<() => void>();
+  private previewUrl: string | null = null;
+  private readonly previewListeners = new Set<() => void>();
   private waveformTimer: ReturnType<typeof setInterval> | null = null;
   private generation = 0;
   private recorder: MediaRecorder | null = null;
@@ -111,6 +113,18 @@ class VoiceRecordingSession {
   };
   readonly getWaveformSnapshot = (): readonly number[] => this.waveform;
   readonly getWaveformServerSnapshot = (): readonly number[] => EMPTY_WAVEFORM;
+  readonly subscribePreview = (listener: () => void): (() => void) => {
+    this.previewListeners.add(listener);
+    return () => this.previewListeners.delete(listener);
+  };
+  readonly getPreviewSnapshot = (): string | null => this.previewUrl;
+  readonly getPreviewServerSnapshot = (): string | null => null;
+
+  /** A playable snapshot of every encoded slice received so far. */
+  previewBlob(): Blob | null {
+    if (this.snapshot.phase !== "paused" || this.chunks.length === 0) return null;
+    return new Blob(this.chunks, { type: this.mime || "audio/webm" });
+  }
 
   async start(roomId: string, handlers: VoiceRecordingHandlers): Promise<void> {
     if (!roomId) throw new Error("A room is required to record a voice note");
@@ -173,6 +187,7 @@ class VoiceRecordingSession {
       recorder.ondataavailable = (event) => {
         if (!event.data?.size) return;
         this.chunks.push(event.data);
+        if (this.snapshot.phase === "paused") this.refreshPreviewUrl();
         const sequence = this.chunkSequence++;
         void appendLiveVoiceChunk({
           roomId,
@@ -264,6 +279,7 @@ class VoiceRecordingSession {
       pausedAt: this.pausedAt,
       pausedDurationMs: this.pausedDurationMs,
     });
+    this.refreshPreviewUrl();
   }
 
   resume(): void {
@@ -272,6 +288,7 @@ class VoiceRecordingSession {
     const now = Date.now();
     if (this.pausedAt) this.pausedDurationMs += now - this.pausedAt;
     this.pausedAt = 0;
+    this.clearPreviewUrl();
     recorder.resume();
     this.startWaveformSampling();
     this.setSnapshot({
@@ -390,6 +407,7 @@ class VoiceRecordingSession {
     this.stream = null;
     this.audioContext = null;
     this.analyser = null;
+    this.clearPreviewUrl();
     this.chunks = [];
     this.mime = "audio/webm";
     this.startedAt = 0;
@@ -417,6 +435,23 @@ class VoiceRecordingSession {
   private setWaveform(waveform: readonly number[]): void {
     this.waveform = waveform;
     for (const listener of this.waveformListeners) listener();
+  }
+
+  private refreshPreviewUrl(): void {
+    const blob = this.previewBlob();
+    if (!blob || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return;
+    const next = URL.createObjectURL(blob);
+    const previous = this.previewUrl;
+    this.previewUrl = next;
+    if (previous) URL.revokeObjectURL(previous);
+    for (const listener of this.previewListeners) listener();
+  }
+
+  private clearPreviewUrl(): void {
+    if (!this.previewUrl) return;
+    URL.revokeObjectURL(this.previewUrl);
+    this.previewUrl = null;
+    for (const listener of this.previewListeners) listener();
   }
 }
 
@@ -446,5 +481,13 @@ export function useVoiceRecordingWaveform(): readonly number[] {
     voiceRecordingSession.subscribeWaveform,
     voiceRecordingSession.getWaveformSnapshot,
     voiceRecordingSession.getWaveformServerSnapshot,
+  );
+}
+
+export function useVoiceRecordingPreviewUrl(): string | null {
+  return React.useSyncExternalStore(
+    voiceRecordingSession.subscribePreview,
+    voiceRecordingSession.getPreviewSnapshot,
+    voiceRecordingSession.getPreviewServerSnapshot,
   );
 }

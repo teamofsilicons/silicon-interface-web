@@ -6,7 +6,6 @@ import {
   Camera,
   CaretLeft,
   Check,
-  Checks,
   Clock,
   Eye,
   File,
@@ -29,12 +28,14 @@ import { useVoiceDraftListPreview } from "@/lib/voice-drafts";
 import { usePendingPreview } from "@/lib/pending-preview";
 import { cn, sidebarTime } from "@/lib/utils";
 import { serverRoomListStatus } from "@/lib/room-list-projection";
+import type { MessageReceiptStatus } from "@/lib/message-receipt";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { SiliconBrowserMark } from "@/components/chat/remote-browser-card";
 import { GlyphSkeleton } from "@/components/ui/glyph-skeleton";
+import { MessageReceiptGlyph } from "@/components/chat/message-receipt-glyph";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -460,6 +461,8 @@ function RoomRow({
   // that case the right slot shows a send-status tick instead of a
   // badge (✓✓ once the other side has read it, ✓ until then).
   const mineLast = !!myHandle && r.last_event?.sender_handle === myHandle;
+  const lastReceiptStatus: MessageReceiptStatus =
+    r.last_event?.delivery?.state ?? (r.last_event?.read ? "read" : "sent");
   // Direct 1-on-1 peer (for @id / saved-contact display).
   const peer = r.kind === "direct" && peers.length === 1 ? peers[0] : null;
   const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
@@ -655,19 +658,10 @@ function RoomRow({
                 <Clock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="waiting" />
               )
             ) : visibleDraft ? null : mineLast ? (
-              r.last_event?.read ? (
-                <Checks
-                  weight="bold"
-                  className="h-4 w-4 shrink-0 text-foreground"
-                  aria-label="read"
-                />
-              ) : (
-                <Check
-                  weight="bold"
-                  className="h-4 w-4 shrink-0 text-muted-foreground"
-                  aria-label="delivered"
-                />
-              )
+              <MessageReceiptGlyph
+                status={lastReceiptStatus}
+                className="h-4 w-4 shrink-0 text-foreground"
+              />
             ) : null}
           </div>
         </div>

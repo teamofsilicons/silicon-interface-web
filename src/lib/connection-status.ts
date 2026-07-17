@@ -45,7 +45,7 @@ export function chatConnectingCopy(
   if (state === "offline" || state === "captive" || state === "degraded") {
     return null;
   }
-  return "Connecting…";
+  return "Loading…";
 }
 
 export function connectionStatusCanRetry(

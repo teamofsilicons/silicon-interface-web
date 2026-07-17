@@ -317,37 +317,53 @@ export function showBrowserNotification(
   // is visible AND focused — the wrapper feeds that state in, since webview
   // visibilityState/hasFocus are unreliable there.
   if (userPresent()) return;
-  try {
-    const notification = new window.Notification(title, {
-      icon: "/icon.png",
-      badge: "/icon.png",
-      ...options,
-    });
-    const eventId = typeof options.tag === "string" ? options.tag : "";
-    if (eventId) activeBrowserNotifications.set(eventId, notification);
-    notification.onclose = () => {
-      if (eventId && activeBrowserNotifications.get(eventId) === notification) {
-        activeBrowserNotifications.delete(eventId);
+  void (async () => {
+    // An active Web Push subscription already delegates hidden/background
+    // notifications to sw.js. Constructing another Notification from the live
+    // tab would display the same message twice. Foreground construction is the
+    // compatibility path only when push is not registered.
+    if ("serviceWorker" in navigator) {
+      try {
+        const registration = await navigator.serviceWorker.ready;
+        if (await registration.pushManager?.getSubscription()) return;
+      } catch {
+        // Service-worker startup is unavailable; retain the direct fallback.
       }
-    };
-    notification.onclick = () => {
-      desktopBridge()?.window.show();
-      window.focus();
-      // Soft client-side navigation: ask a subscriber (the chat page) to open
-      // the room instead of a hard window.location.href, which would
-      // cold-reload the SPA and drop the live socket.
-      if (options.roomId) {
-        window.dispatchEvent(new CustomEvent(NOTIFICATION_NAVIGATE_EVENT, {
-          detail: {
-            roomId: options.roomId,
-          },
-        }));
-      }
-      notification.close();
-    };
-  } catch {
-    /* Some browsers still reject Notification construction despite permission. */
-  }
+    }
+    // State may have changed while service-worker ownership was resolved.
+    if (userPresent() || window.Notification.permission !== "granted") return;
+    try {
+      const notification = new window.Notification(title, {
+        icon: "/icon.png",
+        badge: "/icon.png",
+        ...options,
+      });
+      const eventId = typeof options.tag === "string" ? options.tag : "";
+      if (eventId) activeBrowserNotifications.set(eventId, notification);
+      notification.onclose = () => {
+        if (eventId && activeBrowserNotifications.get(eventId) === notification) {
+          activeBrowserNotifications.delete(eventId);
+        }
+      };
+      notification.onclick = () => {
+        desktopBridge()?.window.show();
+        window.focus();
+        // Soft client-side navigation: ask a subscriber (the chat page) to open
+        // the room instead of a hard window.location.href, which would
+        // cold-reload the SPA and drop the live socket.
+        if (options.roomId) {
+          window.dispatchEvent(new CustomEvent(NOTIFICATION_NAVIGATE_EVENT, {
+            detail: {
+              roomId: options.roomId,
+            },
+          }));
+        }
+        notification.close();
+      };
+    } catch {
+      /* Some browsers still reject Notification construction despite permission. */
+    }
+  })();
 }
 
 const activeBrowserNotifications = new Map<string, Notification>();

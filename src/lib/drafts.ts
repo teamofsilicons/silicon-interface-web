@@ -17,7 +17,6 @@ import {
 } from "./media-upload-store";
 import { hasActiveVoiceRecording } from "./composer-activity";
 import { decideClientRetry } from "./retry-policy";
-import { resolveDraftChoice } from "./draft-conflict-policy";
 import { currentStorageIssue } from "./storage-health";
 import { beginClientDurableCommit } from "./reliability-telemetry";
 import {
@@ -34,7 +33,6 @@ const MIGRATED_PREFIX = "silicon-interface:drafts-migrated:";
 const PUBLISH_DELAY_MS = 2000;
 const SERVER_IDLE_MS = 800;
 const SERVER_MAX_MS = 5000;
-const DRAFT_CONFLICT_MIN_GAP_MS = 30_000;
 
 type PendingClearAfterSend = {
   text: string;
@@ -188,10 +186,6 @@ function parsedTimestamp(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function draftStateHasContent(value: DraftState): boolean {
-  return Boolean(value.text || value.attachments?.length || value.reply_to_event_id);
-}
-
 function localDraftHasContent(value: LocalDraft): boolean {
   return Boolean(value.text || value.attachments.length || value.reply_to_event_id);
 }
@@ -200,22 +194,6 @@ function remoteContentTimestamp(value: DraftState): number {
   // updated_at is a compatibility fallback for frames from the pre-authored-
   // timestamp backend. Current frames always carry content_updated_at.
   return parsedTimestamp(value.content_updated_at) || parsedTimestamp(value.updated_at);
-}
-
-function localContentTimestamp(value: LocalDraft): number {
-  return value.lastLocalEditAt ||
-    parsedTimestamp(value.content_updated_at) ||
-    parsedTimestamp(value.updated_at);
-}
-
-/** A modal is warranted only for two meaningful drafts when the remote edit
- * is genuinely newer by more than 30 seconds. Transport retries and empty
- * tombstones never qualify. */
-function remoteDraftRequiresChoice(local: LocalDraft, remote: DraftState): boolean {
-  if (!localDraftHasContent(local) || !draftStateHasContent(remote)) return false;
-  const localAt = localContentTimestamp(local);
-  const remoteAt = remoteContentTimestamp(remote);
-  return localAt > 0 && remoteAt - localAt > DRAFT_CONFLICT_MIN_GAP_MS;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -354,15 +332,12 @@ function normalizeDraft(roomId: string, raw: Partial<LocalDraft>): LocalDraft {
     syncBlocked: raw.syncBlocked === true,
   };
 
-  // Builds prior to the version-aware conflict policy could persist a remote
-  // snapshot merely because the auto-focused composer was open. There was no
-  // local edit to protect, so replaying that record opened the conflict dialog
-  // on every visit (most visibly for server tombstones). Repair those records
-  // while hydrating: a pending snapshot is actionable only when local changes
-  // exist or an explicit 409 blocked a destructive clear.
+  // Older builds persisted remote snapshots while waiting for a local/remote
+  // choice. Telegram treats a draft as one continuously reconciled input
+  // state, so repair those records silently while hydrating: a dirty local
+  // composer stays authoritative, while a clean composer adopts the cloud
+  // projection. A matching pre-send snapshot remains a clear-recovery proof.
   const pending = normalized.pendingRemote;
-  const explicitConflict = Boolean(pending) &&
-    normalized.syncBlocked && normalized.syncError === "conflict";
   const clearLegacyPending = () => {
     normalized.pendingRemote = null;
     if (normalized.syncBlocked && normalized.syncError === "conflict") {
@@ -412,35 +387,16 @@ function normalizeDraft(roomId: string, raw: Partial<LocalDraft>): LocalDraft {
       // conflict barrier tied to that exact discarded frame; unrelated
       // transport failures remain intact.
       clearLegacyPending();
-    } else if (
-      normalized.dirty &&
-      !pendingMatchesLocal &&
-      pending.origin_device &&
-      pending.origin_device === deviceId()
-    ) {
-      // Repair false conflicts persisted by builds that treated an echo from
-      // another tab in this browser installation as a different device. The
-      // local composer remains authoritative and is simply rebased so it can
-      // continue syncing without interrupting the user.
-      normalized.version = Math.max(normalized.version, pending.version);
-      normalized.updated_at = pending.updated_at;
-      normalized.origin_device = pending.origin_device;
-      normalized.lastServerSyncAt = Math.max(
-        normalized.lastServerSyncAt,
-        Date.now(),
-      );
-      clearLegacyPending();
-    } else if (
-      normalized.dirty &&
-      !pendingMatchesLocal &&
-      !remoteDraftRequiresChoice(normalized, pending)
-    ) {
-      // The remote is empty, older, or too close to distinguish from transport
-      // churn. Keep the latest meaningful local composer, rebase its version,
-      // and let the normal durable retry publish it without a modal.
+    } else if (normalized.dirty && !pendingMatchesLocal) {
+      // A live local composer is never replaced by a passive cloud update.
+      // Rebase it onto the remote version and let normal sync publish it.
+      // If this raced a post-send clear, stop that delete first so it cannot
+      // erase the newly observed cloud state.
+      normalized.pendingClearAfterSend = null;
       normalized.version = Math.max(normalized.version, pending.version);
       normalized.updated_at = pending.updated_at;
       normalized.origin_device = deviceId();
+      normalized.lastServerSyncAt = Math.max(normalized.lastServerSyncAt, Date.now());
       clearLegacyPending();
     } else if (normalized.dirty && pendingMatchesLocal) {
       // A complete matching snapshot proves that the dirty local composer was
@@ -456,23 +412,11 @@ function normalizeDraft(roomId: string, raw: Partial<LocalDraft>): LocalDraft {
       normalized.syncAttempts = 0;
       normalized.nextSyncAt = 0;
       normalized.syncBlocked = false;
-    } else if (
-      normalized.dirty &&
-      pending.version === normalized.version &&
-      !explicitConflict
-    ) {
-      // R25 persisted a real newer remote conflict after first rebasing the
-      // local version to the remote version, but before persisting the blocked
-      // marker. A divergent equal-version frame must therefore be promoted to
-      // an explicit decision instead of being discarded as a replay.
-      normalized.syncError = "conflict";
-      normalized.syncAttempts = 0;
-      normalized.nextSyncAt = 0;
-      normalized.syncBlocked = true;
-    } else if (!normalized.dirty && !explicitConflict) {
-      // A valid clean legacy snapshot at least as new as the local projection
-      // can be adopted without user choice.
-      normalized.pendingRemote = null;
+    } else if (!normalized.dirty) {
+      // There is no local edit to protect. Adopt the complete remote composer
+      // and put its caret at the end, matching Telegram's cross-device restore.
+      normalized.pendingClearAfterSend = null;
+      clearLegacyPending();
       normalized.text = pending.text;
       Object.assign(
         normalized,
@@ -490,10 +434,7 @@ function normalizeDraft(roomId: string, raw: Partial<LocalDraft>): LocalDraft {
       normalized.updated_at = pending.updated_at;
       normalized.content_updated_at = pending.content_updated_at ?? pending.updated_at;
       normalized.lastLocalEditAt = remoteContentTimestamp(pending);
-      normalized.syncError = undefined;
-      normalized.syncAttempts = 0;
-      normalized.nextSyncAt = 0;
-      normalized.syncBlocked = false;
+      normalized.origin_device = pending.origin_device ?? "";
       const hasIntent = Boolean(
         normalized.text ||
           normalized.attachments.length ||
@@ -782,6 +723,12 @@ function readLocal(roomId: string): LocalDraft {
       const parsed = JSON.parse(raw) as Partial<LocalDraft>;
       const draft = normalizeDraft(roomId, parsed);
       liveCache.set(roomId, draft);
+      // Persist migrations and silent legacy-conflict repair immediately.
+      // Otherwise a clean restored draft can look correct in memory but fall
+      // back to the obsolete choice barrier after the next process restart.
+      if (JSON.stringify(persistedSnapshot(draft)) !== JSON.stringify(parsed)) {
+        void saveLocal(draft);
+      }
       resumeDraftSync(draft);
       if (!publishedCache.has(roomId)) publishedCache.set(roomId, draft.text);
       if (!publishedListPreviewCache.has(roomId)) {
@@ -893,45 +840,51 @@ async function flushServerOnce(roomId: string) {
     const latest = readLocal(roomId);
     if (latest.dirty && !latest.syncBlocked) scheduleServer(roomId);
   } catch (err) {
+    let failure: unknown = err;
     if (err instanceof ApiError && err.status === 409) {
-      const body = err.body as { current?: DraftState } | null;
-      if (body?.current) {
-        const current = body.current;
+      try {
+        const body = err.body as { current?: DraftState } | null;
+        // Rolling deployments and intermediaries may strip the optional 409
+        // body. Resolve the authoritative draft with GET instead of leaving a
+        // dirty composer permanently stalled as "not synced".
+        const current = body?.current ?? await api.draft(roomId);
         const currentMatchesSent =
           sent.text === (current.text || "") &&
           sent.reply_to_event_id === (current.reply_to_event_id || "") &&
           draftAttachmentsMatch(sent.attachments, current.attachments ?? []);
         // A lost response or another tab may already have committed this exact
-        // snapshot. Treat that 409 as an acknowledgement; only a genuinely
-        // divergent newer snapshot needs a user decision.
+        // snapshot. Treat that 409 as an acknowledgement; a divergent newer
+        // snapshot is reconciled by applyServerDraft without interrupting input.
         await applyServerDraft(current, { ack: currentMatchesSent });
         const latest = readLocal(roomId);
         if (latest.dirty && !latest.syncBlocked) scheduleServer(roomId);
-      }
-    } else {
-      const latest = readLocal(roomId);
-      // A newer server frame may have established an actionable conflict while
-      // this request was in flight. Its decision barrier must win over a late
-      // transport failure from the superseded request.
-      if (
-        latest.pendingRemote &&
-        latest.syncBlocked &&
-        latest.syncError === "conflict"
-      ) {
         return;
+      } catch (recoveryError) {
+        failure = recoveryError;
       }
-      const attempts = (latest.syncAttempts || 0) + 1;
-      const status = err instanceof ApiError ? err.status : 0;
-      const retryAfter = err instanceof ApiError ? err.retryAfterMs : null;
-      const decision = decideClientRetry(status, attempts, Date.now(), undefined, retryAfter);
-      latest.syncAttempts = attempts;
-      latest.syncBlocked = decision.state === "blocked";
-      latest.nextSyncAt = decision.nextAttemptAt;
-      latest.syncError = err instanceof Error ? err.message : "draft sync failed";
-      saveLocal(latest);
-      if (!latest.syncBlocked) scheduleRetry(roomId, latest.nextSyncAt);
-      emit();
     }
+    const latest = readLocal(roomId);
+    // A newer server frame may have established an actionable conflict while
+    // this request was in flight. Its decision barrier must win over a late
+    // transport failure from the superseded request.
+    if (
+      latest.pendingRemote &&
+      latest.syncBlocked &&
+      latest.syncError === "conflict"
+    ) {
+      return;
+    }
+    const attempts = (latest.syncAttempts || 0) + 1;
+    const status = failure instanceof ApiError ? failure.status : 0;
+    const retryAfter = failure instanceof ApiError ? failure.retryAfterMs : null;
+    const decision = decideClientRetry(status, attempts, Date.now(), undefined, retryAfter);
+    latest.syncAttempts = attempts;
+    latest.syncBlocked = decision.state === "blocked";
+    latest.nextSyncAt = decision.nextAttemptAt;
+    latest.syncError = failure instanceof Error ? failure.message : "draft sync failed";
+    await saveLocal(latest);
+    if (!latest.syncBlocked) scheduleRetry(roomId, latest.nextSyncAt);
+    emit();
   }
 }
 
@@ -988,22 +941,21 @@ function markDirty(roomId: string): Promise<boolean> {
   draft.localClearedAt = draft.text.length || draft.attachments.length || draft.reply_to_event_id
     ? 0
     : draft.lastLocalEditAt;
-  if (
-    draft.pendingRemote &&
-    !remoteDraftRequiresChoice(draft, draft.pendingRemote)
-  ) {
+  if (draft.pendingRemote) {
+    // Typing is the decision: preserve the live local input, silently rebase
+    // it onto the latest known cloud version, and resume normal draft sync.
     draft.version = Math.max(draft.version, draft.pendingRemote.version);
     draft.updated_at = draft.pendingRemote.updated_at;
     draft.pendingRemote = null;
+    if (draft.syncError === "conflict") {
+      draft.syncError = undefined;
+      draft.syncAttempts = 0;
+      draft.nextSyncAt = 0;
+      draft.syncBlocked = false;
+      cancelRetry(roomId);
+    }
   }
-  if (draft.pendingRemote && remoteDraftRequiresChoice(draft, draft.pendingRemote)) {
-    draft.syncError = "conflict";
-    draft.syncAttempts = 0;
-    draft.nextSyncAt = 0;
-    draft.syncBlocked = true;
-    cancelRetry(roomId);
-    cancelServerSchedule(roomId);
-  } else if (!draft.pendingClearAfterSend) {
+  if (!draft.pendingClearAfterSend) {
     draft.syncError = undefined;
     draft.syncAttempts = 0;
     draft.nextSyncAt = 0;
@@ -1207,9 +1159,9 @@ export function retryDraftSync(roomId: string): void {
   if (typeof window === "undefined" || !roomId) return;
   const draft = readLocal(roomId);
   if (!draft.dirty && !draft.pendingClearAfterSend) return;
-  // A retry button cannot stand in for the user's explicit local/remote choice.
-  // In particular, never let a reload turn a preserved divergent remote draft
-  // into an authorized DELETE.
+  // A legacy conflict barrier may still exist in pre-migration memory. Never
+  // let a retry turn a preserved divergent remote draft into an authorized
+  // DELETE; hydration resolves valid legacy snapshots first.
   if (hasExplicitDraftConflict(draft)) return;
   draft.syncBlocked = false;
   draft.nextSyncAt = 0;
@@ -1341,7 +1293,7 @@ function deleteServerDraftAfterSend(roomId: string): Promise<void> {
           origin_device: deviceId(),
         });
         if (!serverDraftIsCleared(remote)) {
-          await blockDraftOnRemote(readLocal(roomId), remote);
+          await resolveClearRaceSilently(readLocal(roomId), remote);
           return;
         }
         await applyServerDraft(remote, { ack: true, clearAck: true });
@@ -1394,9 +1346,9 @@ function deleteServerDraftAfterSend(roomId: string): Promise<void> {
           );
           return;
         }
-        // A divergent current draft, or a second race after the one bounded
-        // rebase, requires an explicit choice instead of an automatic delete.
-        await blockDraftOnRemote(latest, current);
+        // Another device authored a different draft before this clear landed.
+        // Cancel the destructive clear and reconcile it silently.
+        await resolveClearRaceSilently(latest, current);
       }
     };
 
@@ -1488,71 +1440,6 @@ export function allowDraftNavigation(roomId?: string | null): boolean {
   return false;
 }
 
-export type DraftConflictChoice = "local" | "remote";
-
-/** Resolve a cross-device conflict without ever discarding both copies.
- * Keeping local rebases it on the latest server version and retries immediately;
- * keeping remote adopts the complete remote composer snapshot atomically. */
-export function resolveDraftConflict(roomId: string, choice: DraftConflictChoice): void {
-  if (typeof window === "undefined" || !roomId) return;
-  const draft = readLocal(roomId);
-  const remote = draft.pendingRemote;
-  if (!remote) return;
-
-  const resolved = resolveDraftChoice(
-    draft.text,
-    draft.version,
-    remote.text || "",
-    remote.version,
-    choice,
-  );
-  draft.version = resolved.version;
-  draft.updated_at = remote.updated_at;
-  draft.pendingRemote = null;
-  draft.syncError = undefined;
-  draft.syncAttempts = 0;
-  draft.nextSyncAt = 0;
-  draft.syncBlocked = false;
-  if (choice === "remote") {
-    draft.text = resolved.text;
-    draft.selection_start = resolved.text.length;
-    draft.selection_end = resolved.text.length;
-    draft.selection_direction = "none";
-    draft.attachments = sanitizeAttachments(remote.attachments ?? []);
-    draft.reply_to_event_id = remote.reply_to_event_id || "";
-    draft.reply_to_snapshot = remote.reply_to_snapshot ?? {};
-    draft.content_updated_at = remote.content_updated_at ?? remote.updated_at;
-    draft.lastLocalEditAt = remoteContentTimestamp(remote);
-    draft.origin_device = remote.origin_device ?? "";
-    draft.dirty = resolved.needsSync;
-    draft.localClearedAt = resolved.text || draft.attachments.length || draft.reply_to_event_id
-      ? 0
-      : Date.now();
-    // Choosing the remote copy explicitly abandons any earlier post-send clear
-    // intent; retaining it would later delete the version the user just chose.
-    draft.pendingClearAfterSend = null;
-  } else {
-    draft.text = resolved.text;
-    draft.dirty = resolved.needsSync;
-    // Choosing a copy is not a content edit; preserve its authored timestamp
-    // so an old local draft cannot become "new" simply by clicking Keep.
-    draft.origin_device = deviceId();
-    if (draft.pendingClearAfterSend) {
-      draft.pendingClearAfterSend.base_version = Math.max(
-        draft.pendingClearAfterSend.base_version,
-        draft.version,
-      );
-    }
-  }
-  saveLocal(draft);
-  schedulePublish(roomId, true);
-  emit();
-  if (choice === "local") {
-    if (draft.pendingClearAfterSend) void deleteServerDraftAfterSend(roomId);
-    else void flushServer(roomId);
-  }
-}
-
 function resetDraftSyncState(draft: LocalDraft): void {
   draft.syncError = undefined;
   draft.syncAttempts = 0;
@@ -1575,29 +1462,84 @@ function clearMatchingPendingBarrier(draft: LocalDraft, server: DraftState): boo
   return true;
 }
 
-function blockDraftOnRemote(draft: LocalDraft, server: DraftState): Promise<boolean> {
-  draft.version = Math.max(draft.version, server.version);
-  draft.pendingRemote = server;
-  draft.syncError = "conflict";
-  draft.syncAttempts = 0;
-  draft.nextSyncAt = 0;
-  draft.syncBlocked = true;
-  cancelRetry(server.room_id);
-  cancelServerSchedule(server.room_id);
-  const saved = saveLocal(draft);
-  emit();
-  return saved;
-}
-
 function rebaseLocalOverRemote(draft: LocalDraft, server: DraftState): Promise<boolean> {
   draft.version = Math.max(draft.version, server.version);
   draft.updated_at = server.updated_at;
   draft.origin_device = deviceId();
+  draft.lastServerSyncAt = Date.now();
   draft.pendingRemote = null;
   resetDraftSyncState(draft);
   const saved = saveLocal(draft);
   emit();
   if (draft.dirty) scheduleServer(server.room_id);
+  return saved;
+}
+
+function adoptServerProjection(draft: LocalDraft, server: DraftState): Promise<boolean> {
+  cancelRetry(server.room_id);
+  cancelServerSchedule(server.room_id);
+  draft.text = server.text || "";
+  draft.selection_start = draft.text.length;
+  draft.selection_end = draft.text.length;
+  draft.selection_direction = "none";
+  draft.attachments = sanitizeAttachments(server.attachments ?? []);
+  draft.reply_to_event_id = server.reply_to_event_id || "";
+  draft.reply_to_snapshot = server.reply_to_snapshot ?? {};
+  draft.version = Math.max(draft.version, server.version);
+  draft.updated_at = server.updated_at;
+  draft.content_updated_at = server.content_updated_at ?? server.updated_at;
+  draft.lastLocalEditAt = remoteContentTimestamp(server);
+  draft.lastServerSyncAt = Date.now();
+  draft.origin_device = server.origin_device ?? "";
+  draft.dirty = false;
+  draft.pendingRemote = null;
+  draft.pendingClearAfterSend = null;
+  resetDraftSyncState(draft);
+  const remoteTimestamp = parsedTimestamp(server.cleared_at || server.updated_at);
+  draft.localClearedAt = localDraftHasContent(draft)
+    ? 0
+    : Math.max(draft.localClearedAt, remoteTimestamp, Date.now());
+  const saved = saveLocal(draft);
+  schedulePublish(server.room_id, true);
+  emit();
+  return saved;
+}
+
+/** A post-send DELETE can race a draft authored elsewhere. Never keep asking
+ * the user which one to retain: a newer live local edit stays authoritative;
+ * otherwise the complete cloud draft is restored and the delete is cancelled. */
+function resolveClearRaceSilently(draft: LocalDraft, server: DraftState): Promise<boolean> {
+  draft.pendingClearAfterSend = null;
+  cancelRetry(server.room_id);
+  cancelServerSchedule(server.room_id);
+  return draft.dirty
+    ? rebaseLocalOverRemote(draft, server)
+    : adoptServerProjection(draft, server);
+}
+
+/** A clean empty local composer can still receive a delayed active snapshot
+ * from an older tab/build. When the locally persisted clear was authored after
+ * that snapshot, reassert the tombstone against the server version instead of
+ * resurrecting the text or recreating the retired conflict modal. */
+function reassertNewerLocalClear(draft: LocalDraft, server: DraftState): Promise<boolean> {
+  cancelRetry(server.room_id);
+  cancelServerSchedule(server.room_id);
+  draft.version = Math.max(draft.version, server.version);
+  draft.updated_at = server.updated_at;
+  draft.origin_device = deviceId();
+  draft.pendingRemote = null;
+  draft.pendingClearAfterSend = {
+    text: server.text || "",
+    attachments: cloudDraftAttachments(server.attachments ?? []),
+    reply_to_event_id: server.reply_to_event_id || "",
+    base_version: server.version,
+    content_updated_at: server.content_updated_at ?? server.updated_at,
+  };
+  resetDraftSyncState(draft);
+  const saved = saveLocal(draft);
+  schedulePublish(server.room_id, true);
+  emit();
+  Promise.resolve().then(() => void deleteServerDraftAfterSend(server.room_id));
   return saved;
 }
 
@@ -1619,7 +1561,6 @@ export function applyServerDraft(
 ): Promise<boolean> {
   if (typeof window === "undefined" || !server.room_id) return Promise.resolve(false);
   const draft = readLocal(server.room_id);
-  const serverAttachments = sanitizeAttachments(server.attachments ?? []);
   const matchesServer =
     semanticDraftMatches(draft.text, draft.attachments, draft.reply_to_event_id, server);
   const pendingVersion = draft.pendingRemote?.version ?? -1;
@@ -1702,8 +1643,8 @@ export function applyServerDraft(
       return Promise.resolve(true);
     }
     // The cloud draft moved to different semantics before the clear could be
-    // proven. Never delete that state automatically.
-    return blockDraftOnRemote(draft, server);
+    // proven. Cancel the delete and reconcile without interrupting the input.
+    return resolveClearRaceSilently(draft, server);
   }
 
   // Only the direct response to our own request is an acknowledgement. An
@@ -1713,10 +1654,12 @@ export function applyServerDraft(
   if (opts.ack) {
     clearMatchingPendingBarrier(draft, server);
     draft.version = Math.max(draft.version, server.version);
-    draft.updated_at = server.updated_at;
-    draft.content_updated_at = server.content_updated_at ?? draft.content_updated_at;
-    draft.origin_device = server.origin_device ?? "";
-    draft.lastServerSyncAt = Date.now();
+    if (server.version >= localVersion) {
+      draft.updated_at = server.updated_at;
+      draft.content_updated_at = server.content_updated_at ?? draft.content_updated_at;
+      draft.origin_device = server.origin_device ?? "";
+      draft.lastServerSyncAt = Date.now();
+    }
     if (
       matchesServer &&
       server.version >= localVersion &&
@@ -1781,8 +1724,8 @@ export function applyServerDraft(
     draft.syncError === "conflict";
 
   // A dirty composer is based on its current server version. Replaying that
-  // version (for example on room open or immediately after Keep this device)
-  // is stale context, not a new conflict. Older frames are ignored as well.
+  // version (for example on room open or immediately after a local rebase) is
+  // stale context, not a new update. Older frames are ignored as well.
   if (server.version < draft.version || (server.version === draft.version && draft.dirty)) {
     return Promise.resolve(true);
   }
@@ -1790,41 +1733,25 @@ export function applyServerDraft(
     return Promise.resolve(true);
   }
 
-  if (draft.dirty || explicitConflict) {
-    return remoteDraftRequiresChoice(draft, server)
-      ? blockDraftOnRemote(draft, server)
-      : rebaseLocalOverRemote(draft, server);
+  const localClearIsNewer =
+    !draft.dirty &&
+    !localDraftHasContent(draft) &&
+    !serverDraftIsCleared(server) &&
+    draft.localClearedAt > 0 &&
+    draft.localClearedAt > remoteContentTimestamp(server);
+  if (localClearIsNewer) {
+    return reassertNewerLocalClear(draft, server);
   }
-  draft.text = server.text || "";
-  draft.selection_start = draft.text.length;
-  draft.selection_end = draft.text.length;
-  draft.selection_direction = "none";
-  draft.attachments = serverAttachments;
-  draft.reply_to_event_id = server.reply_to_event_id || "";
-  draft.reply_to_snapshot = server.reply_to_snapshot ?? {};
-  draft.version = server.version;
-  draft.updated_at = server.updated_at;
-  draft.content_updated_at = server.content_updated_at ?? server.updated_at;
-  draft.lastLocalEditAt = remoteContentTimestamp(server);
-  draft.origin_device = server.origin_device ?? "";
-  draft.dirty = false;
-  draft.pendingRemote = null;
-  draft.syncError = undefined;
-  draft.syncAttempts = 0;
-  draft.nextSyncAt = 0;
-  draft.syncBlocked = false;
-  draft.localClearedAt = draft.text || draft.attachments.length || draft.reply_to_event_id
-    ? 0
-    : Date.now();
-  const saved = saveLocal(draft);
-  schedulePublish(server.room_id, true);
-  emit();
-  return saved;
+
+  if (draft.dirty || explicitConflict) {
+    return rebaseLocalOverRemote(draft, server);
+  }
+  return adoptServerProjection(draft, server);
 }
 
 /** Replace the server-synced draft projection from an authoritative initial
  * manifest. Absence clears only a previously synced clean copy; local edits,
- * queued persistence, and unresolved conflicts always win and remain intact. */
+ * queued persistence, and post-send clear recovery remain intact. */
 export async function reconcileServerDraftManifest(
   activeDrafts: DraftState[],
   visibleRoomIds: string[] = [],
@@ -1901,7 +1828,7 @@ export async function loadServerDraft(roomId: string): Promise<void> {
   if (!roomId || !canPersist()) return;
   try {
     const server = await api.draft(roomId);
-    applyServerDraft(server);
+    await applyServerDraft(server);
   } catch {
     /* old backend/offline: keep local-only */
   }
@@ -1911,7 +1838,7 @@ export async function loadAllServerDrafts(): Promise<void> {
   if (!canPersist()) return;
   try {
     const res = await api.drafts();
-    for (const draft of res.drafts ?? []) applyServerDraft(draft);
+    for (const draft of res.drafts ?? []) await applyServerDraft(draft);
   } catch {
     /* old backend/offline: keep local-only */
   }
@@ -2043,21 +1970,6 @@ export function useDraftReply(roomId: string): ReplyDraftTarget | null {
   return React.useSyncExternalStore(
     subscribe,
     () => getDraftReply(roomId),
-    () => null,
-  );
-}
-
-export function useDraftConflict(roomId: string): DraftState | null {
-  return React.useSyncExternalStore(
-    subscribe,
-    () => {
-      const draft = readLocal(roomId);
-      if (!draft.pendingRemote) return null;
-      return draft.dirty ||
-        (draft.syncBlocked && draft.syncError === "conflict")
-        ? draft.pendingRemote
-        : null;
-    },
     () => null,
   );
 }

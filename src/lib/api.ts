@@ -1007,6 +1007,16 @@ export const api = {
    * playback still uses the direct presigned download URL. */
   mediaContent: (media_id: string) =>
     callBlob(`/api/v1/media/${encodeURIComponent(media_id)}/content`),
+  /** A bounded authenticated text head for CSV/Markdown previews. This route
+   * stays valid after the direct object-storage grant embedded in old events
+   * has expired. */
+  mediaTextPreview: async (media_id: string, maxBytes = 64 * 1024) => {
+    const bounded = Math.max(4 * 1024, Math.min(Math.trunc(maxBytes), 256 * 1024));
+    const blob = await callBlob(
+      `/api/v1/media/${encodeURIComponent(media_id)}/content?head=${bounded}`,
+    );
+    return blob.text();
+  },
   /**
    * Confirm an S3 upload completed. Flips MediaObject.status from "pending"
    * to "ready" so subsequent /media/<id> returns a download_url instead of

@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
-import { validateImageFile } from "@/lib/image-upload";
+import { compressProfileImage, validateImageFile } from "@/lib/image-upload";
 import { guessTimezone } from "@/lib/timezones";
 import type { Carbon } from "@/lib/types";
 
@@ -152,16 +152,17 @@ export function ProfileEditor() {
     setBusy(true);
     setPhotoBusy(true);
     try {
+      const uploadFile = await compressProfileImage(file);
       const r = await api.presignUpload({
-        mime: file.type,
-        size: file.size,
+        mime: uploadFile.type,
+        size: uploadFile.size,
         kind: "profile_icon",
-        filename: file.name,
+        filename: uploadFile.name,
       });
       if (!r.upload.dev_mode) {
         const form = new FormData();
         for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-        form.append("file", file);
+        form.append("file", uploadFile);
         const up = await fetch(r.upload.url, { method: r.upload.method || "POST", body: form });
         if (!up.ok) throw new Error(`upload failed (${up.status})`);
         await api.mediaComplete(r.media.media_id);

@@ -241,16 +241,17 @@ test("receipts distinguish local waiting from server acceptance", () => {
   });
 });
 
-test("sent, delivered, and read use Signal-style circled receipt shapes", async () => {
+test("waiting, sent, delivered, and read use the requested Phosphor glyph classes", async () => {
   const source = await readFile(
     new URL("../../src/components/chat/message-receipt-glyph.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /state: "sent" \| "delivered" \| "read"/);
-  assert.match(source, /state === "sent" \? \[10\] : \[7\.1, 12\.9\]/);
-  assert.match(source, /fill=\{read \? "currentColor" : "none"\}/);
-  assert.match(source, /stroke=\{read \? "var\(--background\)" : "currentColor"\}/);
-  assert.doesNotMatch(source, /<Checks/);
+  assert.match(source, /"ph ph-clock opacity-60"/);
+  assert.match(source, /"ph ph-check"/);
+  assert.match(source, /"ph ph-checks"/);
+  assert.match(source, /weight="fill"/);
+  assert.match(source, /"ph-fill ph-checks"/);
+  assert.doesNotMatch(source, /SignalReceiptMark/);
 });
 
 test("group receipts never overclaim partial delivery or partial read", () => {

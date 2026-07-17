@@ -52,3 +52,19 @@ test("avatars keep a neutral surface while an authoritative photo refreshes", as
   assert.match(source, /if \(readyFallbackKey !== fallbackKey\)/);
   assert.ok(neutral >= 0 && generated > neutral);
 });
+
+test("profile, contact, onboarding, and team images are compressed before upload", async () => {
+  const files = await Promise.all([
+    "../../src/components/profile/profile-editor.tsx",
+    "../../src/components/chat/save-contact-dialog.tsx",
+    "../../src/app/onboarding/page.tsx",
+    "../../src/components/teams/team-panel.tsx",
+  ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+  for (const source of files) assert.match(source, /compressProfileImage\(/);
+  const compressor = await readFile(
+    new URL("../../src/lib/image-upload.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(compressor, /const maxSide = 640/);
+  assert.match(compressor, /canvas\.toBlob\(resolve, "image\/webp", quality\)/);
+});

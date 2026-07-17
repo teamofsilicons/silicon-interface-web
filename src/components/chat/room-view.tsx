@@ -1724,7 +1724,6 @@ export function RoomView({
         setLoadingOlder(false);
       }
     };
-    let durableCachePromise: Promise<void> = Promise.resolve();
     if (cacheOwner) {
       void Promise.all([listOutbox(cacheOwner), listHeldCancellations(cacheOwner)]).then(([entries, cancellations]) => {
         if (!mounted || !myUsername) return;
@@ -1832,7 +1831,7 @@ export function RoomView({
         );
         setLoading(false);
       }).catch(() => undefined);
-      durableCachePromise = loadStoredRoomEvents(cacheOwner, roomId, 100).then(async (stored) => {
+      void loadStoredRoomEvents(cacheOwner, roomId, 100).then(async (stored) => {
         if (!mounted || stored.length === 0) return;
         durableCacheAvailable = true;
         await commitInitialTimelineRows(stored);
@@ -1862,7 +1861,6 @@ export function RoomView({
     };
     loadTimelineWindow(roomId)
       .then(async ({ events: evs, hasMore, cursor, boundaryEventId }) => {
-        await durableCachePromise;
         if (!mounted) return;
         reportHistoryHealthy();
         // Loaded history is complete — mark final so it doesn't replay

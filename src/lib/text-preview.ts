@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import { api } from "@/lib/api";
 import { isTextLikeFile } from "@/lib/programmatic-files";
 
 /**
@@ -22,11 +23,19 @@ function fetchSnippet(url: string, key: string, maxChars: number): Promise<strin
   if (hit !== undefined) return Promise.resolve(hit);
   const existing = inflight.get(key);
   if (existing) return existing;
-  const p = fetch(url, { mode: "cors" })
-    .then((r) => {
-      if (!r.ok) throw new Error(`status ${r.status}`);
-      return r.text();
-    })
+  const mediaId = /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(key) ? key : null;
+  const authenticatedHead = mediaId
+    ? api.mediaTextPreview(mediaId, Math.max(64 * 1024, maxChars * 4))
+    : Promise.reject(new Error("not a durable media id"));
+  const directHead = () => fetch(url, { mode: "cors" }).then((r) => {
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    return r.text();
+  });
+  // Historical events often carry an object-storage grant that has naturally
+  // expired. Prefer Glass's authenticated stable route, retaining the direct
+  // fetch only for local/blob URLs and older non-ULID fixtures.
+  const p = authenticatedHead
+    .catch(directHead)
     .then((t) => {
       const snippet = t.slice(0, maxChars);
       cache.set(key, snippet);

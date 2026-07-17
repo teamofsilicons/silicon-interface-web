@@ -5,7 +5,7 @@ import { Camera, CircleNotch } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
-import { validateImageFile } from "@/lib/image-upload";
+import { compressProfileImage, validateImageFile } from "@/lib/image-upload";
 import type { Contact, RoomPeer } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
@@ -71,23 +71,24 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
     }
     setBusy(true);
     try {
+      const uploadFile = await compressProfileImage(file);
       const r = await api.presignUpload({
-        mime: file.type,
-        size: file.size,
+        mime: uploadFile.type,
+        size: uploadFile.size,
         kind: "profile_icon",
-        filename: file.name,
+        filename: uploadFile.name,
       });
       if (!r.upload.dev_mode) {
         const form = new FormData();
         for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
-        form.append("file", file);
+        form.append("file", uploadFile);
         const up = await fetch(r.upload.url, { method: r.upload.method || "POST", body: form });
         if (!up.ok) throw new Error(`upload failed (${up.status})`);
         await api.mediaComplete(r.media.media_id);
       }
       const key = (r.upload.fields as Record<string, string>).key || r.media.media_id;
       setPhotoKey(key);
-      setPhotoUrl(URL.createObjectURL(file));
+      setPhotoUrl(URL.createObjectURL(uploadFile));
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {

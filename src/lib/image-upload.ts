@@ -52,3 +52,49 @@ export function validateImageFile(file: File): ImageValidation {
   }
   return { ok: true };
 }
+
+/** Normalize profile/contact photos before upload. A 640px WebP is ample for
+ * every avatar surface, avoids repeatedly shipping multi-megabyte camera
+ * originals, and gives the browser a consistent, broadly cacheable format. */
+export async function compressProfileImage(file: File): Promise<File> {
+  const validation = validateImageFile(file);
+  if (!validation.ok) throw new Error(validation.error ?? "unsupported image");
+  // Preserve animated GIFs; flattening them to a canvas would be surprising.
+  if (file.type.toLowerCase() === "image/gif") return file;
+  if (typeof document === "undefined" || typeof createImageBitmap !== "function") return file;
+
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    // Keep the valid original on browsers that can display a format in <img>
+    // but cannot decode it through createImageBitmap for canvas compression.
+    return file;
+  }
+  try {
+    const maxSide = 640;
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: true });
+    if (!context) return file;
+    context.drawImage(bitmap, 0, 0, width, height);
+    const encode = (quality: number) => new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/webp", quality);
+    });
+    let blob = await encode(0.82);
+    if (blob && blob.size > 512 * 1024) blob = await encode(0.7);
+    if (blob && blob.size > 512 * 1024) blob = await encode(0.58);
+    if (!blob || (scale === 1 && blob.size >= file.size)) return file;
+    const stem = file.name.replace(/\.[^.]+$/, "") || "profile-photo";
+    return new File([blob], `${stem}.webp`, {
+      type: "image/webp",
+      lastModified: file.lastModified,
+    });
+  } finally {
+    bitmap.close();
+  }
+}

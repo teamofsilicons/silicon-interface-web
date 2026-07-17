@@ -1939,6 +1939,18 @@ function ChatPageInner() {
       })),
       checkpoint,
     }, signal);
+    // Make every freshly-synced room immediately paintable on first open.
+    // IndexedDB remains the durable source; this tiny synchronous tail avoids
+    // a blank chat while either IndexedDB or the network is still resolving.
+    const snippetByRoom = new Map<string, Event[]>();
+    for (const frame of snapshotFrames) {
+      const current = snippetByRoom.get(frame.room_id) ?? [];
+      current.push(frame.event);
+      snippetByRoom.set(frame.room_id, current);
+    }
+    for (const [roomId, events] of snippetByRoom) {
+      saveRoomEventSnippet(roomId, events);
+    }
     if (signal?.aborted) throw new DOMException("Sync generation was superseded", "AbortError");
     if (authStore.getCarbon()?.carbon_id !== owner) return;
     await hydrateInitialSyncBundle(owner);

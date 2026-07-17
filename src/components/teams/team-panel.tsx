@@ -15,6 +15,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { env } from "@/lib/env";
+import { compressProfileImage } from "@/lib/image-upload";
 import { isTeamHead } from "@/lib/use-teams";
 import { cn, relativeTime } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
@@ -1565,7 +1566,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
     if (!file) return;
     setLogoBusy(true);
     try {
-      const updated = await api.uploadTeamLogo(team.slug, file);
+      const updated = await api.uploadTeamLogo(team.slug, await compressProfileImage(file));
       onSaved(updated);
       toast.success("team logo updated");
     } catch (e) {

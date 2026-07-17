@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { parseCsvPreview } from "../../src/lib/csv-preview.ts";
@@ -8,6 +9,16 @@ import { hasRenderedSourcePreview } from "../../src/lib/programmatic-files.ts";
 test("CSV files select the rendered table preview by extension or MIME", () => {
   assert.equal(hasRenderedSourcePreview("report.CSV", "application/octet-stream"), true);
   assert.equal(hasRenderedSourcePreview("report", "text/csv; charset=utf-8"), true);
+});
+
+test("historical CSV previews use the stable authenticated media route", async () => {
+  const [previewSource, apiSource] = await Promise.all([
+    readFile(new URL("../../src/lib/text-preview.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../src/lib/api.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(previewSource, /api\.mediaTextPreview\(mediaId/);
+  assert.match(apiSource, /\/content\?head=\$\{bounded\}/);
+  assert.match(previewSource, /\.catch\(directHead\)/);
 });
 
 test("CSV preview parses quoted separators, escaped quotes, and record breaks", () => {

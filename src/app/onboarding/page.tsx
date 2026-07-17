@@ -12,6 +12,8 @@ import { toastError } from "@/lib/errors";
 import { generateAndStoreAvatar } from "@/lib/avatar";
 import { suggestCarbonId } from "@/lib/email";
 import { safeSession } from "@/lib/safe-storage";
+import { compressProfileImage, validateImageFile } from "@/lib/image-upload";
+import { toast } from "sonner";
 
 import { Logo } from "@/components/logo";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -245,12 +247,21 @@ function OnboardingInner() {
   };
 
   // Photo handlers
-  const onPhotoPick = (f: File | null) => {
-    if (!f || !f.type.startsWith("image/")) return;
-    setPhotoFile(f);
-    // Cheap inline preview using object URL.
-    if (photoPreview) URL.revokeObjectURL(photoPreview);
-    setPhotoPreview(URL.createObjectURL(f));
+  const onPhotoPick = async (f: File | null) => {
+    if (!f) return;
+    const validation = validateImageFile(f);
+    if (!validation.ok) {
+      toast.error(validation.error ?? "unsupported image");
+      return;
+    }
+    try {
+      const normalized = await compressProfileImage(f);
+      setPhotoFile(normalized);
+      if (photoPreview) URL.revokeObjectURL(photoPreview);
+      setPhotoPreview(URL.createObjectURL(normalized));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "could not prepare that photo");
+    }
   };
   React.useEffect(() => {
     return () => {
@@ -282,7 +293,7 @@ function OnboardingInner() {
         if (photoFile) {
           try {
             const r = await api.presignUpload({
-              mime: photoFile.type || "image/png",
+              mime: photoFile.type,
               size: photoFile.size,
               kind: "profile_icon",
               filename: photoFile.name,

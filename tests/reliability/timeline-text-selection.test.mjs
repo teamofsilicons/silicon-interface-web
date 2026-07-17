@@ -257,7 +257,7 @@ test("late initial cache hydration uses the same guarded prepend as later pages"
   assert.match(roomViewSource, /captureHistoryViewportAnchor\(incoming\)/);
   assert.match(roomViewSource, /if \(protectReaderPosition\) preserveHistoryViewportAnchor\(true\)/);
   assert.match(roomViewSource, /await commitInitialTimelineRows\(stored\)/);
-  assert.match(roomViewSource, /await durableCachePromise/);
+  assert.doesNotMatch(roomViewSource, /await durableCachePromise/);
 });
 
 test("history pages become durable before the recipient acknowledges delivery", () => {

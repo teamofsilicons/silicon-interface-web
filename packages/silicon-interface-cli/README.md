@@ -7,6 +7,12 @@ multipart media contracts rather than maintaining a second chat protocol.
 
 Requires Node.js 22 or newer.
 
+With no endpoint override, the CLI connects to the production Glass service at
+`https://glass.teamofsilicons.com` and derives
+`wss://glass.teamofsilicons.com` for realtime delivery. `--api`, `--ws`, the
+corresponding environment variables, saved config, and `.glass.json` override
+those defaults, so local Glass development can still use `http://127.0.0.1:8000`.
+
 ## Start
 
 From the monorepo root:
@@ -92,6 +98,34 @@ Older Glass deployments automatically fall back to the legacy presigned upload
 contract. Downloads refresh expired signed URLs and verify SHA-256 when Glass
 provides one. Albums publish two to ten ready files as one atomic `m.album`
 event, so recipients never see a partial group.
+
+## Local speech tools
+
+Standalone speech-to-text accepts a local audio file, uploads it privately to
+Glass, waits for the authoritative transcript, and prints only the transcript
+for easy shell composition. It also accepts an existing Glass media ID:
+
+```bash
+si stt ./voice-note.m4a
+si stt ./interview.wav --language en --output interview.txt
+si stt <media-id> --json
+```
+
+Standalone text-to-speech waits for Glass and downloads the generated MP3. Text
+may come from arguments, a file, or stdin:
+
+```bash
+si tts "Deploy completed"
+si tts "Welcome aboard" --voice Puck --output welcome.mp3
+si tts --text-file narration.txt --output narration.mp3
+printf '%s' "Build complete" | si tts --output build-complete.mp3
+```
+
+Without `--output`, standalone TTS saves `tts-<media-id>.mp3` in the current
+directory and prints its absolute path. Add `--room <room-id>` to retain the
+existing behavior where Glass posts an `m.tts` event when synthesis completes;
+combine it with `--output` to post and keep a local copy. Both commands accept
+`--wait-seconds` and `--poll-ms`, or `--no-wait` when only queueing is desired.
 
 ## Durable live stream and inbox
 

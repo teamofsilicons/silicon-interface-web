@@ -144,6 +144,21 @@ function consumeClientWebSocketFrames(buffer, onText, onClose = () => {}) {
   return buffer.subarray(offset);
 }
 
+test("clean installs default API and WebSocket traffic to production Glass", async () => {
+  await withTempDir(async (tempDir) => {
+    const result = await runCli(["--json", "config", "show"], tempDir, {
+      SILICON_INTERFACE_API_BASE: "",
+      SILICON_INTERFACE_WS_BASE: "",
+      NEXT_PUBLIC_API_BASE: "",
+      NEXT_PUBLIC_WS_BASE: "",
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const config = JSON.parse(result.stdout);
+    assert.equal(config.effectiveApiBase, "https://glass.teamofsilicons.com");
+    assert.equal(config.effectiveWsBase, "wss://glass.teamofsilicons.com");
+  });
+});
+
 test("Silicon authentication automatically starts and clears the live inbox daemon", async () => {
   await withTempDir(async (tempDir) => {
     const apiBase = "http://127.0.0.1:1";
@@ -179,6 +194,145 @@ test("Silicon authentication automatically starts and clears the live inbox daem
       assert.equal(JSON.parse(stoppedStatus.stdout).running, false);
     } finally {
       await runCli(["daemon", "stop"], tempDir);
+    }
+  });
+});
+
+test("standalone voice tools transcribe local audio and download synthesized audio", async () => {
+  await withTempDir(async (tempDir) => {
+    const synthesized = Buffer.from("SYNTHESIZED_MP3");
+    const synthesizedSha = createHash("sha256").update(synthesized).digest("hex");
+    const requests = [];
+    let ttsReads = 0;
+    let sttQueued = false;
+    let sttReads = 0;
+    const mock = await startServer(async (request, response, baseUrl) => {
+      requests.push({ method: request.method, url: request.url });
+      if (request.method === "POST" && request.url === "/api/v1/tts") {
+        const payload = await requestJson(request);
+        assert.deepEqual(payload, { text: "hello locally" });
+        json(response, 202, {
+          job: "queued",
+          media_id: "tts-media",
+          status: "pending",
+          synthesis_state: "pending",
+        });
+        return;
+      }
+      if (request.method === "GET" && request.url === "/api/v1/media/tts-media") {
+        ttsReads += 1;
+        const ready = ttsReads > 1;
+        json(response, 200, {
+          media: {
+            media_id: "tts-media",
+            mime: "audio/mpeg",
+            size: ready ? synthesized.length : 0,
+            sha256: ready ? synthesizedSha : "",
+            status: ready ? "ready" : "pending",
+            kind: "tts_output",
+            synthesis_state: ready ? "ready" : "pending",
+          },
+          download_url: ready ? `${baseUrl}/download/tts-media` : null,
+          attachment_url: ready ? `${baseUrl}/download/tts-media` : null,
+        });
+        return;
+      }
+      if (request.method === "GET" && request.url === "/download/tts-media") {
+        response.writeHead(200, { "content-type": "audio/mpeg", "content-length": synthesized.length });
+        response.end(synthesized);
+        return;
+      }
+      if (request.method === "POST" && request.url === "/api/v1/media/uploads") {
+        json(response, 404, { detail: "multipart unavailable" });
+        return;
+      }
+      if (request.method === "POST" && request.url === "/api/v1/media/upload-url") {
+        const payload = await requestJson(request);
+        assert.equal(payload.kind, "voice");
+        assert.equal(payload.mime, "audio/wav");
+        assert.equal(payload.room_id, "");
+        json(response, 201, {
+          upload: { dev_mode: true },
+          media: { media_id: "stt-media", status: "ready", kind: "voice", mime: "audio/wav" },
+        });
+        return;
+      }
+      if (request.method === "POST" && request.url === "/api/v1/stt") {
+        const payload = await requestJson(request);
+        assert.deepEqual(payload, { media_id: "stt-media", language: "en" });
+        sttQueued = true;
+        json(response, 202, {
+          job: "queued",
+          media_id: "stt-media",
+          transcription_status: "pending",
+        });
+        return;
+      }
+      if (request.method === "GET" && request.url === "/api/v1/media/stt-media") {
+        if (!sttQueued) {
+          json(response, 200, {
+            media: {
+              media_id: "stt-media",
+              status: "ready",
+              kind: "voice",
+              mime: "audio/wav",
+              transcription_status: "none",
+              transcript: "",
+            },
+          });
+          return;
+        }
+        sttReads += 1;
+        const ready = sttReads > 1;
+        json(response, 200, {
+          media: {
+            media_id: "stt-media",
+            status: "ready",
+            kind: "voice",
+            mime: "audio/wav",
+            transcription_status: ready ? "ready" : "pending",
+            transcription_provider: ready ? "glass-stt" : "",
+            transcript: ready ? "authoritative local transcript" : "",
+          },
+        });
+        return;
+      }
+      json(response, 404, { detail: `Unexpected ${request.method} ${request.url}` });
+    });
+    try {
+      const ttsPath = path.join(tempDir, "spoken.mp3");
+      const tts = await runCli(
+        [
+          "--api", mock.baseUrl,
+          "--key", "silicon-key",
+          "tts", "hello", "locally",
+          "--output", ttsPath,
+          "--poll-ms", "250",
+        ],
+        tempDir,
+      );
+      assert.equal(tts.code, 0, tts.stderr);
+      assert.equal(tts.stdout.trim(), ttsPath);
+      assert.deepEqual(await fs.readFile(ttsPath), synthesized);
+
+      const audioPath = path.join(tempDir, "separate-voice.wav");
+      await fs.writeFile(audioPath, Buffer.from("LOCAL_WAVE_BYTES"));
+      const stt = await runCli(
+        [
+          "--api", mock.baseUrl,
+          "--key", "silicon-key",
+          "stt", audioPath,
+          "--language", "en",
+          "--poll-ms", "250",
+        ],
+        tempDir,
+      );
+      assert.equal(stt.code, 0, stt.stderr);
+      assert.equal(stt.stdout.trim(), "authoritative local transcript");
+      assert.equal(requests.some((row) => row.url === "/api/v1/media/uploads"), true);
+      assert.equal(requests.some((row) => row.url === "/api/v1/media/upload-url"), true);
+    } finally {
+      await closeServer(mock.server);
     }
   });
 });

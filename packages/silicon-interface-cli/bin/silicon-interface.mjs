@@ -12,7 +12,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_API_BASE = "http://127.0.0.1:8000";
+const DEFAULT_API_BASE = "https://glass.teamofsilicons.com";
 const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
@@ -29,6 +29,8 @@ const MEDIA_SEND_MAX_RETRIES = 60;
 const MEDIA_SEND_RETRY_TIMEOUT_MS = 60_000;
 const MEDIA_SEND_DEFAULT_RETRY_MS = 1_000;
 const MAX_RETRY_AFTER_MS = 86_400_000;
+const VOICE_JOB_DEFAULT_TIMEOUT_MS = 300_000;
+const VOICE_JOB_DEFAULT_POLL_MS = 1_000;
 const STREAM_STATE_VERSION = 2;
 const OPERATION_JOURNAL_VERSION = 1;
 
@@ -1784,8 +1786,11 @@ Drafts, held sends, and attachments:
   gif send <room> <gif_id> [caption...]
 
 Jobs and automation:
-  tts <text...> [--room room_id] [--voice name] [--scene x] [--style x]
-  stt <media_id> [--language code]
+  tts <text...> [--output audio.mp3] [--text-file prompt.txt]
+      [--room room_id] [--voice name] [--scene x] [--style x]
+                          Standalone text-to-speech saves local audio by default.
+  stt <audio-file|media_id> [--output transcript.txt] [--language code]
+                          Upload/transcribe any local audio file or Glass media.
   crons list [--mine] [--for id] [--setup-by silicon_id]
   crons show <cron_id>
   crons create --trigger "*/5 * * * *" --target carbon:alice --task "check in"
@@ -4533,7 +4538,13 @@ async function downloadMedia(ctx, mediaId, destination, { force = false } = {}) 
 function mimeFromPath(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const map = {
+    ".3gp": "audio/3gpp",
+    ".aac": "audio/aac",
+    ".aif": "audio/aiff",
+    ".aiff": "audio/aiff",
+    ".amr": "audio/amr",
     ".avif": "image/avif",
+    ".flac": "audio/flac",
     ".gif": "image/gif",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -4542,11 +4553,16 @@ function mimeFromPath(filePath) {
     ".md": "text/markdown",
     ".mp3": "audio/mpeg",
     ".mp4": "video/mp4",
+    ".oga": "audio/ogg",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
     ".pdf": "application/pdf",
     ".png": "image/png",
     ".txt": "text/plain",
     ".webm": "audio/webm",
     ".webp": "image/webp",
+    ".wav": "audio/wav",
+    ".wave": "audio/wav",
   };
   return map[ext] || "application/octet-stream";
 }
@@ -4812,28 +4828,250 @@ async function cmdMedia(ctx, args) {
   throw new UsageError("Usage: media show|download <media_id> [path]");
 }
 
+function voiceWaitOptions(options) {
+  return {
+    timeoutMs: numberOption(options.waitSeconds, VOICE_JOB_DEFAULT_TIMEOUT_MS / 1_000, {
+      min: 1,
+      max: 3_600,
+    }) * 1_000,
+    pollMs: numberOption(options.pollMs, VOICE_JOB_DEFAULT_POLL_MS, {
+      min: 250,
+      max: 10_000,
+    }),
+  };
+}
+
+async function waitForVoiceMedia(ctx, mediaId, mode, options = {}) {
+  const { timeoutMs, pollMs } = voiceWaitOptions(options);
+  const deadline = Date.now() + timeoutMs;
+  let detail;
+  while (true) {
+    detail = await api.mediaDetail(ctx, mediaId);
+    const media = detail?.media;
+    if (!media || media.media_id !== mediaId) {
+      throw new ProtocolError(`Glass returned malformed media state for ${mediaId}.`);
+    }
+    if (media.status === "failed" || media.status === "infected") {
+      const reason = media.synthesis_error_code || media.status;
+      throw new ProtocolError(`Media ${mediaId} failed: ${reason}.`);
+    }
+    if (mode === "upload" && media.status === "ready") return detail;
+    if (mode === "tts") {
+      if (media.synthesis_state === "failed" || media.synthesis_state === "suppressed") {
+        const reason = media.synthesis_error_code || media.synthesis_state;
+        throw new ProtocolError(`TTS ${mediaId} failed: ${reason}.`);
+      }
+      if (media.status === "ready" && (!media.synthesis_state || media.synthesis_state === "ready")) {
+        return detail;
+      }
+    }
+    if (mode === "stt") {
+      if (media.transcription_status === "failed") {
+        throw new ProtocolError(
+          `STT ${mediaId} failed. Re-run the command to ask Glass to retry transcription.`,
+        );
+      }
+      if (media.transcription_status === "ready") return detail;
+    }
+    if (Date.now() >= deadline) {
+      throw new TransportError(
+        `Timed out waiting for ${mode.toUpperCase()} media ${mediaId}; the Glass job remains resumable.`,
+      );
+    }
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+  }
+}
+
+function localOutputPath(value, fallback) {
+  const requested = path.resolve(String(value || fallback));
+  if (fs.existsSync(requested) && fs.statSync(requested).isDirectory()) {
+    return path.join(requested, fallback);
+  }
+  return requested;
+}
+
+function looksLikeLocalAudioPath(value) {
+  const text = String(value || "");
+  const mime = mimeFromPath(text);
+  return (
+    path.isAbsolute(text) ||
+    text.startsWith(".") ||
+    text.includes(path.sep) ||
+    mime.startsWith("audio/") ||
+    new Set(["video/mp4", "video/webm"]).has(mime)
+  );
+}
+
+async function uploadStandaloneAudio(ctx, filePath, { mime, clientId, legacy = false } = {}) {
+  const resolvedPath = path.resolve(filePath);
+  if (!fs.existsSync(resolvedPath)) throw new UsageError(`Not a file: ${resolvedPath}`);
+  const stat = fs.statSync(resolvedPath);
+  if (!stat.isFile()) throw new UsageError(`Not a file: ${resolvedPath}`);
+  if (!stat.size) throw new UsageError(`Audio file is empty: ${resolvedPath}`);
+  const detectedMime = String(mime || mimeFromPath(resolvedPath));
+  if (
+    !detectedMime.startsWith("audio/") &&
+    !new Set(["video/mp4", "video/webm"]).has(detectedMime)
+  ) {
+    throw new UsageError(
+      `Cannot identify ${resolvedPath} as audio; pass its content type with --mime audio/...`,
+    );
+  }
+  let media = null;
+  if (!legacy) {
+    try {
+      media = await uploadMultipart(ctx, resolvedPath, {
+        roomId: "",
+        mime: detectedMime,
+        kind: "voice",
+        clientId,
+      });
+    } catch (error) {
+      if (!(error instanceof ApiError) || ![404, 405].includes(error.status)) throw error;
+    }
+  }
+  if (!media) {
+    const presigned = await api.presignUpload(ctx, {
+      mime: detectedMime,
+      size: stat.size,
+      kind: "voice",
+      filename: path.basename(resolvedPath),
+      room_id: "",
+    });
+    await uploadPresigned(presigned.upload, resolvedPath, detectedMime);
+    if (!presigned.upload.dev_mode) {
+      await api.mediaComplete(ctx, presigned.media.media_id, {
+        sha256: await hashFile(resolvedPath),
+      });
+    }
+    media = presigned.media;
+  }
+  if (!media?.media_id) throw new ProtocolError("Glass returned no media identity for the audio upload.");
+  return { media, path: resolvedPath, mime: detectedMime };
+}
+
 async function cmdTts(ctx, args) {
   requireAuth(ctx);
-  const { options, positionals } = parseOptions(args);
-  const text = positionals.join(" ").trim();
-  if (!text) throw new UsageError("Usage: tts <text...> [--room room_id]");
-  const result = await api.tts(ctx, {
+  const { options, positionals } = parseOptions(args, ["force", "noWait", "wait"]);
+  if (options.output === true) throw new UsageError("--output needs a file path.");
+  if (options.textFile === true) throw new UsageError("--text-file needs a file path.");
+  if (options.output && options.noWait) throw new UsageError("--output cannot be combined with --no-wait.");
+  let text = positionals.join(" ").trim();
+  if (options.textFile) {
+    if (text) throw new UsageError("Pass TTS text either as arguments or --text-file, not both.");
+    text = fs.readFileSync(path.resolve(String(options.textFile)), "utf8").trim();
+  } else if (!text && !process.stdin.isTTY) {
+    text = fs.readFileSync(0, "utf8").trim();
+  }
+  if (!text) {
+    throw new UsageError(
+      "Usage: tts <text...> [--output audio.mp3] [--text-file prompt.txt] [--room room_id]",
+    );
+  }
+  if (options.room === true) throw new UsageError("--room needs a room id.");
+  const roomId = options.room ? roomArg(ctx, String(options.room)) : undefined;
+  const queued = await api.tts(ctx, {
     text,
     voice: options.voice,
     scene: options.scene,
     style: options.style,
-    room_id: options.room || ctx.config.defaultRoom || undefined,
+    room_id: roomId,
   });
-  printResult(ctx, result, (data) => printJson(data));
+  if (!queued?.media_id) throw new ProtocolError("Glass queued TTS without returning a media identity.");
+  const shouldWait = !options.noWait && (!roomId || options.wait || options.output);
+  if (!shouldWait) {
+    printResult(ctx, queued, (data) => printJson(data));
+    return;
+  }
+  const detail = await waitForVoiceMedia(ctx, queued.media_id, "tts", options);
+  let downloaded = null;
+  if (!roomId || options.output) {
+    const destination = localOutputPath(options.output, `tts-${queued.media_id}.mp3`);
+    downloaded = await downloadMedia(ctx, queued.media_id, destination, {
+      force: Boolean(options.force),
+    });
+  }
+  const result = {
+    job: queued,
+    media: detail.media,
+    path: downloaded?.path || null,
+    room_id: roomId || null,
+  };
+  printResult(ctx, result, (data) => {
+    if (data.path) console.log(data.path);
+    else console.log(`ready: ${data.media.media_id}`);
+  });
 }
 
 async function cmdStt(ctx, args) {
   requireAuth(ctx);
-  const { options, positionals } = parseOptions(args);
-  const [mediaId] = positionals;
-  if (!mediaId) throw new UsageError("Usage: stt <media_id> [--language code]");
-  const result = await api.stt(ctx, { media_id: mediaId, language: options.language });
-  printResult(ctx, result, (data) => printJson(data));
+  const { options, positionals } = parseOptions(args, ["legacy", "noWait"]);
+  const [source] = positionals;
+  if (!source) {
+    throw new UsageError(
+      "Usage: stt <audio-file|media_id> [--output transcript.txt] [--language code]",
+    );
+  }
+  if (options.output === true) throw new UsageError("--output needs a file path.");
+  if (options.output && options.noWait) throw new UsageError("--output cannot be combined with --no-wait.");
+  let mediaId = source;
+  let operation = null;
+  let localSource = null;
+  if (fs.existsSync(path.resolve(source))) {
+    const resolvedPath = path.resolve(source);
+    const stat = fs.statSync(resolvedPath);
+    operation = options.clientId
+      ? {
+          context: streamStateKey(ctx),
+          signature: operationSignature("stt-file-explicit", { clientId: options.clientId }),
+          clientId: String(options.clientId),
+        }
+      : beginOperation(ctx, "stt-file", {
+          path: resolvedPath,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          language: options.language || "",
+        });
+    localSource = resolvedPath;
+    mediaId = operation.mediaId || "";
+    if (!mediaId) {
+      const uploaded = await uploadStandaloneAudio(ctx, resolvedPath, {
+        mime: options.mime,
+        clientId: `upload_stt_${operation.clientId}`,
+        legacy: Boolean(options.legacy),
+      });
+      mediaId = uploaded.media.media_id;
+      if (!options.clientId) updateOperation(operation, { mediaId });
+    }
+    await waitForVoiceMedia(ctx, mediaId, "upload", options);
+  } else if (looksLikeLocalAudioPath(source)) {
+    throw new UsageError(`Not a file: ${path.resolve(source)}`);
+  }
+  const queued = await api.stt(ctx, { media_id: mediaId, language: options.language });
+  if (options.noWait) {
+    printResult(ctx, { ...queued, source: localSource }, (data) => printJson(data));
+    return;
+  }
+  const detail = await waitForVoiceMedia(ctx, mediaId, "stt", options);
+  const transcript = typeof detail.media.transcript === "string" ? detail.media.transcript : "";
+  const output = options.output
+    ? atomicWriteText(localOutputPath(options.output, `${mediaId}.txt`), `${transcript}\n`)
+    : null;
+  if (operation && !options.clientId) {
+    finishOperation(operation, { mediaId, transcript, output });
+  }
+  const result = {
+    media_id: mediaId,
+    source: localSource,
+    transcript,
+    transcription_status: detail.media.transcription_status,
+    transcription_provider: detail.media.transcription_provider || "",
+    output,
+  };
+  printResult(ctx, result, (data) => {
+    if (data.output) console.log(data.output);
+    else console.log(data.transcript);
+  });
 }
 
 async function cmdCrons(ctx, args) {

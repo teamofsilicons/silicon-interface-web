@@ -53,6 +53,25 @@ test("web credentials stay memory-only and legacy browser copies are purged", ()
   else globalThis.window = previousWindow;
 });
 
+test("clearing browser storage does not revoke active cookie-backed authority", () => {
+  const previousWindow = globalThis.window;
+  const localStorage = storage();
+  globalThis.window = {
+    localStorage,
+    dispatchEvent() {},
+    atob: (value) => Buffer.from(value, "base64").toString("binary"),
+  };
+
+  authStore.setTokens("memory-access", "memory-refresh");
+  localStorage.values.clear();
+  assert.equal(authStore.getAccess(), "memory-access");
+  assert.equal(authStore.getRefresh(), "memory-refresh");
+
+  resetAuthMemory();
+  if (previousWindow === undefined) delete globalThis.window;
+  else globalThis.window = previousWindow;
+});
+
 test("offline owner cache excludes contact data and bearer profile grants", () => {
   const previousWindow = globalThis.window;
   const localStorage = storage();

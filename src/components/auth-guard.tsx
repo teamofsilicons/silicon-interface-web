@@ -15,6 +15,15 @@ const RESTORE_RETRY_MS = 1_500;
 const RESTORE_RETRY_MAX_MS = 60_000;
 const ANONYMOUS_CONFIRM_MS = 500;
 
+async function restoreBrowserAuthority(): Promise<WebSessionRestoreState> {
+  // The renewable HttpOnly cookie is the browser session authority. Missing,
+  // unavailable, or evicted localStorage must never turn into logout: the user
+  // remains signed in until explicit logout or an authoritative backend
+  // rejection proves that the cookie/session is no longer valid.
+  if (authStore.getAccess() || authStore.getSiliconKey()) return "restored";
+  return api.restoreWebSessionState();
+}
+
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [ok, setOk] = React.useState(false);
@@ -34,15 +43,11 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       schedule(retryDelay);
       retryDelay = Math.min(retryDelay * 2, RESTORE_RETRY_MAX_MS);
     };
-    const restoreAuthority = async (): Promise<WebSessionRestoreState> => {
-      if (authStore.getAccess() || authStore.getSiliconKey()) return "restored";
-      return api.restoreWebSessionState();
-    };
     const boot = async () => {
       if (!alive || running) return;
       running = true;
       try {
-        const state = await restoreAuthority();
+        const state = await restoreBrowserAuthority();
         if (!alive) return;
         if (state === "restored") retryDelay = RESTORE_RETRY_MS;
         anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
@@ -143,10 +148,7 @@ export function AuthRouteGuard({ children }: { children: React.ReactNode }) {
       if (!alive || running) return;
       running = true;
       try {
-        const state: WebSessionRestoreState =
-          authStore.getAccess() || authStore.getSiliconKey()
-            ? "restored"
-            : await api.restoreWebSessionState();
+        const state = await restoreBrowserAuthority();
         if (!alive) return;
         anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
         const decision = sessionBootDecision(

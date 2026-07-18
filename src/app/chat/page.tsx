@@ -636,8 +636,12 @@ function ChatPageInner() {
         for (const item of stale) seenEventKeysRef.current.delete(item);
       }
     }
-    pageFrameRef.current(f, opts);
+    // The open room is the latency-sensitive consumer. Let its mounted
+    // listener paint the frame before sidebar projection/cache work; when no
+    // listener exists yet, the page handler below writes the same event into
+    // the handoff cache for the room that is about to mount.
     for (const fn of frameListenersRef.current) fn(f);
+    pageFrameRef.current(f, opts);
   }, []);
   const barrierRef = React.useRef<(
     hello: Extract<WsFrame, { type: "hello" }>,
@@ -668,14 +672,18 @@ function ChatPageInner() {
   }, []);
   const onLiveFrame = React.useCallback(
     (frame: WsFrame) => {
+      // Realtime rendering must never wait for IndexedDB. A blocked/slow
+      // browser transaction previously held this frame—and every receipt,
+      // final, and message queued behind it—out of both the sidebar and the
+      // open timeline for seconds. Render the already-authoritative socket
+      // frame synchronously; keep only persistence and its delivery ack in the
+      // ordered durability lane below.
+      dispatchFrame(frame);
       const owner = authStore.getCarbon()?.carbon_id;
+      if (frame.type !== "event" || !owner) return;
       durableFrameQueueRef.current = durableFrameQueueRef.current
         .catch(() => undefined)
         .then(async () => {
-          if (frame.type !== "event" || !owner) {
-            dispatchFrame(frame);
-            return;
-          }
           let durable = false;
           try {
             await storeEvents(owner, [{ roomId: frame.room_id, event: frame.event }]);
@@ -683,7 +691,6 @@ function ChatPageInner() {
           } catch {
             appendRoomEventSnippet(frame.room_id, frame.event);
           }
-          dispatchFrame(frame);
           if (durable) {
             void flushDeliveryAcknowledgements(owner, frame.traceparent).catch(() => undefined);
           }
@@ -1443,12 +1450,12 @@ function ChatPageInner() {
       .then((room) => {
         if (!alive) return;
         upsertRoom(room);
-        if (selectedRef.current === selected && readOpenedSelectionRef.current !== selected) {
+        if (selectedRef.current === selected) {
           const normalized = normalizeRoom(room);
           if (normalized) markRoomReadImmediately(selected, normalized);
-          // The room detail is authoritative even when there was nothing to
-          // clear. Seal this open gesture so later arrivals still use viewport
-          // visibility rather than being auto-read while the reader is above.
+          // The authoritative detail can contain a newer unread tail than the
+          // cached sidebar row used by the opening gesture. Always retry that
+          // exact target; request-key dedup prevents duplicate POSTs.
           readOpenedSelectionRef.current = selected;
         }
       })
@@ -1939,6 +1946,8 @@ function ChatPageInner() {
       })),
       checkpoint,
     }, signal);
+    if (signal?.aborted) throw new DOMException("Sync generation was superseded", "AbortError");
+    if (authStore.getCarbon()?.carbon_id !== owner) return;
     // Make every freshly-synced room immediately paintable on first open.
     // IndexedDB remains the durable source; this tiny synchronous tail avoids
     // a blank chat while either IndexedDB or the network is still resolving.
@@ -1951,10 +1960,17 @@ function ChatPageInner() {
     for (const [roomId, events] of snippetByRoom) {
       saveRoomEventSnippet(roomId, events);
     }
-    if (signal?.aborted) throw new DOMException("Sync generation was superseded", "AbortError");
-    if (authStore.getCarbon()?.carbon_id !== owner) return;
+    // A first-device/cursor rebuild used to stop at durable storage. If the
+    // selected RoomView was already mounted, it had read the old snippet and
+    // would not see these newly recovered rows until another navigation or
+    // history request. Project every *durably committed* snapshot frame
+    // through the same idempotent handoff as reconnect pages before hydrating
+    // the room list. Mounted timelines paint now; rooms that mount afterward
+    // reread the snippet above. This mirrors the reference clients' durable
+    // get-difference -> visible projection handoff without weakening barriers.
+    for (const frame of snapshotFrames) dispatchFrame(frame, { quiet: true });
     await hydrateInitialSyncBundle(owner);
-  }, [hydrateInitialSyncBundle]);
+  }, [dispatchFrame, hydrateInitialSyncBundle]);
   const initialSnapshot = React.useCallback((
     owner: string,
     signal?: AbortSignal,
@@ -2798,6 +2814,10 @@ function ChatPageInner() {
       const ev = f.event;
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       const rid = f.room_id;
+      // Cache before room lookup: a deep-linked or newly-added room may not be
+      // in the current sidebar projection yet, but its opening RoomView still
+      // needs this accepted frame immediately.
+      appendRoomEventSnippet(rid, ev);
       const liveIdentity = `${rid}:${ev.event_id}`;
       const seenEventIdentity = seenLiveEventIdentitiesRef.current.has(liveIdentity);
       if (!seenEventIdentity) {
@@ -2855,13 +2875,6 @@ function ChatPageInner() {
         if (ev.sender_kind === "silicon") playReceivedSilicon();
         else playReceived();
       }
-      // Every accepted socket event updates the same per-room handoff cache.
-      // Do this even when the room is currently selected: during a sidebar
-      // navigation `selectedRef` changes before the next RoomView mounts, so
-      // assigning cache ownership only to "closed" rooms can lose the event in
-      // that transition window. appendRoomEventSnippet is revision-aware and
-      // idempotent, so the mounted RoomView may safely persist the same event.
-      appendRoomEventSnippet(rid, ev);
       const preview = eventPreview(ev);
       // An open room only counts as "seen" while the user is actually present
       // (in the desktop wrapper: window visible AND focused). A minimized or

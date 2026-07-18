@@ -783,8 +783,9 @@ export function RoomView({
     socketState,
     loading && events.length === 0,
   );
-  // §2.5 — true only once the live fetch resolves. Auto-read is gated on this so
-  // we never clear unread for messages that are only in the localStorage cache.
+  // §2.5 — true once the live fetch resolves. Cached authoritative rows can be
+  // read before this point when they are visibly rendered; hydration still
+  // controls history/pagination readiness.
   const [hydrated, setHydrated] = React.useState(false);
   const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
   // Drives the "waiting → delivered → read" activity sequence.
@@ -2505,9 +2506,29 @@ export function RoomView({
   });
 
   // Subscribe once; the handler ref above carries the latest closure (§2.1).
+  // Install the listener before rereading the page-owned handoff cache. That
+  // closes the only remaining mount race: a frame can land after the initial
+  // layout read but before this passive effect, updating the sidebar while the
+  // open timeline has no listener yet. The page writes every accepted event to
+  // this cache before fan-out, so the post-subscribe merge covers everything
+  // before registration and the listener covers everything after it.
   React.useEffect(() => {
-    return socketSubscribe((f) => frameHandlerRef.current(f));
-  }, [socketSubscribe]);
+    const unsubscribe = socketSubscribe((f) => frameHandlerRef.current(f));
+    const handoff = readRoomEventSnippet(room.room_id) ?? [];
+    if (handoff.length > 0) {
+      setEvents((current) =>
+        mergeServerEvents(
+          current,
+          handoff,
+          room.room_id,
+          myUsername,
+          timelineOwner,
+          timelineDeviceRef.current,
+        ),
+      );
+    }
+    return unsubscribe;
+  }, [myUsername, room.room_id, setEvents, socketSubscribe, timelineOwner]);
 
   // §1.1 — while a progress line is showing, advance a 1s tick so we can detect
   // staleness (the silicon crashed / backend restarted with no `done` frame).
@@ -2523,16 +2544,57 @@ export function RoomView({
   // exposure before advancing the read boundary.
   const committedReadPositionRef = React.useRef(room.unread_boundary.last_read_stream_position);
   const pendingReadPositionRef = React.useRef(0);
+  const committedReadVectorRef = React.useRef(room.unread_boundary.last_read_stream_vector);
+  const readEventRequestsRef = React.useRef(new Set<string>());
+  React.useEffect(() => {
+    committedReadPositionRef.current = Math.max(
+      committedReadPositionRef.current,
+      room.unread_boundary.last_read_stream_position,
+    );
+    const incoming = room.unread_boundary.last_read_stream_vector;
+    if (!incoming) return;
+    const current = committedReadVectorRef.current;
+    const floor = Math.max(current?.floor ?? 0, incoming.floor);
+    const writers: Record<string, number> = {};
+    const names = new Set([
+      ...Object.keys(current?.writers ?? {}),
+      ...Object.keys(incoming.writers),
+    ]);
+    for (const writer of names) {
+      const position = Math.max(
+        current?.writers[writer] ?? current?.floor ?? 0,
+        incoming.writers[writer] ?? incoming.floor,
+      );
+      if (position > floor) writers[writer] = position;
+    }
+    committedReadVectorRef.current = { floor, writers };
+  }, [
+    room.unread_boundary.last_read_stream_position,
+    room.unread_boundary.last_read_stream_vector,
+  ]);
   const commitReadPosition = React.useCallback((
     eventId: string | null,
     streamPosition: number,
+    streamWriter?: string,
     forceLocal = false,
   ) => {
     if (readOnly || !Number.isSafeInteger(streamPosition)) return;
-    if (!forceLocal && streamPosition <= Math.max(
-      committedReadPositionRef.current,
-      pendingReadPositionRef.current,
-    )) return;
+    if (eventId && readEventRequestsRef.current.has(eventId)) return;
+    const vector = committedReadVectorRef.current;
+    const alreadyRead = streamWriter && vector
+      ? streamPosition <= (vector.writers[streamWriter] ?? vector.floor)
+      : streamPosition <= Math.max(
+          committedReadPositionRef.current,
+          pendingReadPositionRef.current,
+        );
+    if (!forceLocal && alreadyRead) return;
+    if (eventId) {
+      readEventRequestsRef.current.add(eventId);
+      if (readEventRequestsRef.current.size > 1_024) {
+        const stale = Array.from(readEventRequestsRef.current).slice(0, 256);
+        for (const id of stale) readEventRequestsRef.current.delete(id);
+      }
+    }
     pendingReadPositionRef.current = Math.max(pendingReadPositionRef.current, streamPosition);
     // Reading is a local fact as soon as the room/viewport exposes the event.
     // Do not leave the sidebar badge waiting on network round-trip latency.
@@ -2550,19 +2612,31 @@ export function RoomView({
         committedReadPositionRef.current,
         streamPosition,
       );
+      if (streamWriter) {
+        const current = committedReadVectorRef.current;
+        const floor = current?.floor ?? 0;
+        const currentPosition = current?.writers[streamWriter] ?? floor;
+        if (streamPosition > currentPosition) {
+          committedReadVectorRef.current = {
+            floor,
+            writers: { ...(current?.writers ?? {}), [streamWriter]: streamPosition },
+          };
+        }
+      }
       if (pendingReadPositionRef.current === streamPosition) pendingReadPositionRef.current = 0;
     }).catch(() => {
+      if (eventId) readEventRequestsRef.current.delete(eventId);
       if (pendingReadPositionRef.current === streamPosition) pendingReadPositionRef.current = 0;
     });
   }, [onReadThrough, readOnly, room.room_id]);
 
   const commitReadTarget = React.useCallback((target: Event) => {
     if (!hasAuthoritativeEventId(target) || !Number.isSafeInteger(target.stream_position)) return;
-    commitReadPosition(target.event_id, Number(target.stream_position));
+    commitReadPosition(target.event_id, Number(target.stream_position), target.stream_writer);
   }, [commitReadPosition]);
 
   const markVisibleRead = React.useCallback(() => {
-    if (readOnly || !hydrated) return;
+    if (readOnly) return;
     if (document.visibilityState !== "visible" || !document.hasFocus()) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
@@ -2583,10 +2657,11 @@ export function RoomView({
       viewport,
       myUsername,
       Math.max(committedReadPositionRef.current, pendingReadPositionRef.current),
+      committedReadVectorRef.current,
     );
     if (!target) return;
     commitReadTarget(target);
-  }, [commitReadTarget, events, hydrated, myUsername, readOnly]);
+  }, [commitReadTarget, events, myUsername, readOnly]);
 
   React.useEffect(() => {
     const run = () => requestAnimationFrame(markVisibleRead);
@@ -4595,7 +4670,12 @@ export function RoomView({
       } else {
         const p = partyOf(e);
         const previous = cur?.events[cur.events.length - 1];
-        if (!cur || cur.party !== p || !previous || !belongsToSameTimelinePanel(previous, e)) {
+        if (
+          !cur ||
+          cur.party !== p ||
+          !previous ||
+          !belongsToSameTimelinePanel(previous, e, cur.events[0])
+        ) {
           flush();
           cur = { party: p, events: [] };
         }
@@ -4986,12 +5066,6 @@ export function RoomView({
         {dayBand}
         <div className="my-3">
           {item.events.map((e, j) => {
-            const prev = item.events[j - 1];
-            const next = item.events[j + 1];
-            const sameAs = (a?: LocalEvent | Event) =>
-              !!a &&
-              a.sender_handle === e.sender_handle &&
-              a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
             const renderedId = e.event_id;
             const authoritative = hasAuthoritativeEventId(e);
             return (
@@ -5046,8 +5120,8 @@ export function RoomView({
                   senderDisplayName={displayNameFor(e.sender_kind, e.sender_handle)}
                   onSenderClick={openSenderProfile}
                   onTakeBack={readOnly || !authoritative ? undefined : onTakeBack}
-                  showSender={!sameAs(prev)}
-                  showTime={!sameAs(next)}
+                  showSender={j === 0}
+                  showTime={j === item.events.length - 1}
                   reactions={reactionsByTarget.get(e.event_id) ?? undefined}
                   onReply={readOnly || !authoritative ? undefined : onReply}
                   onReact={readOnly || !authoritative ? undefined : onReact}

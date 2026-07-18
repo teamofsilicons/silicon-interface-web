@@ -207,6 +207,12 @@ test("web reconnect barrier satisfies the shared reliability contract", async ()
   }
 });
 
+test("a restored browser page rechecks socket liveness and authoritative sync", async () => {
+  const source = await readFile(new URL("../../src/lib/ws.ts", import.meta.url), "utf8");
+  assert.match(source, /window\.addEventListener\("pageshow", classifyWake\)/);
+  assert.match(source, /window\.removeEventListener\("pageshow", classifyWake\)/);
+});
+
 test("web multipart resume satisfies the shared reliability contract", async () => {
   for (const row of (await contract()).media_resume_cases) {
     assert.deepEqual(

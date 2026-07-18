@@ -455,12 +455,18 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
     };
     window.addEventListener("online", classifyWake);
     window.addEventListener("offline", onOffline);
+    // A page restored from the back-forward cache resumes the existing React
+    // tree instead of mounting a fresh socket. Treat it like an app foreground
+    // transition so a frozen/half-open connection is pinged or replaced and
+    // its authoritative sync barrier closes any missed-message gap.
+    window.addEventListener("pageshow", classifyWake);
     window.addEventListener("focus", publishForeground);
     window.addEventListener("blur", publishForeground);
     document.addEventListener("visibilitychange", publishForeground);
     return () => {
       window.removeEventListener("online", classifyWake);
       window.removeEventListener("offline", onOffline);
+      window.removeEventListener("pageshow", classifyWake);
       window.removeEventListener("focus", publishForeground);
       window.removeEventListener("blur", publishForeground);
       document.removeEventListener("visibilitychange", publishForeground);

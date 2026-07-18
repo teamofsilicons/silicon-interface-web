@@ -1,4 +1,4 @@
-import type { Event, Room, UnreadBoundary } from "./types";
+import type { Event, Room, StreamVectorPosition, UnreadBoundary } from "./types";
 
 export type RoomOpenReadTarget = {
   eventId: string | null;
@@ -31,7 +31,7 @@ export function roomOpenReadTarget(room: Room): RoomOpenReadTarget | null {
 export function isUnreadEligibleEvent(event: Event): boolean {
   return event.type !== "m.reaction" && event.type !== "m.progress" &&
     event.type !== "m.system" && event.type !== "m.session_marker" &&
-    event.sender_kind !== "system" && !event.redacted_at;
+    event.sender_kind !== "system" && event.is_final !== false && !event.redacted_at;
 }
 
 /** Resolve by immutable event id first; stream position keeps the divider
@@ -65,6 +65,7 @@ export function selectVisibleReadTarget(
   viewport: { top: number; bottom: number },
   myUsername: string | null,
   afterPosition: number,
+  afterVector?: StreamVectorPosition,
 ): Event | null {
   let target: Event | null = null;
   for (const candidate of candidates) {
@@ -72,11 +73,21 @@ export function selectVisibleReadTarget(
     if (!isUnreadEligibleEvent(event) || !event.sender_handle ||
       event.sender_handle === myUsername || !Number.isSafeInteger(event.stream_position)) continue;
     const position = Number(event.stream_position);
-    if (position <= afterPosition) continue;
+    // Event positions are per writer. Comparing writer-a:6 with the scalar
+    // maximum writer-b:11 incorrectly calls a genuinely new event already
+    // read. Prefer the authoritative vector whenever the event identifies its
+    // writer, retaining the scalar only for legacy rows.
+    const writer = event.stream_writer;
+    const alreadyRead = writer && afterVector
+      ? position <= (afterVector.writers[writer] ?? afterVector.floor)
+      : position <= afterPosition;
+    if (alreadyRead) continue;
     const visiblePixels = Math.min(candidate.bottom, viewport.bottom) -
       Math.max(candidate.top, viewport.top);
     if (visiblePixels < Math.min(24, Math.max(1, candidate.height * 0.25))) continue;
-    if (!target || position > Number(target.stream_position)) target = event;
+    // Candidates follow timeline order, which remains authoritative across
+    // writers even when their independent numeric positions are incomparable.
+    target = event;
   }
   return target;
 }

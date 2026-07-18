@@ -65,6 +65,48 @@ test("read target requires meaningful visibility and advances monotonically", ()
   );
 });
 
+test("visible reads use per-writer checkpoints instead of a global scalar maximum", () => {
+  const vector = {
+    floor: 0,
+    writers: { "writer-a": 5, "writer-b": 11 },
+  };
+  const candidates = [
+    {
+      event: event(6, { stream_writer: "writer-a" }),
+      top: 10,
+      bottom: 60,
+      height: 50,
+    },
+  ];
+
+  assert.equal(
+    unread.selectVisibleReadTarget(
+      candidates,
+      { top: 0, bottom: 100 },
+      "me",
+      11,
+      vector,
+    )?.event_id,
+    event(6).event_id,
+    "writer-a:6 is newer than writer-a:5 even though writer-b reached 11",
+  );
+  assert.equal(
+    unread.selectVisibleReadTarget(
+      [{ ...candidates[0], event: event(5, { stream_writer: "writer-a" }) }],
+      { top: 0, bottom: 100 },
+      "me",
+      11,
+      vector,
+    ),
+    null,
+  );
+});
+
+test("unfinished streaming events become read-eligible only after finalization", () => {
+  assert.equal(unread.isUnreadEligibleEvent(event(12, { is_final: false })), false);
+  assert.equal(unread.isUnreadEligibleEvent(event(12, { is_final: true })), true);
+});
+
 test("opening a room clears its projected unread tail before history hydration", () => {
   const room = {
     room_id: "room-open-read",

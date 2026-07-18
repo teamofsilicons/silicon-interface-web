@@ -6,8 +6,8 @@ import {
   timelineSenderKey,
 } from "../../src/lib/timeline-panel.ts";
 
-const localIso = (day, hour, minute = 0) =>
-  new Date(2026, 6, day, hour, minute, 0, 0).toISOString();
+const localIso = (day, hour, minute = 0, second = 0) =>
+  new Date(2026, 6, day, hour, minute, second, 0).toISOString();
 
 const row = (overrides = {}) => ({
   sender_kind: "carbon",
@@ -29,13 +29,49 @@ test("different Carbons never collapse into one virtual panel", () => {
   );
 });
 
-test("one sender stays grouped within a day but not across the local date boundary", () => {
+test("one sender groups only while adjacent messages stay within one minute", () => {
   assert.equal(
-    belongsToSameTimelinePanel(row(), row({ created_at: localIso(13, 23, 59) })),
+    belongsToSameTimelinePanel(
+      row({ created_at: localIso(13, 10, 0) }),
+      row({ created_at: localIso(13, 10, 1) }),
+    ),
     true,
   );
   assert.equal(
-    belongsToSameTimelinePanel(row(), row({ created_at: localIso(14, 0, 1) })),
+    belongsToSameTimelinePanel(
+      row({ created_at: localIso(13, 10, 0, 0) }),
+      row({ created_at: localIso(13, 10, 1, 1) }),
+    ),
+    false,
+  );
+});
+
+test("a continuous one-minute chain gets a fixed break at ten minutes", () => {
+  const start = row({ created_at: localIso(13, 10, 0) });
+  assert.equal(
+    belongsToSameTimelinePanel(
+      row({ created_at: localIso(13, 10, 9) }),
+      row({ created_at: localIso(13, 10, 9) }),
+      start,
+    ),
+    true,
+  );
+  assert.equal(
+    belongsToSameTimelinePanel(
+      row({ created_at: localIso(13, 10, 9) }),
+      row({ created_at: localIso(13, 10, 10) }),
+      start,
+    ),
+    false,
+  );
+});
+
+test("same-sender grouping never crosses the local date boundary", () => {
+  assert.equal(
+    belongsToSameTimelinePanel(
+      row({ created_at: localIso(13, 23, 59) }),
+      row({ created_at: localIso(14, 0, 0) }),
+    ),
     false,
   );
 });

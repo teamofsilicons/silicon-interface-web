@@ -352,6 +352,16 @@ test("opening a room clears unread state before navigation or timeline hydration
     /React\.useLayoutEffect\(\(\) => \{[\s\S]+?markRoomReadImmediately\(selected\)/,
   );
   assert.match(chatPageSource, /markRoomReadImmediately\(selected, normalized\)/);
+  const roomDetailStart = chatPageSource.indexOf("api\n      .roomDetail(selected)");
+  const roomDetailEnd = chatPageSource.indexOf("// Load this user's personal folder store");
+  assert.ok(roomDetailStart >= 0 && roomDetailEnd > roomDetailStart);
+  const roomDetailRead = chatPageSource.slice(roomDetailStart, roomDetailEnd);
+  assert.doesNotMatch(roomDetailRead, /readOpenedSelectionRef\.current !== selected/);
+  const visibleReadStart = roomViewSource.indexOf("const markVisibleRead = React.useCallback");
+  const visibleReadEnd = roomViewSource.indexOf("// ----- Take-back / self-delete");
+  assert.ok(visibleReadStart >= 0 && visibleReadEnd > visibleReadStart);
+  const visibleRead = roomViewSource.slice(visibleReadStart, visibleReadEnd);
+  assert.doesNotMatch(visibleRead, /!hydrated/);
   assert.doesNotMatch(roomViewSource, /roomOpenReadTarget/);
 });
 

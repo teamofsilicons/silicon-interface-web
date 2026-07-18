@@ -65,6 +65,7 @@ test("service worker durably stores out-of-band proof before displaying notifica
   assert.equal(proof.answer, "secret-proof");
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].options.body, "Open Silicon to continue sending.");
+  assert.equal(notifications[0].options.silent, true);
   assert.equal(notifications[0].options.data.challengeToken, "signed-token");
   db.close();
 });
@@ -198,5 +199,102 @@ test("read reconciliation closes the room, applies badge, wakes tabs, and acknow
   });
   await reorderedBadgeCompletion;
   assert.deepEqual(badges, [2, 1]);
+  await deleteDatabase("silicon-interface-notification-state");
+});
+
+test("only a new unread canonical message can make push notification sound", async () => {
+  await deleteDatabase("silicon-interface-notification-state");
+  const handlers = new Map();
+  const shown = [];
+  const acknowledgements = [];
+  const self = {
+    indexedDB,
+    addEventListener(type, handler) { handlers.set(type, handler); },
+    skipWaiting() {},
+    clients: {
+      claim: async () => undefined,
+      matchAll: async () => [],
+      openWindow: async () => null,
+    },
+    registration: {
+      getNotifications: async () => shown,
+      showNotification: async (title, options) => {
+        shown.push({ title, ...options, close() {} });
+      },
+    },
+  };
+  const source = await fs.readFile(new URL("../../public/sw.js", import.meta.url), "utf8");
+  vm.runInNewContext(source, {
+    self,
+    indexedDB,
+    navigator: {},
+    fetch: async (_url, options) => {
+      acknowledgements.push(Object.fromEntries(options.body.entries()));
+      return { ok: true };
+    },
+    URLSearchParams,
+    Date,
+  });
+  let ownerCompletion;
+  handlers.get("message")({
+    data: { type: "silicon-active-notification-owner", ownerId: "owner-1" },
+    waitUntil(promise) { ownerCompletion = promise; },
+  });
+  await ownerCompletion;
+
+  const push = async (data) => {
+    let completion;
+    const deliveryKey = data.notification_id || data.kind || data.title || "push";
+    handlers.get("push")({
+      data: { json: () => ({
+        ...data,
+        delivery_id: `delivery-${deliveryKey}`,
+        display_ack_token: `token-${deliveryKey}`,
+        display_ack_url: "https://glass.example/ack",
+      }) },
+      waitUntil(promise) { completion = promise; },
+    });
+    await completion;
+  };
+  await push({
+    kind: "read_sync",
+    owner_id: "owner-1",
+    room_id: "room-1",
+    badge: 0,
+    badge_revision: 1,
+    reconciliation_revision: 1,
+    read_stream_vector: { floor: 5, writers: {} },
+  });
+  await push({
+    owner_id: "owner-1",
+    room_id: "room-1",
+    notification_id: "event-read",
+    tag: "event-read",
+    stream_writer: "writer-a",
+    stream_position: 5,
+    sound: true,
+  });
+  assert.equal(shown.length, 0, "an already-read event must be suppressed before display");
+
+  const fresh = {
+    owner_id: "owner-1",
+    room_id: "room-1",
+    notification_id: "event-new",
+    tag: "event-new",
+    stream_writer: "writer-a",
+    stream_position: 6,
+    sound: true,
+  };
+  await push(fresh);
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].silent, false);
+  await push(fresh);
+  assert.equal(shown.length, 1, "a duplicate push must not display or sound again");
+
+  await push({ owner_id: "owner-1", title: "Announcement", sound: true });
+  assert.equal(shown.length, 2);
+  assert.equal(shown[1].silent, true, "non-message notifications are always silent");
+  assert.ok(acknowledgements.some((row) => row.reason === "already_read"));
+  assert.ok(acknowledgements.some((row) => row.reason === "duplicate"));
   await deleteDatabase("silicon-interface-notification-state");
 });

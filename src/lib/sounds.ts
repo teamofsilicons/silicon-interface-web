@@ -1,8 +1,6 @@
-// Tiny synthesized message tones. We use the Web Audio API instead of
-// shipping .wav files — the result is two short, lossless beeps with no
-// network cost and no asset pipeline.
+// Tiny synthesized incoming-message tones. We use the Web Audio API instead
+// of shipping .wav files, with no network cost or asset pipeline.
 //
-//  • "sent"     → quick ascending chirp (~120ms, 800 → 1300 Hz)
 //  • "received" → soft descending tap   (~150ms, 880 → 600 Hz)
 //
 // Sound is governed solely by a per-user opt-out (`silicon-interface:sounds =
@@ -84,14 +82,15 @@ function play(
 
   const ac = ctx();
   if (!ac) return;
-  // If still suspended (no gesture yet, or the primer hasn't fired), resume and
-  // schedule the oscillator only after it resolves — otherwise this beep is
-  // dropped. resume() is idempotent / a no-op when already running.
+  // Never queue notification audio behind a suspended AudioContext. Browsers
+  // may resolve resume() only on a much later user gesture; emitting from that
+  // old promise makes a stale message sound appear randomly when nothing new
+  // happened. Prime the context for future messages and drop this stale cue.
   if (ac.state === "suspended") {
-    ac.resume().then(() => emit(ac, start, end, durSec, vol, type)).catch(() => undefined);
-  } else {
-    emit(ac, start, end, durSec, vol, type);
+    void ac.resume().catch(() => undefined);
+    return;
   }
+  emit(ac, start, end, durSec, vol, type);
 }
 
 function emit(
@@ -116,10 +115,6 @@ function emit(
   osc.stop(t0 + durSec + 0.02);
 }
 
-export function playSent() {
-  play("sent", 820, 1320, 0.12, 0.07);
-}
-
 // Carbons reply with a warm sine tap…
 export function playReceived() {
   play("received", 880, 620, 0.16, 0.06, "sine");
@@ -129,12 +124,6 @@ export function playReceived() {
 // hear who's talking without looking. Delights §3a.
 export function playReceivedSilicon() {
   play("received", 760, 540, 0.18, 0.05, "triangle");
-}
-
-// Delights §3b — the second half of "send → delivered": a tiny high confirm
-// tick when the server acks, so the send has a felt two-stage shape.
-export function playAckTick() {
-  play("ack", 1500, 1500, 0.05, 0.04, "sine");
 }
 
 // Delights §3c — a feather-light haptic on send / record-start, gated by the

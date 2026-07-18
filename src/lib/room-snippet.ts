@@ -85,10 +85,10 @@ function eventClientId(event: Event): string | null {
   return typeof transaction === "string" && transaction ? transaction : null;
 }
 
-export function appendRoomEventSnippet(roomId: string, event: Event): void {
-  if (typeof window === "undefined") return;
-  if (!event || typeof event.event_id !== "string") return;
-  if (event.type === "m.progress") return;
+export function appendRoomEventSnippet(roomId: string, event: Event): boolean {
+  if (typeof window === "undefined") return false;
+  if (!event || typeof event.event_id !== "string") return false;
+  if (event.type === "m.progress") return false;
   const existing = readRoomEventSnippet(roomId) ?? [];
   const clientId = eventClientId(event);
   const localKey = (event as TimelineEvent)._localKey;
@@ -128,9 +128,10 @@ export function appendRoomEventSnippet(roomId: string, event: Event): void {
       if (duplicate !== idx) next.splice(duplicate, 1);
     }
     saveRoomEventSnippet(roomId, next);
-    return;
+    return false;
   }
   const next = existing.filter((e) => e.event_id !== event.event_id);
   next.push(event);
   saveRoomEventSnippet(roomId, next);
+  return true;
 }

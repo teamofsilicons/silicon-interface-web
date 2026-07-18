@@ -1,10 +1,12 @@
 export function isGenuinelyNewLiveEvent(input: {
   seenEventIdentity: boolean;
+  cachedEventIdentity: boolean;
   patchesProjectedLastEvent: boolean;
   edited: boolean;
 }): boolean {
   return (
     !input.seenEventIdentity &&
+    !input.cachedEventIdentity &&
     !input.patchesProjectedLastEvent &&
     !input.edited
   );

@@ -131,6 +131,22 @@ async function activeNotificationOwner() {
   } catch { return ""; }
 }
 
+async function currentReadReconciliation(ownerId) {
+  if (!ownerId || !self.indexedDB) return null;
+  try {
+    const db = await openNotificationState();
+    const value = await new Promise((resolve, reject) => {
+      const request = db.transaction("state", "readonly")
+        .objectStore("state")
+        .get(`read-reconciliation:${ownerId}`);
+      request.onsuccess = () => resolve(request.result?.value || null);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return value;
+  } catch { return null; }
+}
+
 self.addEventListener("message", (event) => {
   if (event.data?.type !== "silicon-active-notification-owner") return;
   event.waitUntil(setActiveNotificationOwner(event.data.ownerId));
@@ -266,6 +282,25 @@ function reconciliationCovers(value, notification) {
   return position <= (value.vector.writers[writer] ?? value.vector.floor);
 }
 
+function canonicalMessageNotification(data) {
+  const ownerId = String(data.owner_id || "").trim();
+  const roomId = String(data.room_id || "").trim();
+  const notificationId = String(data.notification_id || data.tag || "").trim();
+  const streamWriter = String(data.stream_writer || "").trim();
+  const streamPosition = Number(data.stream_position);
+  if (!ownerId || ownerId.length > 26 || !roomId || roomId.length > 26 ||
+      !notificationId || notificationId.length > 128 ||
+      !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(streamWriter) ||
+      !Number.isSafeInteger(streamPosition) || streamPosition < 1) return null;
+  return { ownerId, roomId, notificationId, streamWriter, streamPosition };
+}
+
+function reconciliationCoversMessage(value, message) {
+  return Boolean(value && message && value.ownerId === message.ownerId &&
+    value.roomId === message.roomId &&
+    message.streamPosition <= (value.vector.writers[message.streamWriter] ?? value.vector.floor));
+}
+
 async function commitReadReconciliation(data) {
   const incoming = canonicalReadReconciliation(data);
   if (!incoming || !self.indexedDB) return { outcome: "conflict", value: incoming };
@@ -388,6 +423,7 @@ self.addEventListener("push", (event) => {
         }
         await self.registration.showNotification(data.title || "Verify this device", {
           body: data.body || "Open Silicon to continue sending.",
+          silent: true,
           tag: data.tag || "silicon-abuse-challenge",
           icon: "/logo.png",
           badge: "/logo.png",
@@ -409,9 +445,27 @@ self.addEventListener("push", (event) => {
         await acknowledgeDisplay(data, "suppressed", "foreground");
         return;
       }
+      const message = canonicalMessageNotification(data);
+      if (message) {
+        const reconciliation = await currentReadReconciliation(message.ownerId);
+        if (reconciliationCoversMessage(reconciliation, message)) {
+          await acknowledgeDisplay(data, "suppressed", "already_read");
+          return;
+        }
+        const shown = await self.registration.getNotifications();
+        if (shown.some((notification) =>
+          notification.data?.ownerId === message.ownerId &&
+          notification.data?.notificationId === message.notificationId)) {
+          await acknowledgeDisplay(data, "suppressed", "duplicate");
+          return;
+        }
+      }
       await self.registration.showNotification(data.title || "Silicon Interface", {
         body: data.body || "",
-        silent: data.sound === false,
+        // Announcements, recovery prompts, malformed pushes, and legacy
+        // payloads are always silent. Only a canonical chat message with an
+        // explicit per-user sound grant may make notification audio.
+        silent: !(message && data.sound === true),
         tag: data.tag || undefined,
         icon: "/logo.png",
         badge: "/logo.png",

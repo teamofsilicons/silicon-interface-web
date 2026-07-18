@@ -184,7 +184,7 @@ test("snippet reload retains identity and exact transaction dedupes history", as
   installBrowser(storage);
   const restored = readRoomEventSnippet("timeline-room-reload");
   assert.equal(timelineRenderKey(restored[0]), identity.localKey);
-  appendRoomEventSnippet(
+  assert.equal(appendRoomEventSnippet(
     "timeline-room-reload",
     serverEvent(
       "event-reload",
@@ -192,7 +192,7 @@ test("snippet reload retains identity and exact transaction dedupes history", as
       "authoritative",
       "reload-client",
     ),
-  );
+  ), false, "accepting the optimistic identity is a revision, not a new message");
   const reconciled = readRoomEventSnippet("timeline-room-reload");
   assert.equal(reconciled.length, 1);
   assert.equal(reconciled[0].event_id, "event-reload");

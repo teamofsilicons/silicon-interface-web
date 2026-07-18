@@ -24,7 +24,7 @@ import { cn, dayLabel, relativeTimeAgo } from "@/lib/utils";
 import { observePresenceActivity, presenceIsOnline } from "@/lib/presence-state";
 import { authStore, useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
-import { playSent, playAckTick, vibrate } from "@/lib/sounds";
+import { vibrate } from "@/lib/sounds";
 import {
   shouldPromptNotifications,
   markNotificationsAsked,
@@ -3504,9 +3504,6 @@ export function RoomView({
       });
       // No progress yet — we don't show anything until the message is actually
       // sent (see onAck → showReceipt).
-      // Audible "sent" tone — small ascending chirp. Respects reduced-motion
-      // + the silicon-interface:sounds=off opt-out.
-      playSent();
       vibrate(8); // §3c — feather-light haptic on send
       // Prompt for notification access on the user's first send: an in-app ask
       // first, then (on "enable") the real OS permission prompt. One-time.
@@ -3552,7 +3549,6 @@ export function RoomView({
       ...accepted,
       _status: "sent",
     } as LocalEvent);
-    playAckTick(); // §3b — the confirm half of "send → delivered"
     // A direct response is the one additional trusted binding source when an
     // older Glass server omits transaction_id. The reconciler collapses a WS
     // echo that raced ahead of this response into the original local row.

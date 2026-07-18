@@ -2817,7 +2817,7 @@ function ChatPageInner() {
       // Cache before room lookup: a deep-linked or newly-added room may not be
       // in the current sidebar projection yet, but its opening RoomView still
       // needs this accepted frame immediately.
-      appendRoomEventSnippet(rid, ev);
+      const novelSnippetEvent = appendRoomEventSnippet(rid, ev);
       const liveIdentity = `${rid}:${ev.event_id}`;
       const seenEventIdentity = seenLiveEventIdentitiesRef.current.has(liveIdentity);
       if (!seenEventIdentity) {
@@ -2844,6 +2844,7 @@ function ChatPageInner() {
       const patchesLastEvent = room.last_event?.event_id === ev.event_id;
       const genuinelyNewEvent = isGenuinelyNewLiveEvent({
         seenEventIdentity,
+        cachedEventIdentity: !novelSnippetEvent,
         patchesProjectedLastEvent: patchesLastEvent,
         edited: updatesExistingEvent,
       });

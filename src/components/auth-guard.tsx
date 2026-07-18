@@ -30,6 +30,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     let alive = true;
     let retryTimer: number | null = null;
+    let deviceRetryTimer: number | null = null;
     let running = false;
     let anonymousConfirmations = 0;
     let retryDelay = RESTORE_RETRY_MS;
@@ -42,6 +43,17 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     const scheduleRetry = () => {
       schedule(retryDelay);
       retryDelay = Math.min(retryDelay * 2, RESTORE_RETRY_MAX_MS);
+    };
+    const scheduleDeviceRegistration = (delay = 0) => {
+      if (!alive || authStore.getSiliconKey() || authStore.getBoundDeviceId()) return;
+      if (deviceRetryTimer !== null) window.clearTimeout(deviceRetryTimer);
+      deviceRetryTimer = window.setTimeout(() => {
+        deviceRetryTimer = null;
+        if (!alive || !authStore.getAccess() || authStore.getBoundDeviceId()) return;
+        void ensureDeviceRegistration().then((registered) => {
+          if (alive && !registered) scheduleDeviceRegistration(5_000);
+        });
+      }, delay);
     };
     const boot = async () => {
       if (!alive || running) return;
@@ -66,7 +78,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           return;
         }
         if (decision === "retry" || decision === "enter-and-retry") {
-          if (decision === "enter-and-retry") setOk(true);
+          if (decision === "enter-and-retry") {
+            setOk(true);
+            scheduleDeviceRegistration();
+          }
           scheduleRetry();
           return;
         }
@@ -85,7 +100,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
               router.replace("/auth/login");
               return;
             }
-            if (authStore.getCarbon()) setOk(true);
+            if (authStore.getCarbon()) {
+              setOk(true);
+              scheduleDeviceRegistration();
+            }
             scheduleRetry();
             return;
           }
@@ -93,9 +111,13 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         // Token validity is the entry gate. Installation registration and
         // durable-storage permission are important follow-up work, but neither
         // should hold a valid returning user behind the boot screen on a slow
-        // network. Both operations are idempotent and continue in background.
-        if (alive) setOk(true);
-        void ensureDeviceRegistration().catch(() => false);
+        // network. Both operations are idempotent and continue in background;
+        // installation registration retries until presence and explicit
+        // delivery ACKs are device-aware instead of silently remaining legacy.
+        if (alive) {
+          setOk(true);
+          scheduleDeviceRegistration();
+        }
         void navigator.storage?.persist?.().catch(() => false);
       } catch {
         // Fetch/CORS/runtime failures are availability failures, not logout.
@@ -112,11 +134,13 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     const onOnline = () => {
       retryDelay = RESTORE_RETRY_MS;
       schedule(0);
+      scheduleDeviceRegistration();
     };
     window.addEventListener("online", onOnline);
     return () => {
       alive = false;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (deviceRetryTimer !== null) window.clearTimeout(deviceRetryTimer);
       window.removeEventListener("online", onOnline);
     };
   }, [router]);

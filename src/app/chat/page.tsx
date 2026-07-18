@@ -94,6 +94,7 @@ import {
   type SyncRecoveryRecord,
 } from "@/lib/chat-store";
 import { probeApiConnectivity } from "@/lib/connectivity-classifier";
+import { shouldRunDurableSync } from "@/lib/durable-sync-policy";
 import {
   clearSyncCursors,
   getSyncCheckpoint,
@@ -2199,15 +2200,34 @@ function ChatPageInner() {
     barrierRef.current = syncThroughBarrier;
   }, [syncThroughBarrier]);
 
-  // WebSocket is primary, but some corporate/mobile networks allow HTTPS while
-  // repeatedly killing upgrades. While the socket is genuinely offline, keep
-  // both durable streams moving through one cancellable long poll. As soon as
-  // a socket attempt starts, abort this request so hello's barrier owns sync.
+  // WebSocket is the instant paint path, but a healthy pong cannot prove every
+  // room fan-out arrived. Keep both durable ordered streams moving through one
+  // concurrent long poll even while the socket is online. Duplicates are
+  // event-id/revision idempotent; a missed socket frame is repaired as soon as
+  // the commit wakes this poll. During reconnect, hello's barrier owns cursors.
   React.useEffect(() => {
-    if (!ownerId || (socket.state !== "offline" && socket.state !== "degraded")) return;
-    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    if (!ownerId) return;
+    const networkAvailable = typeof navigator === "undefined" || navigator.onLine !== false;
+    if (!shouldRunDurableSync({
+      ownerId,
+      socketState: socket.state,
+      socketReady: socket.ready,
+      networkAvailable,
+    })) return;
     const controller = new AbortController();
     let cancelled = false;
+    let retryTimer: number | null = null;
+    let retryDelayMs = 1_000;
+
+    const scheduleRetry = (delay = retryDelayMs) => {
+      if (cancelled || controller.signal.aborted || navigator.onLine === false) return;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void run();
+      }, delay);
+      retryDelayMs = Math.min(Math.max(1_000, retryDelayMs * 2), 30_000);
+    };
 
     const run = async () => {
       try {
@@ -2283,6 +2303,7 @@ function ChatPageInner() {
             ...replay,
             committedAt: Date.now(),
           }, controller.signal);
+          retryDelayMs = 1_000;
           checkpoint = nextCheckpoint;
           eventThroughPosition = result.events.has_more
             ? eventRange.through_position
@@ -2327,16 +2348,19 @@ function ChatPageInner() {
             });
           }
         }
-        // Socket reconnect backoff and this effect's next offline transition
-        // own retry. Never spin after a provider/network failure.
+        // Durable recovery remains self-healing even when the socket continues
+        // returning healthy pongs and therefore causes no React state change.
+        scheduleRetry(decision.action === "resnapshot" ? 0 : retryDelayMs);
       }
     };
-    // Let the normal immediate socket dial win. Long polling starts only when
-    // the connection remains offline beyond that attempt.
-    const startTimer = window.setTimeout(() => void run(), 1_000);
+    // Once the socket barrier is complete, subscribe the durable shadow path
+    // immediately. In an offline/degraded generation, let an imminent socket
+    // dial win before starting the HTTPS fallback.
+    const startTimer = window.setTimeout(() => void run(), socket.ready ? 0 : 1_000);
     return () => {
       cancelled = true;
       window.clearTimeout(startTimer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       controller.abort();
     };
   }, [
@@ -2347,6 +2371,7 @@ function ChatPageInner() {
     ownerId,
     persistEventFrames,
     replayPendingAccountState,
+    socket.ready,
     socket.state,
   ]);
 

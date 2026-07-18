@@ -8,8 +8,8 @@ const source = await readFile(
 );
 
 test("valid sessions enter before non-authoritative browser setup finishes", () => {
-  const entry = source.indexOf("if (alive) setOk(true);");
-  const registration = source.indexOf("void ensureDeviceRegistration()", entry);
+  const entry = source.indexOf("setOk(true);", source.indexOf("installation registration retries"));
+  const registration = source.indexOf("scheduleDeviceRegistration();", entry);
   const persistence = source.indexOf("void navigator.storage?.persist?.()", entry);
   assert.ok(entry >= 0);
   assert.ok(registration > entry);

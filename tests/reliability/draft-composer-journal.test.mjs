@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { installBrowser, MemoryStorage } from "./helpers.mjs";
+
+const composerSource = await readFile(
+  new URL("../../src/components/chat/composer.tsx", import.meta.url),
+  "utf8",
+);
 
 async function waitFor(predicate, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
@@ -95,6 +101,79 @@ test("a sent draft becomes a durable tombstone instead of exposing an old journa
     assert.ok(snapshot.localClearedAt > 0);
     assert.ok(snapshot.lastJournalAt >= snapshot.localClearedAt);
   }
+});
+
+test("a sent reply snapshots text and reply identity before clearing the reply UI", async () => {
+  const storage = installBrowser(new MemoryStorage());
+  storage.setItem(
+    "silicon-interface:carbon",
+    JSON.stringify({ carbon_id: "composer-reply-clear-user" }),
+  );
+  const drafts = await import("../../src/lib/drafts.ts");
+  const { api } = await import("../../src/lib/api.ts");
+  const roomId = "composer-reply-clear-room";
+  const reply = {
+    event_id: "01KREPLY000000000000000000",
+    sender_handle: "anil",
+    sender_kind: "carbon",
+    type: "m.text",
+    preview: "messaged you",
+  };
+  let releaseDelete;
+  const deleteGate = new Promise((resolve) => {
+    releaseDelete = resolve;
+  });
+  let deleteStarted = false;
+  const originalDelete = api.deleteDraft;
+  api.deleteDraft = async () => {
+    deleteStarted = true;
+    await deleteGate;
+    return serverDraft(roomId, "", 1, new Date().toISOString());
+  };
+
+  try {
+    await drafts.setDraft(roomId, "aaya nhi mujhe weird");
+    drafts.setDraftReply(roomId, reply);
+    assert.deepEqual(drafts.getDraftReply(roomId), reply);
+
+    assert.equal(await drafts.clearDraftAfterSend(roomId), true);
+    await waitFor(() => deleteStarted);
+
+    const mirror = JSON.parse(
+      storage.getItem(
+        "silicon-interface:draft-v2:carbon:composer-reply-clear-user:composer-reply-clear-room",
+      ),
+    );
+    assert.equal(mirror.text, "");
+    assert.equal(mirror.reply_to_event_id, "");
+    assert.equal(mirror.pendingClearAfterSend.text, "aaya nhi mujhe weird");
+    assert.equal(
+      mirror.pendingClearAfterSend.reply_to_event_id,
+      reply.event_id,
+    );
+    assert.equal(drafts.getDraft(roomId), "");
+    assert.equal(drafts.getDraftReply(roomId), null);
+  } finally {
+    releaseDelete?.();
+    api.deleteDraft = originalDelete;
+  }
+});
+
+test("composer clears reply state only after the sent-draft tombstone is durable", () => {
+  const clearHelper = composerSource.slice(
+    composerSource.indexOf("const clearComposerAfterDurableTransfer"),
+    composerSource.indexOf("React.useEffect(() =>", composerSource.indexOf("const clearComposerAfterDurableTransfer")),
+  );
+  assert.ok(
+    clearHelper.indexOf("await clearDraftAfterSend(roomId)") <
+      clearHelper.indexOf("onClearReply?.()"),
+  );
+  const optimisticTextSend = composerSource.slice(
+    composerSource.indexOf("const sendTextOptimistic"),
+    composerSource.indexOf("const send = async", composerSource.indexOf("const sendTextOptimistic")),
+  );
+  assert.doesNotMatch(optimisticTextSend, /onClearReply\?\.\(\)/);
+  assert.match(composerSource, /await clearComposerAfterDurableTransfer\(true\)/);
 });
 
 test("IndexedDB completion releases the navigation guard when localStorage is full", async () => {

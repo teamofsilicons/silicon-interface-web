@@ -3932,6 +3932,7 @@ function ChatPageInner() {
           onContactsChanged={contacts.refresh}
           connectionStatePending={roomDetailRefreshing === selectedRoom.room_id}
           onEventAccepted={(event) => projectAcceptedRoomEvent(selectedRoom.room_id, event)}
+          onSendIntent={() => markRoomReadImmediately(selectedRoom.room_id)}
           onHistoryStored={acknowledgeStoredRoomHistory}
           onReadThrough={(_eventId, streamPosition) =>
             projectRoomRead(selectedRoom.room_id, streamPosition)}

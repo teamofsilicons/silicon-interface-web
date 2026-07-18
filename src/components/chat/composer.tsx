@@ -1489,11 +1489,15 @@ export function Composer({
     [roomId],
   );
   const pendingCommittedClearRef = React.useRef(false);
-  const clearComposerAfterDurableTransfer = React.useCallback(async () => {
+  const clearComposerAfterDurableTransfer = React.useCallback(async (clearReply = false) => {
     const committed = await clearDraftAfterSend(roomId);
     if (committed) {
       pendingCommittedClearRef.current = false;
       setText("");
+      // clearDraftAfterSend must capture text + reply as one recovery snapshot
+      // before this UI callback mutates reply state. Reversing this order lets
+      // an older cloud "text + reply" draft look divergent and resurrect.
+      if (clearReply) onClearReply?.();
       return true;
     }
     pendingCommittedClearRef.current = true;
@@ -1501,7 +1505,7 @@ export function Composer({
       "Message saved. This text will clear as soon as saving finishes.",
     );
     return false;
-  }, [roomId]);
+  }, [onClearReply, roomId]);
 
   React.useEffect(() => {
     if (
@@ -2207,13 +2211,11 @@ export function Composer({
           // become a second immediate event.
           onFail(clientId, err);
         });
-      onClearReply?.();
       return true;
     },
     [
       buildQueuedPayload,
       clearHeldClient,
-      onClearReply,
       onFail,
       onHoldStateChange,
       onHeldSendUpdate,
@@ -2528,7 +2530,6 @@ export function Composer({
         });
       });
       track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
-      onClearReply?.();
     } catch (error) {
       if (optimisticAdded) {
         onFail(entry.clientId, error);
@@ -2598,6 +2599,7 @@ export function Composer({
       });
       setGifAcquisitions((current) => [...current, { entry }]);
       setExpressionPickerOpen(false);
+      await clearComposerAfterDurableTransfer(true);
       void processDurableGif(entry, true);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "GIF could not be saved for sending");
@@ -2674,8 +2676,6 @@ export function Composer({
       message_type: "m.text",
       is_reply: Boolean(replyTo),
     });
-    // Clear the reply target on send.
-    onClearReply?.();
     return true;
   };
 
@@ -2729,7 +2729,6 @@ export function Composer({
         // text bubble. With no text, attachments stand alone (no bundle).
         const isAlbum = ready.length >= 2;
         const bundleId = !isAlbum && body && ready.length > 0 ? newClientId() : null;
-        let sentAnnotations = false;
         let albumQueued = false;
         const queuedAttachmentIds = new Set<string>();
         if (isAlbum) {
@@ -2783,7 +2782,6 @@ export function Composer({
               queuedAttachmentIds.add(attachment.id);
               if (attachment.kind === "annotations" && attachment.annotation) {
                 clearAnnotationSession(roomId, attachment.annotation.sourceMediaId);
-                sentAnnotations = true;
               }
               const carbonId = authStore.getCarbon()?.carbon_id;
               if (carbonId) {
@@ -2812,7 +2810,6 @@ export function Composer({
             if (sent) {
               queuedAttachmentIds.add(a.id);
               clearAnnotationSession(roomId, d.sourceMediaId);
-              sentAnnotations = true;
               track.messageSent({ room_id: roomId, message_type: annType, has_attachment: true });
             }
             continue;
@@ -2864,17 +2861,13 @@ export function Composer({
               size: attachment.size,
             })),
         );
-        // An attached annotation set carried the reply to the file — clear it so
-        // the next message isn't unexpectedly a reply (unless text handles it).
-        if (sentAnnotations && !body && remainingAttachments.length === 0) onClearReply?.();
         // For an album, typed text is its one root caption. For a lone legacy
         // attachment it rides as a separate bundled message.
         // carrying the same bundle_id so they render together. If the user
         // typed @filename references, persist the resolved attachment ids too.
         if (albumQueued) {
           if (remainingAttachments.length === 0) {
-            await clearComposerAfterDurableTransfer();
-            onClearReply?.();
+            await clearComposerAfterDurableTransfer(true);
           }
         } else if (body) {
           const attachmentRefs = attachmentRefsForBody(body, ready);
@@ -2888,14 +2881,14 @@ export function Composer({
           );
           if (textQueued) {
             if (remainingAttachments.length === 0) {
-              await clearComposerAfterDurableTransfer();
+              await clearComposerAfterDurableTransfer(true);
             } else if (await persistDraft("")) {
               setText("");
+              onClearReply?.();
             }
           }
         } else if (remainingAttachments.length === 0 && queuedAttachmentIds.size > 0) {
-          await clearComposerAfterDurableTransfer();
-          onClearReply?.();
+          await clearComposerAfterDurableTransfer(true);
         }
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
@@ -2913,13 +2906,13 @@ export function Composer({
       // window elapses with no new send / typing, or via "send now".
       const queued = await queueDelayedTextSend(body);
       if (queued) {
-        await clearComposerAfterDurableTransfer();
+        await clearComposerAfterDurableTransfer(true);
       }
       return;
     }
     const queued = await sendTextOptimistic(body);
     if (queued) {
-      await clearComposerAfterDurableTransfer();
+      await clearComposerAfterDurableTransfer(true);
     }
   };
 
@@ -2984,7 +2977,7 @@ export function Composer({
       // polling, idempotency resolution, and acknowledgement from this point.
       setPendingVoice(null);
       wakeOutboxRecovery(outboxOwner, clientId);
-      onClearReply?.();
+      await clearComposerAfterDurableTransfer(true);
       track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
       if (optimisticAdded) onFail(clientId, e);

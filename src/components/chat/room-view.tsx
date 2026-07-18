@@ -238,6 +238,8 @@ interface Props {
   onReadThrough?: (eventId: string, streamPosition: number) => void;
   /** Immediately projects the accepted event into the sidebar. */
   onEventAccepted?: (event: Event) => void;
+  /** A durable outgoing intent proves the open room is actively attended. */
+  onSendIntent?: () => void;
   /** Flushes delivery acknowledgements after a history page is durably stored. */
   onHistoryStored?: () => void;
 }
@@ -570,6 +572,7 @@ export function RoomView({
   connectionStatePending = false,
   onReadThrough,
   onEventAccepted,
+  onSendIntent,
   onHistoryStored,
 }: Props) {
   "use no memo";
@@ -3482,6 +3485,12 @@ export function RoomView({
       options?: { timeoutMs?: number },
     ) => {
       if (!myUsername) return;
+      // Reaching this point means the user has committed an outgoing intent.
+      // Sending from an open room proves the currently-known
+      // inbound tail was attended, so clear its badge before painting the
+      // optimistic row. A later concurrent inbound event can still become
+      // unread through the normal websocket reducer.
+      onSendIntent?.();
       const nowMs = Date.now();
       const now = new Date(nowMs).toISOString();
       const timeoutMs = options?.timeoutMs ?? sendTimeoutMs();
@@ -3553,6 +3562,7 @@ export function RoomView({
     },
     [
       myUsername,
+      onSendIntent,
       room.room_id,
       setEvents,
       timelineDevice,

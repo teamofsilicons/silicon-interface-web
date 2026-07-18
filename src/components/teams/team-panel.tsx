@@ -334,38 +334,58 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
   }, [dsl]);
 
   const iframeRef = React.useRef<HTMLIFrameElement>(null);
-  const [ready, setReady] = React.useState(false);
+  const [renderState, setRenderState] = React.useState<"loading" | "ready" | "error">("loading");
+  const [renderAttempt, setRenderAttempt] = React.useState(0);
 
-  // Keep an opaque cover over the iframe until Quark signals it has rendered, so
-  // its internal "Loading rough.js…" flash never reaches the user. A timeout
-  // fallback lifts the cover anyway (e.g. if Quark genuinely fails to load, so
-  // its own error message becomes visible).
+  // Keep an opaque cover over the iframe until Quark signals that the graph has
+  // actually rendered. Never expose the raw controls on timeout: that was a
+  // false success state which made a blocked renderer look like an empty chart.
   React.useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       if (e.source === iframeRef.current?.contentWindow && e.data?.type === "quark:ready") {
-        setReady(true);
+        setRenderState("ready");
       }
     };
     window.addEventListener("message", onMessage);
-    const fallback = window.setTimeout(() => setReady(true), 6000);
+    const renderTimeout = window.setTimeout(() => setRenderState("error"), 10_000);
     return () => {
       window.removeEventListener("message", onMessage);
-      window.clearTimeout(fallback);
+      window.clearTimeout(renderTimeout);
     };
-  }, []);
+  }, [dsl, renderAttempt]);
 
   return (
     <div className="relative h-[min(70vh,760px)] min-h-[420px] overflow-hidden border bg-card">
       <iframe
+        key={renderAttempt}
         ref={iframeRef}
         title="team structure"
         srcDoc={srcDoc}
         className="h-full w-full"
-        sandbox="allow-scripts allow-same-origin"
+        sandbox="allow-scripts"
       />
-      {!ready && (
+      {renderState !== "ready" && (
         <div className="absolute inset-0 grid place-items-center bg-card">
-          <Spinner className="text-lg" />
+          {renderState === "loading" ? (
+            <Spinner className="text-lg" />
+          ) : (
+            <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center">
+              <p className="text-sm text-muted-foreground">
+                The structure chart did not finish loading.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setRenderState("loading");
+                  setRenderAttempt((current) => current + 1);
+                }}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -365,6 +365,22 @@ test("opening a room clears unread state before navigation or timeline hydration
   assert.doesNotMatch(roomViewSource, /roomOpenReadTarget/);
 });
 
+test("committing a send clears the open room's known unread tail before optimistic paint", () => {
+  assert.match(
+    chatPageSource,
+    /onSendIntent=\{\(\) => markRoomReadImmediately\(selectedRoom\.room_id\)\}/,
+  );
+  const optimisticAdd = roomViewSource.slice(
+    roomViewSource.indexOf("const onOptimisticAdd"),
+    roomViewSource.indexOf("const onAck", roomViewSource.indexOf("const onOptimisticAdd")),
+  );
+  assert.ok(optimisticAdd.indexOf("onSendIntent?.()") >= 0);
+  assert.ok(
+    optimisticAdd.indexOf("onSendIntent?.()") <
+      optimisticAdd.indexOf("appendRoomEventSnippet"),
+  );
+});
+
 test("background room refresh failures stay in quiet recovery instead of toast churn", () => {
   assert.doesNotMatch(chatPageSource, /Your messages are still safe — try again\./);
   assert.match(chatPageSource, /reportSyncRecovery\(ownerId/);

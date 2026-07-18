@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+
+const teamPanelSource = await readFile(
+  new URL("../../src/components/teams/team-panel.tsx", import.meta.url),
+  "utf8",
+);
 
 function directives(policy) {
   return new Map(
@@ -35,7 +41,14 @@ test("production CSP permits Next's prerendered bootstrap without relaxing eval"
     ).value;
     const parsed = directives(policy);
 
-    assert.equal(parsed.get("script-src"), "'self' 'unsafe-inline'");
+    assert.equal(
+      parsed.get("script-src"),
+      "'self' 'unsafe-inline' https://glass.teamofsilicons.com https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com",
+    );
+    assert.equal(
+      parsed.get("style-src"),
+      "'self' 'unsafe-inline' https://glass.teamofsilicons.com",
+    );
     assert.doesNotMatch(policy, /'unsafe-eval'/);
     assert.equal(parsed.get("object-src"), "'none'");
     assert.equal(parsed.get("connect-src"), "'self' blob: https: wss:");
@@ -47,4 +60,12 @@ test("production CSP permits Next's prerendered bootstrap without relaxing eval"
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
   }
+});
+
+test("team structure stays isolated and never presents a timed-out renderer as loaded", () => {
+  assert.match(teamPanelSource, /sandbox="allow-scripts"/);
+  assert.doesNotMatch(teamPanelSource, /sandbox="allow-scripts allow-same-origin"/);
+  assert.match(teamPanelSource, /setRenderState\("error"\)/);
+  assert.match(teamPanelSource, /setRenderAttempt\(\(current\) => current \+ 1\)/);
+  assert.doesNotMatch(teamPanelSource, /setReady\(true\)/);
 });

@@ -1,6 +1,7 @@
 import type { Event } from "./types";
 import type { TimelineEvent } from "./timeline-identity";
 import { mergeEventRevision } from "./event-revision";
+import { isProjectedRoomTail } from "./room-tail-projection";
 
 /**
  * A small per-room cache of the most recent events, in localStorage, so a
@@ -49,7 +50,7 @@ export function readRoomEventSnippet(roomId: string): Event[] | null {
 /** Recent timeline rows worth caching. Short-lived optimistic rows are kept. */
 function cacheableEvents<T extends Event>(events: T[]): Event[] {
   return events
-    .filter((event) => event.type !== "m.progress")
+    .filter((event) => event.type !== "m.progress" && !isProjectedRoomTail(event))
     .slice(-ROOM_SNIPPET_LIMIT)
     .map((event) => {
       // Real events keep their receipt status and immutable local identity so

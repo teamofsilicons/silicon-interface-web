@@ -521,7 +521,11 @@ export function timelineRenderKey(event: Event): string {
 }
 
 export function hasAuthoritativeEventId(event: Event): boolean {
-  return Boolean(event.event_id && !event.event_id.startsWith("temp-"));
+  return Boolean(
+    event.event_id &&
+    !event.event_id.startsWith("temp-") &&
+    (event as TimelineEvent)._projectedRoomTail !== true
+  );
 }
 
 export function authoritativeActionId(event: Event): string | null {

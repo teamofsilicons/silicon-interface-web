@@ -41,6 +41,10 @@ import {
   saveRoomEventSnippet,
 } from "@/lib/room-snippet";
 import {
+  reconcileRoomTailProjection,
+  seedTimelineWithRoomTail,
+} from "@/lib/room-tail-projection";
+import {
   setPendingPreview,
   updatePendingPreview,
   clearPendingPreview,
@@ -156,7 +160,6 @@ import {
   normalizeDeliveryObject,
   normalizeDeliverySummary,
 } from "@/lib/delivery-state";
-import { mergeEventRevision } from "@/lib/event-revision";
 import { deviceId } from "@/lib/device-id";
 import {
   createModerationReportIntent,
@@ -647,7 +650,30 @@ export function RoomView({
     voiceSession.phase !== "idle" &&
     recordingRoomId !== null &&
     recordingRoomId !== room.room_id;
-  const [events, setEvents] = React.useState<LocalEvent[]>([]);
+  // RoomView is keyed by room id. Freeze the opening projection for the same
+  // initial-paint epoch as the event state; later room updates arrive through
+  // the normal socket/history reducers instead of restarting history loading.
+  const [openedRoomProjection] = React.useState(room);
+  const [events, setEvents] = React.useState<LocalEvent[]>(() =>
+    seedTimelineWithRoomTail(
+      openedRoomProjection,
+      readRoomEventSnippet(openedRoomProjection.room_id) ?? [],
+    ).map((event) => {
+      const local = event as LocalEvent;
+      const cachedStatus = local._status;
+      const fallbackStatus =
+        !event.event_id.startsWith("temp-") &&
+        !(local._projectedRoomTail === true) &&
+        isMyEvent(event, myUsername)
+          ? serverDeliveryStatus(event)
+          : undefined;
+      return {
+        ...event,
+        is_final: true,
+        _status: cachedStatus ?? fallbackStatus,
+      };
+    }),
+  );
   const peers = React.useMemo(() => (Array.isArray(room.peers) ? room.peers : []), [room.peers]);
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
   // header title (saved name vs @id), avatar, and the Save Contact button.
@@ -1626,15 +1652,18 @@ export function RoomView({
     stickToBottomRef.current = true;
     const roomOpenScrollEpoch = scrollOwnershipEpochRef.current;
     clearHistoryViewportAnchor(true);
-    const cachedEvents = readRoomEventSnippet(roomId);
+    const cachedEvents = seedTimelineWithRoomTail(
+      openedRoomProjection,
+      readRoomEventSnippet(roomId) ?? [],
+    );
     // eslint-disable-next-line react-hooks/set-state-in-effect -- room changes require one atomic pre-paint reset so stale timeline/outbox state never appears in the next room.
-    setLoading(!cachedEvents?.some(isTimelineEvent));
+    setLoading(!cachedEvents.some(isTimelineEvent));
     setHydrated(false);
     // Messages present when the chat opens are historical — force them final so
     // a missed finalize frame doesn't replay the "streaming…" state as if the
     // message just arrived. Live streaming still flows in via WS frames.
     setEvents(
-      (cachedEvents ?? []).map((e) => {
+      cachedEvents.map((e) => {
         const local = e as LocalEvent;
         const cachedStatus = local._status;
         const fallbackStatus =
@@ -1881,7 +1910,7 @@ export function RoomView({
       .catch((e) => {
         if (!mounted) return;
         reportHistoryFailure(e);
-        if (!cachedEvents?.some(isTimelineEvent) && !durableCacheAvailable) {
+        if (!cachedEvents.some(isTimelineEvent) && !durableCacheAvailable) {
           toast.error(e instanceof ApiError ? e.message : String(e));
         }
         setLoading(false);
@@ -1897,6 +1926,7 @@ export function RoomView({
     cancelBottomAnimation,
     cancelPendingBottomScroll,
     clearHistoryViewportAnchor,
+    openedRoomProjection,
     room.room_id,
     myUsername,
     clearReceiptTimer,
@@ -6285,7 +6315,7 @@ function mergeServerEvents(
     currentDevice,
     directClientId,
     merge: (existing, incoming) => {
-      const revised = mergeEventRevision(existing, incoming);
+      const revised = reconcileRoomTailProjection(existing, incoming);
       const mine = Boolean(revised.sender_handle && revised.sender_handle === myUsername);
       const accepted = hasAuthoritativeEventId(revised);
       return {

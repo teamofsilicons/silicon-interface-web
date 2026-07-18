@@ -8,6 +8,7 @@ import {
   authoritativeActionId,
   bindAcceptedTimelineEvent,
   canEditAuthoritativeTimelineEvent,
+  hasAuthoritativeEventId,
   identityFromPersistedFields,
   readTimelineIdentity,
   reconcileTimelineEvents,
@@ -21,6 +22,11 @@ import {
 import { ackOutbox, enqueueOutbox, listOutbox } from "../../src/lib/outbox.ts";
 import { loadStoredRoomEvents } from "../../src/lib/chat-store.ts";
 import { mergeEventRevision } from "../../src/lib/event-revision.ts";
+import {
+  isProjectedRoomTail,
+  reconcileRoomTailProjection,
+  seedTimelineWithRoomTail,
+} from "../../src/lib/room-tail-projection.ts";
 
 function localEvent(identity, body = "draft") {
   return applyTimelineIdentity(
@@ -198,6 +204,70 @@ test("snippet reload retains identity and exact transaction dedupes history", as
   assert.equal(reconciled[0].event_id, "event-reload");
   assert.equal(timelineRenderKey(reconciled[0]), identity.localKey);
   assert.equal(reconciled[0].created_at, identity.localCreatedAt);
+});
+
+test("a missing room tail paints from the list projection before history resolves", () => {
+  installBrowser();
+  const cached = [serverEvent("older-event", "2026-07-18T09:00:00.000Z", "older")];
+  const room = {
+    last_event: {
+      event_id: "newest-event",
+      preview: "the newest message",
+      at: "2026-07-18T09:01:00.000Z",
+      sender_handle: "alice",
+      sender_kind: "carbon",
+      type: "m.text",
+      stream_position: 42,
+      stream_writer: "writer-a",
+      edit_version: 0,
+      edited_at: null,
+    },
+  };
+
+  const seeded = seedTimelineWithRoomTail(room, cached);
+  assert.deepEqual(seeded.map((row) => row.content.body), ["older", "the newest message"]);
+  assert.equal(isProjectedRoomTail(seeded[1]), true);
+  assert.equal(hasAuthoritativeEventId(seeded[1]), false);
+  assert.equal(authoritativeActionId(seeded[1]), null);
+
+  saveRoomEventSnippet("projected-tail-room", seeded);
+  assert.deepEqual(
+    readRoomEventSnippet("projected-tail-room").map((row) => row.event_id),
+    ["older-event"],
+    "a preview-only row must never replace the canonical timeline cache",
+  );
+
+  const canonical = reconcileRoomTailProjection(
+    seeded[1],
+    serverEvent(
+      "newest-event",
+      "2026-07-18T09:01:00.000Z",
+      "the newest message in full",
+    ),
+  );
+  assert.equal(canonical.content.body, "the newest message in full");
+  assert.equal(isProjectedRoomTail(canonical), false);
+  assert.equal(hasAuthoritativeEventId(canonical), true);
+
+  const editedProjection = seedTimelineWithRoomTail(
+    {
+      last_event: {
+        ...room.last_event,
+        preview: "newer edited preview",
+        edit_version: 2,
+        edited_at: "2026-07-18T09:02:00.000Z",
+      },
+    },
+    [canonical],
+  ).at(-1);
+  const staleHistory = reconcileRoomTailProjection(editedProjection, {
+    ...canonical,
+    edit_version: 1,
+    edited_at: "2026-07-18T09:01:30.000Z",
+  });
+  assert.equal(staleHistory.content.body, "newer edited preview");
+  assert.equal(isProjectedRoomTail(staleHistory), true);
+  assert.equal(hasAuthoritativeEventId(staleHistory), false);
 });
 
 test("persisted local sequence survives clock regression and orders sends", async () => {

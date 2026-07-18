@@ -1239,6 +1239,19 @@ export async function discardOutbox(
   return tombstoneOutbox(ownerId, clientId, undefined, "discarded");
 }
 
+/** Cancel an operation that has not yet received authoritative acceptance.
+ * Unlike the correction-only discard surface, this is valid while a send is
+ * queued/resolving/retrying. Callers must serialize it with transport under
+ * the client Web Lock and abort any active request before entering that lock. */
+export async function cancelPendingOutbox(
+  ownerId: string,
+  clientId: string,
+): Promise<boolean> {
+  const pending = (await listOutbox(ownerId)).find((entry) => entry.clientId === clientId);
+  if (!pending) return false;
+  return tombstoneOutbox(ownerId, clientId, undefined, "discarded");
+}
+
 /** Update retry metadata only while the entry still exists. A separate mirror
  * acknowledgement key and the IndexedDB tombstone both prevent resurrection. */
 export async function updateOutbox(

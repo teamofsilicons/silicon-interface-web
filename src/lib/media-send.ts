@@ -11,6 +11,7 @@ import {
 } from "./media-upload-store";
 import {
   ackOutbox,
+  cancelPendingOutbox,
   commitOutboxCorrection,
   discardOutbox,
   enqueueOutbox,
@@ -30,7 +31,8 @@ export interface StageMediaSendInput {
   mediaOwnerId: string;
   roomId: string;
   clientId: string;
-  blob: Blob;
+  /** Optional only when this client ID already owns a durable upload row. */
+  blob?: Blob;
   kind: "image" | "file" | "voice";
   type: string;
   filename: string;
@@ -72,11 +74,12 @@ export async function stageMediaSendIntent(
       existing.name !== input.filename ||
       existing.mime !== input.mime ||
       existing.kind !== input.kind ||
-      existing.size !== input.blob.size
+      (input.blob && existing.size !== input.blob.size)
     ) {
       throw new Error("media client id was reused with a different payload");
     }
   } else {
+    if (!input.blob) throw new Error("durable media source is missing");
     await dependencies.stage({
       ownerId: input.mediaOwnerId,
       roomId: input.roomId,
@@ -89,6 +92,8 @@ export async function stageMediaSendIntent(
       blob: input.blob,
     });
   }
+  const size = existing?.size ?? input.blob?.size;
+  if (size == null) throw new Error("durable media source is missing");
   const entry: OutboxEntry = {
     roomId: input.roomId,
     clientId: input.clientId,
@@ -105,7 +110,7 @@ export async function stageMediaSendIntent(
       kind: input.kind,
       filename: input.filename,
       mime: input.mime,
-      size: input.blob.size,
+      size,
       eventContent: input.eventContent,
       completionMeta: input.completionMeta,
       transcribe: input.transcribe,
@@ -327,6 +332,7 @@ export async function prepareMediaOutboxPayload(
   dependencies: PrepareDependencies = prepareDefaults,
   onProgress?: (pct: number, loaded: number) => void,
   xhrRef?: { current: XMLHttpRequest | null },
+  signal?: AbortSignal,
 ): Promise<PreparedMediaPayload> {
   entry = await dependencies.ensure(outboxOwnerId, entry);
   if (entry.operation !== "media" || !entry.media) {
@@ -358,6 +364,7 @@ export async function prepareMediaOutboxPayload(
     retainSourceUntilEventAck: true,
     onProgress,
     xhrRef,
+    signal,
   });
   // Voice delivery is authoritative once its bytes reach Glass. Older durable
   // outbox rows may still carry the retired `transcribe: true` flag; ignore it
@@ -462,6 +469,28 @@ export async function discardMediaSend(
       severity: "degraded",
       area: "media",
       message: "Discarded media is waiting for local storage cleanup.",
+    });
+  }
+  return true;
+}
+
+/** Waiting media can be cancelled before it becomes a blocked correction.
+ * The outbox tombstone still commits before retained bytes are removed. */
+export async function cancelPendingMediaSend(
+  outboxOwnerId: string,
+  entry: OutboxEntry,
+): Promise<boolean> {
+  if (!(await cancelPendingOutbox(outboxOwnerId, entry.clientId))) return false;
+  if (entry.operation !== "media" || !entry.media) return true;
+  const sourceClientId = entry.media.sourceClientId ?? entry.clientId;
+  try {
+    await patchMediaUpload(entry.media.ownerId, sourceClientId, { state: "cleanup" });
+    await removeMediaUpload(entry.media.ownerId, sourceClientId);
+  } catch {
+    reportStorageIssue({
+      severity: "degraded",
+      area: "media",
+      message: "Cancelled media is waiting for local storage cleanup.",
     });
   }
   return true;

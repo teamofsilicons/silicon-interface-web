@@ -212,6 +212,7 @@ import {
   prepareMediaOutboxPayload,
   sweepAcknowledgedMediaCleanup,
 } from "@/lib/media-send";
+import { beginPendingSendControl } from "@/lib/pending-send-control";
 import {
   ABUSE_CHALLENGE_SOLVED_EVENT,
 } from "@/lib/abuse-challenge-store";
@@ -2634,35 +2635,48 @@ function ChatPageInner() {
               (entry) => entry.clientId === it.clientId,
             );
             if (!current) return;
-            const payload = current.operation === "media"
-              ? await prepareMediaOutboxPayload(ownerId, current)
-              : {
-                  type: current.type ?? "m.text",
-                  content:
-                    current.type && current.type !== "m.text"
-                      ? { ...(current.content ?? {}) }
-                      : { ...(current.content ?? {}), body: current.body },
-                  reply_to_event_id: current.replyTo,
-                };
-            const event = await api.sendEvent(
-              current.roomId,
-              payload,
-              current.clientId,
-            );
-            await persistEventFrames(
-              ownerId,
-              [{ type: "event", room_id: current.roomId, event }],
-            );
-            if (current.operation === "media") {
-              await acknowledgeMediaSend(ownerId, current, undefined, {
-                roomId: current.roomId,
-                event,
-              });
-            } else {
-              await ackOutbox(ownerId, current.clientId, {
-                roomId: current.roomId,
-                event,
-              });
+            const control = beginPendingSendControl(ownerId, current.clientId);
+            try {
+              const payload = current.operation === "media"
+                ? await prepareMediaOutboxPayload(
+                    ownerId,
+                    current,
+                    undefined,
+                    undefined,
+                    control.xhrRef,
+                    control.signal,
+                  )
+                : {
+                    type: current.type ?? "m.text",
+                    content:
+                      current.type && current.type !== "m.text"
+                        ? { ...(current.content ?? {}) }
+                        : { ...(current.content ?? {}), body: current.body },
+                    reply_to_event_id: current.replyTo,
+                  };
+              const event = await api.sendEvent(
+                current.roomId,
+                payload,
+                current.clientId,
+                control.signal,
+              );
+              await persistEventFrames(
+                ownerId,
+                [{ type: "event", room_id: current.roomId, event }],
+              );
+              if (current.operation === "media") {
+                await acknowledgeMediaSend(ownerId, current, undefined, {
+                  roomId: current.roomId,
+                  event,
+                });
+              } else {
+                await ackOutbox(ownerId, current.clientId, {
+                  roomId: current.roomId,
+                  event,
+                });
+              }
+            } finally {
+              control.finish();
             }
           });
         } catch (error) {

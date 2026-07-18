@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   acknowledgeMediaSend,
+  cancelPendingMediaSend,
   ensureMediaOutboxStaged,
   journalRemoteGifIntent,
   prepareMediaOutboxPayload,
@@ -311,6 +312,48 @@ test("prepared media is deterministic and cleanup waits for a durable ack", asyn
 
   assert.equal(await sweepAcknowledgedMediaCleanup(owner), 1);
   assert.equal(await readMediaUpload(`carbon:${owner}`, entry.clientId), null);
+});
+
+test("an already uploaded document can become a durable media send without restaging bytes", async () => {
+  await deleteDatabase("silicon-interface-media-outbox");
+  installBrowser();
+  const owner = "uploaded-document-owner";
+  const clientId = "uploaded-document-client";
+  const blob = new Blob(["document bytes"], { type: "application/pdf" });
+  await stageMediaUpload({
+    ownerId: `carbon:${owner}`,
+    roomId: "document-room",
+    clientId,
+    outboxClientId: clientId,
+    name: "document.pdf",
+    mime: "application/pdf",
+    kind: "file",
+    size: blob.size,
+    blob,
+  });
+  await patchMediaUpload(`carbon:${owner}`, clientId, {
+    state: "completed",
+    mediaId: "01J00000000000000000000000",
+  });
+
+  const entry = await stageMediaSendIntent({
+    outboxOwnerId: owner,
+    mediaOwnerId: `carbon:${owner}`,
+    roomId: "document-room",
+    clientId,
+    kind: "file",
+    type: "m.file",
+    filename: "document.pdf",
+    mime: "application/pdf",
+    optimisticContent: { filename: "document.pdf", mime: "application/pdf" },
+  });
+  assert.equal(entry.operation, "media");
+  assert.equal(entry.media.size, blob.size);
+  assert.equal(await (await readMediaUpload(`carbon:${owner}`, clientId)).blob.text(), "document bytes");
+
+  assert.equal(await cancelPendingMediaSend(owner, entry), true);
+  assert.deepEqual(await listOutbox(owner), []);
+  assert.equal(await readMediaUpload(`carbon:${owner}`, clientId), null);
 });
 
 test("a legacy failed voice retry never waits for transcription", async () => {

@@ -1043,7 +1043,7 @@ function BubbleActions({
               className="text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive"
             >
               <Trash className="mr-2 h-3.5 w-3.5" />
-              unsend
+              {event.event_id.startsWith("temp-") ? "cancel send" : "unsend"}
             </DropdownMenuItem>
           )}
           {canTakeBack && onTakeBack && (

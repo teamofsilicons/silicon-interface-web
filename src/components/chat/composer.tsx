@@ -46,6 +46,7 @@ import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
 import { emojiShortcodeQuery } from "@/lib/emoji-shortcode";
 import { computePeaks, isGifMedia, measureImage, measureVideo } from "@/lib/media-meta";
 import { uploadMediaResumable } from "@/lib/media-upload";
+import { beginPendingSendControl } from "@/lib/pending-send-control";
 import {
   acknowledgeMediaSend,
   ensureMediaOutboxStaged,
@@ -1158,6 +1159,7 @@ export function Composer({
         const mime = file.type || "application/octet-stream";
         const mediaId = await uploadMediaResumable({
           clientId: id,
+          outboxClientId: id,
           file,
           mime,
           kind: file.type.startsWith("image/") ? "image" : "file",
@@ -1166,6 +1168,7 @@ export function Composer({
           onProgress: (pct, loaded) => updateAttachment(id, { pct, loaded }),
           xhrRef: ref,
           signal: abortController.signal,
+          retainSourceUntilEventAck: true,
         });
         updateAttachment(id, {
           status: "ready",
@@ -2457,13 +2460,15 @@ export function Composer({
         onAck(clientId, real);
         return true;
       }
+      const control = beginPendingSendControl(outboxOwner, clientId);
       void api
-        .sendEvent(roomId, payload, clientId)
+        .sendEvent(roomId, payload, clientId, control.signal)
         .then((real) => {
           onAck(clientId, real);
           void ackOutbox(outboxOwner, clientId, { roomId, event: real });
         })
-        .catch((error) => onFail(clientId, error));
+        .catch((error) => onFail(clientId, error))
+        .finally(control.finish);
       return true;
     } catch (error) {
       // No optimistic item was created if local durability failed, so leave
@@ -2521,13 +2526,30 @@ export function Composer({
         // and acknowledged this exact durable GIF intent.
         if (!current) return;
         entry = current;
-        const payload = await prepareMediaOutboxPayload(outboxOwner, entry);
-        const real = await api.sendEvent(roomId, payload, entry.clientId);
-        onAck(entry.clientId, real);
-        await acknowledgeMediaSend(outboxOwner, entry, undefined, {
-          roomId,
-          event: real,
-        });
+        const control = beginPendingSendControl(outboxOwner, entry.clientId);
+        try {
+          const payload = await prepareMediaOutboxPayload(
+            outboxOwner,
+            entry,
+            undefined,
+            undefined,
+            control.xhrRef,
+            control.signal,
+          );
+          const real = await api.sendEvent(
+            roomId,
+            payload,
+            entry.clientId,
+            control.signal,
+          );
+          onAck(entry.clientId, real);
+          await acknowledgeMediaSend(outboxOwner, entry, undefined, {
+            roomId,
+            event: real,
+          });
+        } finally {
+          control.finish();
+        }
       });
       track.messageSent({ room_id: roomId, message_type: "m.image", has_attachment: true });
     } catch (error) {
@@ -2815,27 +2837,40 @@ export function Composer({
             continue;
           }
           const fileType = a.mime.startsWith("image/") ? "m.image" : "m.file";
-          const sent = await sendOptimistic(
+          const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+          if (!outboxOwner) throw new Error("Please sign in again before sending this file");
+          const content = {
+            media_id: a.mediaId,
+            mime: a.mime,
+            filename: a.name,
+            ...(bundleId ? { bundle_id: bundleId } : {}),
+          };
+          const entry = await stageMediaSendIntent({
+            outboxOwnerId: outboxOwner,
+            mediaOwnerId: `carbon:${outboxOwner}`,
+            roomId,
+            clientId: a.id,
+            ...(a.file ? { blob: a.file } : {}),
+            kind: a.mime.startsWith("image/") ? "image" : "file",
+            type: fileType,
+            filename: a.name,
+            mime: a.mime,
+            optimisticContent: content,
+            eventContent: bundleId ? { bundle_id: bundleId } : {},
+            replyTo: replyTo?.event_id,
+          });
+          onOptimisticAdd(
+            a.id,
             {
               type: fileType,
-              content: {
-                media_id: a.mediaId,
-                mime: a.mime,
-                filename: a.name,
-                ...(bundleId ? { bundle_id: bundleId } : {}),
-              },
+              content: entry.content ?? content,
               ...(replyTo ? { reply_to_event_id: replyTo.event_id } : {}),
             },
-            { sizeBytes: a.size },
+            { timeoutMs: sendTimeoutMs(a.size) },
           );
-          if (sent) {
-            queuedAttachmentIds.add(a.id);
-            const carbonId = authStore.getCarbon()?.carbon_id;
-            if (carbonId) {
-              await removeMediaUpload(`carbon:${carbonId}`, a.id).catch(() => undefined);
-            }
-            track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
-          }
+          wakeOutboxRecovery(outboxOwner, a.id);
+          queuedAttachmentIds.add(a.id);
+          track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         }
         // Remove only attachments whose complete send semantics are now in the
         // durable outbox. A storage failure leaves that row staged instead of

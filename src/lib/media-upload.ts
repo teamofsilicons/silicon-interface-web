@@ -16,6 +16,41 @@ import {
   missingMultipartParts,
   verifiedMultipartCompletionParts,
 } from "./multipart-resume";
+import { UploadStalledError } from "./upload-stall-error";
+
+export { UploadStalledError } from "./upload-stall-error";
+
+export const UPLOAD_STALL_TIMEOUT_MS = 60_000;
+
+function uploadStallWatchdog(
+  xhr: XMLHttpRequest,
+  timeoutMs: number,
+  onStall: () => void,
+): { start: () => void; progress: (loaded: number) => void; clear: () => void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastLoaded = -1;
+  const clear = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  const arm = () => {
+    clear();
+    timer = setTimeout(() => {
+      timer = null;
+      onStall();
+      xhr.abort();
+    }, timeoutMs);
+  };
+  return {
+    start: arm,
+    progress: (loaded) => {
+      if (loaded <= lastLoaded) return;
+      lastLoaded = loaded;
+      arm();
+    },
+    clear,
+  };
+}
 
 /**
  * Upload to a presigned URL via XHR (fetch can't report upload progress).
@@ -31,35 +66,44 @@ export function xhrUpload(
   onProgress: (pct: number, loaded: number) => void,
   xhrRef: { current: XMLHttpRequest | null },
   timeoutMs?: number,
+  stallTimeoutMs = UPLOAD_STALL_TIMEOUT_MS,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
     xhrRef.current = xhr;
     xhr.open("POST", url);
     if (timeoutMs && timeoutMs > 0) xhr.timeout = timeoutMs;
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      watchdog.clear();
+      if (xhrRef.current === xhr) xhrRef.current = null;
+      settle();
+    };
+    const watchdog = uploadStallWatchdog(xhr, stallTimeoutMs, () => {
+      finish(() => reject(new UploadStalledError()));
+    });
     xhr.upload.onprogress = (e) => {
+      watchdog.progress(e.loaded);
       if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100), e.loaded);
     };
-    const clear = () => {
-      xhrRef.current = null;
-    };
     xhr.onload = () => {
-      clear();
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`upload failed (${xhr.status})`));
+      finish(() => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`upload failed (${xhr.status})`));
+      });
     };
     xhr.onerror = () => {
-      clear();
-      reject(new Error("upload failed"));
+      finish(() => reject(new Error("upload failed")));
     };
     xhr.ontimeout = () => {
-      clear();
-      reject(new Error("upload timed out - retry to try again"));
+      finish(() => reject(new Error("upload timed out - retry to try again")));
     };
     xhr.onabort = () => {
-      clear();
-      reject(new DOMException("aborted", "AbortError"));
+      finish(() => reject(new DOMException("aborted", "AbortError")));
     };
+    watchdog.start();
     xhr.send(form);
   });
 }
@@ -159,23 +203,39 @@ function xhrPutPart(
   checksum: string,
   onProgress: (loaded: number) => void,
   xhrRef: { current: XMLHttpRequest | null },
+  stallTimeoutMs = UPLOAD_STALL_TIMEOUT_MS,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
     xhrRef.current = xhr;
     xhr.open("PUT", url);
     xhr.timeout = sendTimeoutMs(part.size);
     xhr.setRequestHeader("x-amz-checksum-sha256", checksum);
-    xhr.upload.onprogress = (event) => onProgress(event.loaded);
-    const clear = () => { xhrRef.current = null; };
-    xhr.onload = () => {
-      clear();
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`upload part failed (${xhr.status})`));
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      watchdog.clear();
+      if (xhrRef.current === xhr) xhrRef.current = null;
+      settle();
     };
-    xhr.onerror = () => { clear(); reject(new Error("upload part failed")); };
-    xhr.ontimeout = () => { clear(); reject(new Error("upload part timed out")); };
-    xhr.onabort = () => { clear(); reject(new DOMException("aborted", "AbortError")); };
+    const watchdog = uploadStallWatchdog(xhr, stallTimeoutMs, () => {
+      finish(() => reject(new UploadStalledError()));
+    });
+    xhr.upload.onprogress = (event) => {
+      watchdog.progress(event.loaded);
+      onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      finish(() => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`upload part failed (${xhr.status})`));
+      });
+    };
+    xhr.onerror = () => finish(() => reject(new Error("upload part failed")));
+    xhr.ontimeout = () => finish(() => reject(new Error("upload part timed out")));
+    xhr.onabort = () => finish(() => reject(new DOMException("aborted", "AbortError")));
+    watchdog.start();
     xhr.send(part);
   });
 }

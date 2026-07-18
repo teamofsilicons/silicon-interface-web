@@ -4,6 +4,7 @@ import test from "node:test";
 import { ApiError } from "../../src/lib/api.ts";
 import { classifySendFailure } from "../../src/lib/send-failure.ts";
 import {
+  cancelPendingOutbox,
   commitOutboxCorrection,
   discardOutbox,
   enqueueOutbox,
@@ -122,6 +123,26 @@ test("copy handoff retains the blocked source and local discard writes a distinc
     .find((value) => value?.includes('"terminal":"discarded"'));
   assert.ok(tombstone);
   assert.equal(tombstone.includes("private body"), false);
+});
+
+test("a queued send can be cancelled before it becomes a blocked correction", async () => {
+  await deleteDatabase("silicon-interface-outbox");
+  installBrowser();
+  const owner = "queued-cancel-owner";
+  const clientId = "queued-cancel-client";
+  await enqueueOutbox(owner, {
+    roomId: "room",
+    clientId,
+    type: "m.text",
+    body: "do not send",
+    content: { body: "do not send" },
+    at: 25,
+  });
+
+  assert.equal(await cancelPendingOutbox(owner, clientId), true);
+  assert.deepEqual(await listOutbox(owner), []);
+  assert.equal(await outboxTerminalState(owner, clientId), "discarded");
+  assert.equal(await isOutboxAcknowledged(owner, clientId), false);
 });
 
 test("manual retry before an automatic deadline performs no durable mutation", async () => {

@@ -649,6 +649,7 @@ export const api = {
     // It is never trusted for timeline reconciliation: Glass separately emits
     // top-level transaction_id only to the exact authoring X-Device-ID.
     client_id?: string,
+    signal?: AbortSignal,
   ) => {
     const ownerId = authStore.getCarbon()?.carbon_id ?? "";
     const traceparent = client_id && ownerId
@@ -657,7 +658,7 @@ export const api = {
     return call<Event>("POST", `/api/v1/rooms/${room_id}/events`, {
       ...payload,
       content: client_id ? { ...(payload.content ?? {}), client_id } : payload.content,
-    }, { traceparent });
+    }, { traceparent, signal });
   },
 
   clientOperation: (

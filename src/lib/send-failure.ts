@@ -1,4 +1,5 @@
 import { ApiError } from "./api";
+import { UploadStalledError } from "./upload-stall-error";
 import type { HeldSend } from "./types";
 export type CorrectionAction =
   | "review_input"
@@ -20,6 +21,7 @@ export type CorrectionAction =
 
 export type SendFailureCode =
   | "network_unavailable"
+  | "upload_stalled"
   | "unknown_failure"
   | "invalid_request"
   | "invalid_client_id"
@@ -83,6 +85,7 @@ type FailurePolicy = {
 
 const POLICY: Record<SendFailureCode, FailurePolicy> = {
   network_unavailable: { retryable: true, automatic: true, actions: [] },
+  upload_stalled: { retryable: true, automatic: false, actions: ["resume_upload", "discard_local"] },
   unknown_failure: { retryable: false, automatic: false, actions: [] },
   invalid_request: { retryable: false, automatic: false, actions: ["review_input", "discard_local"] },
   invalid_client_id: { retryable: false, automatic: false, actions: ["copy_to_composer", "discard_local"] },
@@ -162,7 +165,12 @@ function parseServerContract(body: unknown): ParsedContract {
   const code = typeof value.code === "string" && value.code in POLICY
     ? (value.code as SendFailureCode)
     : null;
-  if (!code || code === "network_unavailable" || code === "unknown_failure") {
+  if (
+    !code ||
+    code === "network_unavailable" ||
+    code === "upload_stalled" ||
+    code === "unknown_failure"
+  ) {
     return { kind: "invalid" };
   }
   const policy = POLICY[code];
@@ -202,7 +210,7 @@ export function isSendFailureRecord(value: unknown): value is SendFailureRecord 
       : null;
   if (!policy) return false;
   const expectedDomain =
-    row.code === "network_unavailable"
+    row.code === "network_unavailable" || row.code === "upload_stalled"
       ? "transport"
       : row.code === "unknown_failure"
         ? "protocol"
@@ -260,7 +268,9 @@ export function classifySendFailure(
   // Unknown domains are not authoritative and use conservative HTTP fallback.
   // A malformed/unknown chat.operation contract fails closed.
   const code: SendFailureCode =
-    server.kind === "valid"
+    error instanceof UploadStalledError
+      ? "upload_stalled"
+      : server.kind === "valid"
       ? server.code
       : server.kind === "invalid"
         ? "unknown_failure"
@@ -285,7 +295,7 @@ export function classifySendFailure(
     : undefined;
   const failure: SendFailureRecord = {
     domain:
-      code === "network_unavailable"
+      code === "network_unavailable" || code === "upload_stalled"
         ? "transport"
         : code === "unknown_failure"
           ? "protocol"
@@ -358,6 +368,7 @@ export function sendFailureFromHeld(held: HeldSend): SendFailureRecord | null {
 
 const COPY: Partial<Record<SendFailureCode, string>> = {
   network_unavailable: "Offline. Saved on this device.",
+  upload_stalled: "Upload stopped making progress.",
   session_expired: "Sign in again to send this message.",
   invalid_device_id: "This device needs to be repaired before sending.",
   invalid_reply: "The replied-to message is no longer available.",

@@ -30,6 +30,17 @@ test("unsend redacts in place without copying the deleted message into the compo
   assert.match(unsend, /settleTimelineAfterUnsend/);
 });
 
+test("waiting sends expose a durable cancel path instead of a fake unsend", () => {
+  const unsend = functionSlice(roomView, "const onSelfDelete", "const onReact");
+
+  assert.match(unsend, /cancelPendingSendControl\(owner, clientId\)/);
+  assert.match(unsend, /withOutboxClientLock\(owner, clientId/);
+  assert.match(unsend, /cancelPendingMediaSend\(owner, current\)/);
+  assert.match(unsend, /cancelPendingOutbox\(owner, clientId\)/);
+  assert.match(composer, /retainSourceUntilEventAck: true/);
+  assert.match(composer, /stageMediaSendIntent\(\{/);
+});
+
 test("copying content into the composer remains an explicit recovery action", () => {
   const correction = functionSlice(roomView, "const onCorrection", "const confirmTextCorrection");
   const copyCalls = [...correction.matchAll(/copyEventToComposer\(event\)/g)];

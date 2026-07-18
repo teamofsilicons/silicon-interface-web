@@ -54,10 +54,12 @@ import {
 import { track } from "@/lib/analytics";
 import {
   ackOutbox,
+  cancelPendingOutbox,
   commitOutboxCorrection,
   discardOutbox,
   enqueueOutbox,
   listOutbox,
+  outboxTerminalState,
   type OutboxEntry,
 } from "@/lib/outbox";
 import {
@@ -83,10 +85,12 @@ import {
   wakeOutboxRecovery,
 } from "@/lib/outbox-recovery";
 import {
+  cancelPendingMediaSend,
   discardMediaSend,
   replaceMediaOutboxSource,
   restartMediaUploadGeneration,
 } from "@/lib/media-send";
+import { cancelPendingSendControl } from "@/lib/pending-send-control";
 import { ensureDeviceRegistration } from "@/lib/device-registration";
 import {
   isUnreadEligibleEvent,
@@ -2778,7 +2782,6 @@ export function RoomView({
     const clientId = (ev as LocalEvent)._clientId;
     if (ev.event_id.startsWith("temp-") && clientId) {
       const cancel = cancelQueuedRef.current;
-      if (!cancel) return;
       const previousStatus = (ev as LocalEvent)._status;
       setEvents((prev) =>
         prev.map((event) =>
@@ -2787,8 +2790,8 @@ export function RoomView({
             : event,
         ),
       );
-      const result = await cancel(clientId);
-      if (result === "not-held" || result === "failed") {
+      const result = cancel ? await cancel(clientId) : "not-held";
+      if (result === "failed") {
         setEvents((prev) =>
           prev.map((event) =>
             event._clientId === clientId
@@ -2797,6 +2800,65 @@ export function RoomView({
           ),
         );
         return;
+      }
+      if (result === "not-held") {
+        const owner = authStore.getCarbon()?.carbon_id ?? null;
+        if (!owner) {
+          setEvents((prev) =>
+            prev.map((event) =>
+              event._clientId === clientId
+                ? { ...event, _status: previousStatus }
+                : event,
+            ),
+          );
+          return;
+        }
+        // Abort first: the recovery worker may currently hold the client lock
+        // around a multipart XHR or event POST. Aborting releases that lock;
+        // the discard tombstone then prevents every tab from replaying it.
+        cancelPendingSendControl(owner, clientId);
+        const cancelled = await withOutboxClientLock(owner, clientId, async () => {
+          const current = (await listOutbox(owner)).find(
+            (entry) => entry.clientId === clientId,
+          );
+          if (!current) {
+            return (await outboxTerminalState(owner, clientId)) === "discarded"
+              ? "cancelled" as const
+              : "settled" as const;
+          }
+          const committed = current.operation === "media"
+            ? await cancelPendingMediaSend(owner, current)
+            : await cancelPendingOutbox(owner, clientId);
+          return committed ? "cancelled" as const : "failed" as const;
+        });
+        if (cancelled === "settled") {
+          // Acceptance won the race. Project the authoritative event instead
+          // of claiming a cancellation the server never confirmed.
+          void loadTimelineWindow(room.room_id).then(({ events: authoritative }) => {
+            setEvents((prev) =>
+              mergeServerEvents(
+                prev,
+                authoritative,
+                room.room_id,
+                myUsername,
+                timelineOwner,
+                timelineDevice,
+              ),
+            );
+          }).catch(() => undefined);
+          return;
+        }
+        if (cancelled === "failed") {
+          setEvents((prev) =>
+            prev.map((event) =>
+              event._clientId === clientId
+                ? { ...event, _status: previousStatus }
+                : event,
+            ),
+          );
+          toast.error("The cancel request could not be saved. The message is still queued.");
+          return;
+        }
       }
       if (result === "sent") {
         // The server won the release race. Replace the temp row from
@@ -2815,9 +2877,14 @@ export function RoomView({
         }).catch(() => undefined);
         return;
       }
-      if (result !== "cancelled") return;
+      if (result !== "cancelled" && result !== "not-held") return;
       setHoldingMessage(false);
       setEditingEvent((cur) => (cur?.event_id === ev.event_id ? null : cur));
+      const localUrl = ev.content.local_url;
+      if (typeof localUrl === "string" && localUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(localUrl);
+      }
+      clearPendingPreview(room.room_id, clientId);
       setEvents((prev) => prev.filter((e) => e._clientId !== clientId));
       settleTimelineAfterUnsend();
       return;

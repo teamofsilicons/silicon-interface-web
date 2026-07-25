@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   Archive,
+  Briefcase,
   Camera,
   CaretLeft,
   Check,
@@ -25,9 +26,16 @@ import { roomDisplay } from "@/lib/peers";
 import { contactKey } from "@/lib/use-contacts";
 import { useDraftListPreview } from "@/lib/drafts";
 import { useVoiceDraftListPreview } from "@/lib/voice-drafts";
-import { usePendingPreview } from "@/lib/pending-preview";
+import {
+  acceptedPendingPreviewCovered,
+  clearPendingPreview,
+  usePendingPreview,
+} from "@/lib/pending-preview";
 import { cn, sidebarTime } from "@/lib/utils";
-import { serverRoomListStatus } from "@/lib/room-list-projection";
+import {
+  serverRoomListStatus,
+  useStandaloneRoomListEmptyState,
+} from "@/lib/room-list-projection";
 import type { MessageReceiptStatus } from "@/lib/message-receipt";
 
 import { Button } from "@/components/ui/button";
@@ -112,6 +120,9 @@ interface Props {
   ungroupedRooms?: Room[];
   groupControls?: GroupControls;
   archivedCount?: number;
+  /** Newest archived conversation, projected from the complete room list so
+   * the archive entry can carry Telegram-style preview and activity context. */
+  archivedLatestRoom?: Room | null;
   showArchived?: boolean;
   onShowArchivedChange?: (show: boolean) => void;
   onListPreferenceChange?: (
@@ -139,6 +150,7 @@ export function RoomList({
   ungroupedRooms,
   groupControls,
   archivedCount = 0,
+  archivedLatestRoom = null,
   showArchived = false,
   onShowArchivedChange,
   onListPreferenceChange,
@@ -159,7 +171,12 @@ export function RoomList({
       groupSections!.every((section) => section.rooms.length === 0) &&
       (ungroupedRooms?.length ?? 0) === 0
     : rooms.length === 0;
-  if (!loading && topLevelEmpty && !(archivedCount > 0 && !showArchived)) {
+  if (useStandaloneRoomListEmptyState(
+    Boolean(loading),
+    topLevelEmpty,
+    archivedCount,
+    showArchived,
+  )) {
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
         <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-28 text-center">
@@ -188,17 +205,18 @@ export function RoomList({
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
       {archivedCount > 0 || showArchived ? (
-        <button
-          type="button"
-          onClick={() => onShowArchivedChange?.(!showArchived)}
-          className="flex items-center gap-2 border-b px-6 py-2 text-left text-xs text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-          aria-pressed={showArchived}
-        >
-          <Archive className="h-3.5 w-3.5" />
-          <span>{showArchived ? "Back to conversations" : `Archived (${archivedCount})`}</span>
-        </button>
+        <ArchivedChatsRow
+          count={archivedCount}
+          latestRoom={archivedLatestRoom}
+          showArchived={showArchived}
+          onToggle={() => onShowArchivedChange?.(!showArchived)}
+        />
       ) : null}
-      <ScrollArea className="flex-1">
+      {showArchived && topLevelEmpty && !loading ? (
+        <div className="flex flex-1 items-center justify-center px-6 pb-20 text-center">
+          <p className="text-sm text-muted-foreground">No archived conversations.</p>
+        </div>
+      ) : <ScrollArea className="flex-1">
         {grouped ? (
           openSection ? (
             // Nested view: just the chats of the drilled-in group, with a
@@ -257,8 +275,72 @@ export function RoomList({
             ))}
           </ul>
         )}
-      </ScrollArea>
+      </ScrollArea>}
     </div>
+  );
+}
+
+/** Telegram-like archive entry using the Interface's square, monochrome row
+ * language. It reads like a conversation: title, newest preview, and time. */
+function ArchivedChatsRow({
+  count,
+  latestRoom,
+  showArchived,
+  onToggle,
+}: {
+  count: number;
+  latestRoom: Room | null;
+  showArchived: boolean;
+  onToggle: () => void;
+}) {
+  const latestDisplay = latestRoom ? roomDisplay(latestRoom) : null;
+  const latestPreview = latestRoom
+    ? roomPreview(latestRoom, latestDisplay?.subtitle ?? "")
+    : "";
+  const latestAt = latestRoom?.last_event?.at ?? latestRoom?.updated_at;
+
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={cn(
+        "grid w-full grid-cols-[36px_minmax(0,1fr)] items-center gap-3 border-b py-3 pl-6 pr-4 text-left transition-colors hover:bg-secondary/60",
+        showArchived && "bg-secondary/40",
+      )}
+      aria-pressed={showArchived}
+      aria-label={showArchived
+        ? "Back to conversations"
+        : `Archived Chats, ${count} chat${count === 1 ? "" : "s"}`}
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center bg-foreground text-background">
+        {showArchived ? (
+          <CaretLeft className="h-[18px] w-[18px]" weight="bold" />
+        ) : (
+          <Archive className="h-[18px] w-[18px]" weight="fill" />
+        )}
+      </span>
+      <span className="min-w-0 overflow-hidden">
+        <span className="grid min-w-0 grid-cols-[minmax(0,1fr)_3.75rem] items-center gap-2">
+          <span className="truncate text-sm font-semibold">Archived Chats</span>
+          <span className="min-w-0 truncate text-right text-[10px] text-muted-foreground">
+            {showArchived
+              ? `${count} chat${count === 1 ? "" : "s"}`
+              : latestAt
+                ? sidebarTime(latestAt)
+                : ""}
+          </span>
+        </span>
+        <span className="mt-0.5 block min-w-0 truncate text-xs text-muted-foreground">
+          {showArchived ? (
+            "Back to conversations"
+          ) : latestRoom ? (
+            <LastEventPreview room={latestRoom} fallback={latestPreview} />
+          ) : (
+            "No archived conversations"
+          )}
+        </span>
+      </span>
+    </button>
   );
 }
 
@@ -492,7 +574,16 @@ function RoomRow({
   const visibleVoiceDraft = Boolean(visibleDraft && voiceIsLatest);
   // An outgoing message still waiting to send / in flight (e.g. the silicon 5s
   // hold) shows in the preview with a clock until it lands in last_event.
-  const pending = usePendingPreview(r.room_id);
+  const pendingSnapshot = usePendingPreview(r.room_id);
+  const acceptedPreviewCovered = acceptedPendingPreviewCovered(
+    pendingSnapshot,
+    r.last_event,
+  );
+  React.useEffect(() => {
+    if (!acceptedPreviewCovered || !pendingSnapshot) return;
+    clearPendingPreview(r.room_id, pendingSnapshot.clientId);
+  }, [acceptedPreviewCovered, pendingSnapshot, r.room_id]);
+  const pending = acceptedPreviewCovered ? null : pendingSnapshot;
   const serverStatus = serverRoomListStatus(r);
   const currentGroupId = groupControls?.assignmentByRoom[r.room_id];
   const currentGroup = currentGroupId
@@ -645,18 +736,21 @@ function RoomRow({
               >
                 {unread > 99 ? "99+" : unread}
               </span>
-            ) : pending ? (
+            ) : pending?.status === "failed" ? (
               // Outgoing message still waiting / in flight — show the stopwatch
               // (or a warning if it failed) where the read-receipt tick goes.
-              pending.status === "failed" ? (
-                <WarningCircle
-                  weight="bold"
-                  className="h-4 w-4 shrink-0 text-destructive"
-                  aria-label="failed to send"
-                />
-              ) : (
-                <Clock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="waiting" />
-              )
+              <WarningCircle
+                weight="bold"
+                className="h-4 w-4 shrink-0 text-destructive"
+                aria-label="failed to send"
+              />
+            ) : pending?.status === "waiting" ? (
+              <Clock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="waiting" />
+            ) : pending?.status === "accepted" ? (
+              <MessageReceiptGlyph
+                status="sent"
+                className="h-5 w-5 shrink-0 text-foreground"
+              />
             ) : visibleDraft ? null : mineLast ? (
               <MessageReceiptGlyph
                 status={lastReceiptStatus}
@@ -783,6 +877,9 @@ function LastEventPreview({ room, fallback }: { room: Room; fallback: string }) 
       return wrap(<SiliconBrowserMark className={iconCls} />, "Silicon Browser link");
     case "m.file":
       return wrap(<File className={iconCls} />, fileNamePreview(room.last_event?.preview ?? ""));
+    case "m.work_task":
+    case "m.work_event":
+      return wrap(<Briefcase className={iconCls} />, stripPreviewEmoji(fallback) || "work update");
     default:
       return <>{fallback}</>;
   }

@@ -58,6 +58,8 @@ si search "deployment plan" --room <room-id> --all
 
 si send <room-id> "hello"
 si send <room-id> "reply" --reply-to <event-id>
+si send <room-id> "quick note; still working" --work-continues --group <run-id>
+si send <room-id> "finished" --group <run-id>
 si send-event <room-id> --data '{"type":"m.text","content":{"body":"hello"}}'
 si messages edit <event-id> "corrected text" --base-version 1
 si messages react <event-id> "👍"
@@ -79,6 +81,127 @@ replaying their message bodies:
 ```bash
 si operations list
 si operations resolve all
+```
+
+## Durable work tasks and updates
+
+Work cards use a first-class, persisted Glass contract. A task owns its todo
+items and append-only history; milestone, blocker, worker, call, and terminal
+updates remain attached to the same stable `task_id`. Multiple tasks may be
+active in one room.
+
+Short manager activity remains on the existing progress channel. Stable frame
+and group identities let Interface build an expandable, replay-safe history;
+`done` leaves that history visible until a linked normal message replaces it.
+Every `progress` command requires `--group`; generate one run id when work starts
+and reuse it for every minor-status frame through `done`. Put the same id on
+normal messages with `send --group`. A normal message intentionally interleaved
+while work continues uses `--work-continues`; omit it on the final replacing
+message. This writes `content.progress_group_id` and `content.work_continues`
+without changing reply or `--final` behavior. Streamed events do not replace
+activity until their `event.final` commit.
+
+```bash
+si progress room_123 reading "Pulling the docs" \
+  --group run_123 --task task_123 --frame activity_1 --revision 1 \
+  --at 2026-07-23T08:20:00Z
+si progress room_123 spawning_worker "Starting the UI worker" \
+  --group run_123 --task task_123 --frame activity_2 --revision 1
+si send room_123 "The UI is ready; tests are still running" \
+  --group run_123 --work-continues
+si progress room_123 done --group run_123 --task task_123 --frame activity_3
+si send room_123 "Everything is complete" --group run_123
+```
+
+Every mutation accepts a JSON object via `--data`, `--data-file`, or `--data -`
+(stdin). Nested rich content is forwarded unchanged, including text, images,
+files, voice, remote-browser references, transcripts, and ordered block arrays.
+For every work POST, the CLI adds a durable `client_id` when one is absent and
+journals it locally. If a process or response fails after Glass commits, rerun
+the exact command to reuse the pending id instead of duplicating a task or card.
+Use `--client-id <id>` (or a payload `client_id`) when the caller already owns a
+stable id. Use `--json` independently when the response must be machine-readable.
+
+For estimate input, prefer `realistic_estimate_seconds`. Put it at the payload
+root for a task and inside `timing` for a child event. The CLI sends only the
+canonical `estimate_seconds`, calculated as
+`ceil(realistic_estimate_seconds * 1.05)`; the helper field never reaches Glass.
+A direct `estimate_seconds` remains supported when it already includes the 5%
+buffer. If both fields are supplied in one location they must agree exactly,
+and a payload containing `timing` must place estimate fields inside it rather
+than at the root. Negative, non-numeric, conflicting, and unsafe values fail
+locally before any request.
+
+```bash
+si --json work task create --data '{
+  "schema_version": 1,
+  "room_id": "room_123",
+  "title": "Build Fitness App",
+  "description": "Build and verify the first release",
+  "state": "running",
+  "realistic_estimate_seconds": 21600
+}'
+si --json work task list room_123 --state running
+si --json work task show task_123
+si --json work task patch task_123 --data '{"description":"UI complete; implementing data flow","revision":4}'
+
+si --json work todo add task_123 --data '{"todo_id":"todo_ui","title":"UI/UX","state":"yet_to_start","description":"Design the main flow"}'
+si --json work todo patch task_123 todo_ui --data '{"state":"completed","description":"UI/UX completed","revision":2}'
+si --json work milestone update task_123 --data-file milestone.json
+si --json work milestone update task_123 --data '{"kind":"milestone","body":"UI complete","timing":{"realistic_estimate_seconds":3600,"active_elapsed_seconds":1200,"timer_state":"running","timer_updated_at":"2026-07-23T08:20:00Z"}}'
+
+si --json work blocker create task_123 --data '{"work_event_id":"event_blocker_color","kind":"blocker","blocker_id":"blocker_color","state":"open","resolved_at":null,"body":"Should the primary color be red or blue?","blocks":[{"type":"text","body":"Should the primary color be red or blue?","format":"plain"}]}'
+si --json work blocker resolve task_123 blocker_color --data '{"state":"resolved","body":"Use blue","blocks":[{"type":"file","media_id":"brand_guide","filename":"brand.pdf"}]}'
+
+si --json work worker-group create task_123 --data '{"work_event_id":"event_workers","kind":"worker_group","group_id":"group_social","body":"Started 3 workers","blocks":[],"workers":[]}'
+si --json work worker create task_123 group_social --data '{"worker_id":"worker_linkedin","invocation_id":"invoke_1","name":"LinkedIn post","description":"Drafting","state":"in_progress","revision":1,"history":[]}'
+si --json work worker patch task_123 group_social invoke_1 --data '{"state":"completed","description":"Draft delivered"}'
+
+si --json work call create task_123 --data '{"work_event_id":"event_call_1","kind":"call","call_id":"call_1","direction":"outbound","target_kind":"manager","target_id":"saket","target_name":"Saket manager","state":"connecting","body":"Calling Saket manager","blocks":[],"transcript":[]}'
+si --json work call patch task_123 call_1 --data '{"state":"completed","transcript":[{"transcript_id":"transcript_1","speaker_kind":"silicon","speaker_id":"saket_manager","speaker_name":"Saket manager","body":"Approved","blocks":[],"revision":1}]}'
+
+si --json work complete task_123 --data '{"work_event_id":"event_complete","kind":"completion","body":"Fitness app delivered and verified","blocks":[]}'
+si --json work fail task_123 --data '{"work_event_id":"event_failure","kind":"failure","body":"Build could not recover","blocks":[{"type":"file","media_id":"media_1","filename":"build.log"}]}'
+si --json work cancel task_123 --data '{"work_event_id":"event_cancel","kind":"cancellation","body":"Cancelled by the requester","blocks":[]}'
+```
+
+Canonical task states are `queued`, `running`, `blocked`, `completed`,
+`failed`, and `cancelled`; todo states are `yet_to_start`, `in_progress`,
+`completed`, and `blocked`; worker invocations additionally support `failed`
+and `cancelled`. Timer state is `running`, `paused`, or `stopped`. Patch bodies
+may carry the server-provided `revision` for
+optimistic concurrency. Calls distinguish `inbound`/`outbound` direction and
+`manager`/`silicon` targets in their JSON rather than flattening conversations
+into status text.
+
+`estimate_seconds` is the producer's realistic active wall-clock estimate after
+accounting for parallel workers, with a 5% safety margin already added. Queued
+work and waits on another Silicon continue the timer. Pause it only for an open
+blocker, rate limit, offline state, or infrastructure failure, using the matching
+`timer_pause_reason`; open blockers must be `paused` with reason `blocker`, and
+completion/failure/cancellation snapshots must be `stopped`.
+
+The dedicated commands map to this REST contract:
+
+```text
+GET    /api/v1/work/tasks
+POST   /api/v1/work/tasks
+GET    /api/v1/work/tasks/{task_id}
+PATCH  /api/v1/work/tasks/{task_id}
+POST   /api/v1/work/tasks/{task_id}/todos
+PATCH  /api/v1/work/tasks/{task_id}/todos/{todo_id}
+POST   /api/v1/work/tasks/{task_id}/milestones
+POST   /api/v1/work/tasks/{task_id}/blockers
+POST   /api/v1/work/tasks/{task_id}/blockers/{blocker_id}/resolve
+POST   /api/v1/work/tasks/{task_id}/worker-groups
+PATCH  /api/v1/work/tasks/{task_id}/worker-groups/{group_id}
+POST   /api/v1/work/tasks/{task_id}/worker-groups/{group_id}/invocations
+PATCH  /api/v1/work/tasks/{task_id}/worker-groups/{group_id}/invocations/{invocation_id}
+POST   /api/v1/work/tasks/{task_id}/calls
+PATCH  /api/v1/work/tasks/{task_id}/calls/{call_id}
+POST   /api/v1/work/tasks/{task_id}/complete
+POST   /api/v1/work/tasks/{task_id}/fail
+POST   /api/v1/work/tasks/{task_id}/cancel
 ```
 
 ## Attachments and albums

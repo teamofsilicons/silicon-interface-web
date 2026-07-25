@@ -176,6 +176,39 @@ export async function stageMediaUpload(
   return stored;
 }
 
+/** Create the local cleanup/recovery row for a previously uploaded object.
+ * The stable media identity is reusable inside its original room; no source
+ * Blob or new multipart session is needed. */
+export async function stageReusedMediaUpload(row: {
+  ownerId: string;
+  roomId: string;
+  clientId: string;
+  outboxClientId: string;
+  name: string;
+  mime: string;
+  kind: "image" | "file";
+  size: number;
+  mediaId: string;
+}): Promise<DurableMediaUpload> {
+  if (!row.mediaId) throw new Error("reused media identity is missing");
+  const db = await openDatabase();
+  const now = Date.now();
+  const stored: DurableMediaUpload = {
+    ...row,
+    key: mediaUploadKey(row.ownerId, row.clientId),
+    blob: null,
+    sessionId: null,
+    state: "completed",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const transaction = db.transaction(STORE, "readwrite", { durability: "strict" });
+  transaction.objectStore(STORE).put(stored);
+  await done(transaction);
+  if (durabilityFailures.size === 0) clearStorageIssue("media");
+  return stored;
+}
+
 export async function readMediaUpload(ownerId: string, clientId: string): Promise<DurableMediaUpload | null> {
   const db = await openDatabase();
   const transaction = db.transaction(STORE, "readonly");

@@ -24,6 +24,7 @@ pnpm dev
 | `/auth/login` | 2-step login: identifier (phone/email/username) → OTP. |
 | `/chat` | Element-style chat surface. Room list on the left, timeline + composer on the right. Sends text / files / images / TTS voice notes. Live WS updates: new events, deltas, progress, read receipts, take-back. |
 | `/dev` | Raw endpoint explorer. One card per endpoint, with inputs + run button + JSON response. Plus a live WS event log tab. |
+| `/dev/work-updates` | Development-only, backend-free staged “Build a Fitness App” run using the production work cards. Accepts `?stage=kickoff|parallel-work|milestone|blocked|resumed|completed` and `&autoplay=1`; production returns 404. |
 | `/settings` | Profile, take-back policy editor, paste-a-silicon-key (so you can test the same UI as a silicon). |
 
 ## How OTPs work in dev
@@ -78,6 +79,7 @@ Useful command groups:
 | `rooms list`, `rooms show`, `rooms direct` | Inspect and create conversations. |
 | `messages list`, `send`, `dm`, `chat`, `listen`, `daemon`, `inbox` | Read, send, chat, keep a durable listener alive, and inspect the local inbox. |
 | `activity`, `read`, `progress`, `delta`, `final`, `take-back`, `delete` | Conversation state and event controls. |
+| `work task/todo/milestone/blocker/worker-group/worker/call` | Durable task cards, histories, blockers, workers, calls, and terminal updates. |
 | `send-file`, `media show`, `tts`, `stt` | Attachments and voice/text jobs. |
 | `crons list/create/patch/delete` | Silicon-owned scheduling. |
 | `sessions`, `contacts` | Session tracking and private address book operations. |
@@ -96,6 +98,38 @@ or `--key` for per-command overrides.
 
 Those wrappers set `SILICON_INTERFACE_ROOT`, so the command uses that silicon's
 `.glass.json` even when invoked from another working directory.
+
+## Durable work updates
+
+The Interface renders root tasks as `m.work_task`, persistent child cards as
+`m.work_event`, and the manager's short expandable activity as grouped
+`m.progress`. The web renderer and bundled CLI share the same versioned,
+snake-case contract.
+
+- Reuse `task_id`, `work_event_id`, and the outer Glass event identity for every
+  revision. The renderer also canonical-deduplicates accidental fresh outer
+  envelopes so one resource keeps one timeline position.
+- Every descriptive or state revision must append a retained history fact.
+  Reducers merge all supplied revisions and preserve the prior human-readable
+  state if a malformed revision omits its journal entry.
+- Publish the revised root task snapshot with child transitions that change the
+  task itself: opening a blocker pairs with `blocked + paused`, resolving it
+  pairs with the correct remaining task state, and terminal events pair with a
+  stopped terminal root snapshot.
+- `queued` and ordinary waiting continue to consume time. Pauses require one of
+  `blocker`, `rate_limited`, `offline`, or `infrastructure`; blockers use the
+  blocker reason, while other running/queued pauses use only external reasons.
+- Start every manager-activity run with one stable `progress_group_id` and reuse
+  it through `done`. Normal messages that do not end that run set
+  `content.work_continues: true`; the final replacing message carries the same
+  group when concurrent runs make settlement ambiguous.
+- CLI payloads may provide `realistic_estimate_seconds`; `si work` converts it
+  to the canonical estimate with the required five-percent safety buffer.
+
+The dedicated work POST commands automatically journal a durable `client_id`,
+so an ambiguous retry cannot create duplicate tasks, blockers, calls, or
+terminal cards. See `packages/silicon-interface-cli/README.md` for complete
+commands and payload examples.
 
 ## Styling
 

@@ -1,5 +1,6 @@
 import type { Event } from "@/lib/types";
 import { mergeEventRevision } from "@/lib/event-revision";
+import { parsedWorkRecord, workRecordSearchText } from "@/lib/work-update-presentation";
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -25,6 +26,11 @@ export function searchableEventText(event: Event): string {
     case "m.system":
     case "m.session_marker":
       return text(content.body) || text(content.summary);
+    case "m.work_task":
+    case "m.work_event": {
+      const record = parsedWorkRecord(event);
+      return record ? workRecordSearchText(record) : "";
+    }
     default:
       return "";
   }

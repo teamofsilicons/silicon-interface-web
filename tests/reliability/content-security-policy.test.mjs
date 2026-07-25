@@ -65,7 +65,8 @@ test("production CSP permits Next's prerendered bootstrap without relaxing eval"
 test("team structure stays isolated and never presents a timed-out renderer as loaded", () => {
   assert.match(teamPanelSource, /sandbox="allow-scripts"/);
   assert.doesNotMatch(teamPanelSource, /sandbox="allow-scripts allow-same-origin"/);
-  assert.match(teamPanelSource, /setRenderState\("error"\)/);
+  assert.match(teamPanelSource, /createStructureRenderWatchdog\(setRenderState\)/);
+  assert.match(teamPanelSource, /watchdog\.error\(\)/);
   assert.match(teamPanelSource, /setRenderAttempt\(\(current\) => current \+ 1\)/);
   assert.doesNotMatch(teamPanelSource, /setReady\(true\)/);
 });

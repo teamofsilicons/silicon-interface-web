@@ -2,7 +2,11 @@
 // Banners are suppressed when a tab is focused (the in-app UI already shows
 // the message); `tag` dedupes against the in-tab Notification fallback.
 
-self.SILICON_SHELL_CACHE = "silicon-interface-shell-v4";
+self.SILICON_RELEASE = "__SILICON_INTERFACE_RELEASE_ID__";
+self.SILICON_DEVELOPMENT_BUILD =
+  self.SILICON_RELEASE.startsWith("__SILICON_INTERFACE_") ||
+  self.location?.origin !== "https://interface.teamofsilicons.com";
+self.SILICON_SHELL_CACHE = `silicon-interface-shell-v6-${self.SILICON_RELEASE}`;
 const SILICON_REPLACING_WORKER = Boolean(self.registration.active);
 
 self.addEventListener("install", () => {
@@ -57,6 +61,10 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  // A development bundle reuses stable chunk URLs while their contents change.
+  // Let the browser reach Next directly so a prior offline-shell installation
+  // cannot pair a fresh server render with stale client JavaScript.
+  if (self.SILICON_DEVELOPMENT_BUILD) return;
 
   if (url.pathname.startsWith("/_next/static/")) {
     event.respondWith(
@@ -295,6 +303,22 @@ function canonicalMessageNotification(data) {
   return { ownerId, roomId, notificationId, streamWriter, streamPosition };
 }
 
+/**
+ * Prominent work notifications (currently open blockers) must remain visible
+ * until the person acts on them. Glass may send the browser-shaped camelCase
+ * field, the snake_case wire field, or the canonical notification tier while
+ * deployments roll forward independently.
+ *
+ * Only an exact boolean/tier opts in: truthy strings from a malformed or legacy
+ * payload must not turn an arbitrary notification into a sticky alert.
+ */
+function notificationRequiresInteraction(data) {
+  return data.requireInteraction === true ||
+    data.require_interaction === true ||
+    data.notification_tier === "prominent_push" ||
+    data.notificationTier === "prominent_push";
+}
+
 function reconciliationCoversMessage(value, message) {
   return Boolean(value && message && value.ownerId === message.ownerId &&
     value.roomId === message.roomId &&
@@ -466,6 +490,9 @@ self.addEventListener("push", (event) => {
         // payloads are always silent. Only a canonical chat message with an
         // explicit per-user sound grant may make notification audio.
         silent: !(message && data.sound === true),
+        // Keep an open blocker visible in the service-worker/Web Push path too.
+        // The in-page Notification fallback already passes this option directly.
+        requireInteraction: Boolean(message && notificationRequiresInteraction(data)),
         tag: data.tag || undefined,
         icon: "/logo.png",
         badge: "/logo.png",

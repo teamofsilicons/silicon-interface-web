@@ -12,7 +12,11 @@ import * as React from "react";
 export interface PendingPreview {
   clientId: string;
   text: string;
-  status: "waiting" | "failed";
+  status: "waiting" | "failed" | "accepted";
+  /** The accepted preview stays authoritative until the room list projects
+   * this exact event (or a genuinely newer event) into `last_event`. */
+  acceptedEventId?: string;
+  acceptedAt?: string;
 }
 
 const cache = new Map<string, PendingPreview | null>();
@@ -55,14 +59,44 @@ export function clearPendingPreview(roomId: string, clientId: string): void {
 /** Record authoritative acceptance before clearing the optimistic preview.
  * Unlike a plain clear, this is monotonic for the lifetime of the page and
  * therefore also blocks a slower IndexedDB/outbox read from reintroducing it. */
-export function markPendingPreviewAccepted(roomId: string, clientId: string): void {
+export function markPendingPreviewAccepted(
+  roomId: string,
+  clientId: string,
+  acceptedEvent?: { eventId: string; at: string },
+): void {
   let accepted = acceptedClients.get(roomId);
   if (!accepted) {
     accepted = new Set<string>();
     acceptedClients.set(roomId, accepted);
   }
   accepted.add(clientId);
+  const pending = cache.get(roomId) ?? null;
+  if (acceptedEvent && pending?.clientId === clientId) {
+    cache.set(roomId, {
+      ...pending,
+      status: "accepted",
+      acceptedEventId: acceptedEvent.eventId,
+      acceptedAt: acceptedEvent.at,
+    });
+    emit();
+    return;
+  }
   clearPendingPreview(roomId, clientId);
+}
+
+/** An accepted local preview closes only when the sidebar catches that exact
+ * event or has already advanced to a later authoritative event. This prevents
+ * the acknowledgement render from briefly revealing the previous message. */
+export function acceptedPendingPreviewCovered(
+  pending: PendingPreview | null,
+  lastEvent: { event_id?: string | null; at?: string | null } | null | undefined,
+): boolean {
+  if (pending?.status !== "accepted" || !lastEvent) return false;
+  if (pending.acceptedEventId && lastEvent.event_id === pending.acceptedEventId) return true;
+  if (!pending.acceptedAt || !lastEvent.at) return false;
+  const acceptedAt = Date.parse(pending.acceptedAt);
+  const lastAt = Date.parse(lastEvent.at);
+  return Number.isFinite(acceptedAt) && Number.isFinite(lastAt) && lastAt >= acceptedAt;
 }
 
 /** Update the preview text for a still-pending message (e.g. held-queue merge),

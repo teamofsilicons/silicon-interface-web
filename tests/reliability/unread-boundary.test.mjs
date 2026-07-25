@@ -107,6 +107,49 @@ test("unfinished streaming events become read-eligible only after finalization",
   assert.equal(unread.isUnreadEligibleEvent(event(12, { is_final: true })), true);
 });
 
+test("a resolved blocker retracts exactly one projected unread contribution", () => {
+  const blocker = event(5, {
+    event_id: "blocker-event",
+    sender_kind: "silicon",
+    sender_handle: "builder",
+    stream_writer: "silicon-builder",
+  });
+  const room = {
+    room_id: "room-blocker",
+    observed: false,
+    unread: true,
+    unread_count: 2,
+    unread_boundary: {
+      last_read_stream_position: 4,
+      last_read_stream_vector: { floor: 0, writers: { "silicon-builder": 4 } },
+      first_unread_event_id: blocker.event_id,
+      first_unread_stream_position: 5,
+      first_unread_stream_writer: "silicon-builder",
+      unread_count: 2,
+      through_stream_position: 6,
+    },
+  };
+
+  assert.equal(unread.roomProjectsEventAsUnread(room, blocker, "me"), true);
+  assert.deepEqual(unread.retractRoomUnreadEvent(room, blocker.event_id), {
+    ...room,
+    unread: true,
+    unread_count: 1,
+    unread_boundary: { ...room.unread_boundary, unread_count: 1 },
+  });
+
+  const onlyBlocker = {
+    ...room,
+    unread_count: 1,
+    unread_boundary: { ...room.unread_boundary, unread_count: 1 },
+  };
+  const cleared = unread.retractRoomUnreadEvent(onlyBlocker, blocker.event_id);
+  assert.equal(cleared.unread, false);
+  assert.equal(cleared.unread_count, 0);
+  assert.equal(cleared.unread_boundary.first_unread_event_id, null);
+  assert.equal(cleared.unread_boundary.unread_count, 0);
+});
+
 test("opening a room clears its projected unread tail before history hydration", () => {
   const room = {
     room_id: "room-open-read",
@@ -134,7 +177,7 @@ test("opening a room clears its projected unread tail before history hydration",
     { eventId: event(8).event_id, streamPosition: 9 },
     "a stale top-level count must not mask an authoritative unread boundary",
   );
-  assert.equal(unread.roomOpenReadTarget({
+  assert.deepEqual(unread.roomOpenReadTarget({
     ...room,
     unread: false,
     unread_count: 0,
@@ -144,7 +187,10 @@ test("opening a room clears its projected unread tail before history hydration",
       first_unread_stream_position: null,
       unread_count: 0,
     },
-  }), null);
+  }), {
+    eventId: event(8).event_id,
+    streamPosition: 9,
+  }, "opening a non-empty room persists read even when the list badge is stale");
   assert.equal(unread.roomOpenReadTarget({ ...room, observed: true }), null);
 });
 

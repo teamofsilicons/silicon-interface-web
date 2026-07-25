@@ -4,7 +4,6 @@ export interface GifResult {
   pageUrl: string;
   previewUrl: string;
   stillUrl: string;
-  downloadUrl: string;
   width: number;
   height: number;
 }
@@ -47,19 +46,21 @@ export async function fetchGifs(
   const payload = await response.json() as { data?: GiphyItem[] };
   return (payload.data ?? []).flatMap((item): GifResult[] => {
     const images = item.images ?? {};
-    const preview = images.fixed_width_small ?? images.fixed_width ?? images.original;
+    // The exact animated preview shown in the picker is also the rendition we
+    // archive and send. Falling back to an original/downsized rendition here
+    // made a click silently download and re-upload a much larger file than the
+    // one the user had already seen.
+    const preview = images.fixed_width_small ?? images.fixed_width;
     const still = images.fixed_width_small_still ?? images.fixed_width_still ?? preview;
-    const download = images.downsized_medium ?? images.downsized ?? images.original ?? images.fixed_width;
-    if (!item.id || !preview?.url || !download?.url) return [];
+    if (!item.id || !preview?.url) return [];
     return [{
       id: item.id,
       title: item.title?.trim() || "GIF",
       pageUrl: item.url || `https://giphy.com/gifs/${item.id}`,
       previewUrl: preview.url,
       stillUrl: still?.url || preview.url,
-      downloadUrl: download.url,
-      width: Number(download.width || preview.width || 0),
-      height: Number(download.height || preview.height || 0),
+      width: Number(preview.width || 0),
+      height: Number(preview.height || 0),
     }];
   });
 }

@@ -21,6 +21,7 @@ import { cn, relativeTime } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
 import { QRCodeSVG } from "qrcode.react";
 import { safeSession } from "@/lib/safe-storage";
+import { createStructureRenderWatchdog } from "@/lib/structure-render-watchdog";
 import type {
   BillingCycle,
   BillingData,
@@ -303,26 +304,42 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
     </div>
     <div class="err" id="err" style="display:none;"></div>
   </div>
-  <script src="${jsUrl}"></script>
+  <script src="${jsUrl}" onerror="try { window.parent.postMessage({ type: 'quark:error' }, '*'); } catch (e) {}"></script>
   <script>
     (function () {
       var source = ${source};
-      function focusMain(attempts) {
+      var readySent = false;
+      function signalReady() {
+        if (readySent) return true;
         var svg = document.getElementById("rough");
-        if (!window.Quark || !svg || !svg.children.length) {
+        var canvas = document.getElementById("canvas");
+        if (!svg || (!svg.children.length && !canvas.querySelector(".lbl,.elabel,.carbonpill,.pillarlabel,.titleblock,.toolsrow,.legendbox"))) {
+          return false;
+        }
+        readySent = true;
+        if (window.Quark && window.Quark.fit) window.Quark.fit();
+        try { window.parent.postMessage({ type: "quark:ready" }, "*"); } catch (e) {}
+        return true;
+      }
+      function focusMain(attempts) {
+        if (!window.Quark || !signalReady()) {
           if (attempts > 0) window.setTimeout(function () { focusMain(attempts - 1); }, 100);
           return;
         }
         if (window.Quark.fitMain) window.Quark.fitMain();
         else if (window.Quark.fit) window.Quark.fit();
-        // Tell the parent we've actually rendered, so it can lift the cover that
-        // hides Quark's internal "Loading rough.js…" flash during init.
-        try { window.parent.postMessage({ type: "quark:ready" }, "*"); } catch (e) {}
       }
+      // Quark can finish after its rough.js CDN fallback resolves, well after
+      // setSource() returned. Observe the actual drawing surface so that late
+      // successful renders still dismiss the loading cover.
+      var observer = new MutationObserver(function () {
+        if (signalReady()) observer.disconnect();
+      });
+      observer.observe(document.getElementById("canvas"), { childList: true, subtree: true });
       function apply() {
         if (window.Quark) {
           window.Quark.setSource(source || "");
-          window.setTimeout(function () { focusMain(20); }, 80);
+          window.setTimeout(function () { focusMain(250); }, 80);
           window.setTimeout(function () { focusMain(1); }, 500);
         } else window.setTimeout(apply, 80);
       }
@@ -341,16 +358,16 @@ function QuarkStructureFrame({ dsl }: { dsl: string }) {
   // actually rendered. Never expose the raw controls on timeout: that was a
   // false success state which made a blocked renderer look like an empty chart.
   React.useEffect(() => {
+    const watchdog = createStructureRenderWatchdog(setRenderState);
     const onMessage = (e: MessageEvent) => {
-      if (e.source === iframeRef.current?.contentWindow && e.data?.type === "quark:ready") {
-        setRenderState("ready");
-      }
+      if (e.source !== iframeRef.current?.contentWindow) return;
+      if (e.data?.type === "quark:ready") watchdog.ready();
+      if (e.data?.type === "quark:error") watchdog.error();
     };
     window.addEventListener("message", onMessage);
-    const renderTimeout = window.setTimeout(() => setRenderState("error"), 10_000);
     return () => {
       window.removeEventListener("message", onMessage);
-      window.clearTimeout(renderTimeout);
+      watchdog.dispose();
     };
   }, [dsl, renderAttempt]);
 

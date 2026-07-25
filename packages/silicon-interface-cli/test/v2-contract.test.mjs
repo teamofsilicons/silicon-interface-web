@@ -365,8 +365,70 @@ test("v2 sends protocol metadata and reuses a pending client id after failure", 
       assert.equal(requests[1].payload.content.client_id, requests[0].payload.content.client_id);
       assert.equal(requests[0].headers["x-chat-protocol"], "1");
       assert.equal(requests[0].headers["x-silicon-key"], "test-key");
-      assert.match(requests[0].headers["user-agent"], /silicon-interface-cli\/2\.0\.0/);
+      assert.match(requests[0].headers["user-agent"], /silicon-interface-cli\/2\.0\.1/);
       assert.match(requests[0].headers.traceparent, /^00-[a-f0-9]{32}-[a-f0-9]{16}-01$/);
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
+test("normal sends carry manager activity continuation and run identity fields", async () => {
+  await withTempDir(async (tempDir) => {
+    const requests = [];
+    const mock = await startServer(async (request, response) => {
+      assert.equal(request.url, "/api/v1/rooms/room-activity/events");
+      const payload = await requestJson(request);
+      requests.push(payload);
+      json(response, 201, {
+        ...event(`event-${requests.length}`, payload.content.body, requests.length),
+        content: payload.content,
+        reply_to_event_id: payload.reply_to_event_id || "",
+        is_final: payload.is_final ?? true,
+      });
+    });
+    try {
+      const common = ["--api", mock.baseUrl, "--key", "test-key", "--json", "send", "room-activity"];
+      const interim = await runCli([
+        ...common,
+        "Quick note while I keep working",
+        "--work-continues",
+        "--group", "run-fitness",
+        "--reply-to", "event-prompt",
+        "--final", "false",
+        "--client-id", "activity-note-1",
+      ], tempDir);
+      assert.equal(interim.code, 0, interim.stderr);
+
+      const final = await runCli([
+        ...common,
+        "Finished",
+        "--group", "run-fitness",
+        "--client-id", "activity-final-1",
+      ], tempDir);
+      assert.equal(final.code, 0, final.stderr);
+
+      assert.deepEqual(requests, [
+        {
+          type: "m.text",
+          content: {
+            body: "Quick note while I keep working",
+            work_continues: true,
+            progress_group_id: "run-fitness",
+            client_id: "activity-note-1",
+          },
+          reply_to_event_id: "event-prompt",
+          is_final: false,
+        },
+        {
+          type: "m.text",
+          content: {
+            body: "Finished",
+            progress_group_id: "run-fitness",
+            client_id: "activity-final-1",
+          },
+        },
+      ]);
     } finally {
       await closeServer(mock.server);
     }
@@ -1340,6 +1402,60 @@ test("Carbon presence uses a single-use ticket and Glass WebSocket hello contrac
   });
 });
 
+test("Silicon listener delegates its permanent key through a single-use ticket", async () => {
+  await withTempDir(async (tempDir) => {
+    let upgradedSocket = null;
+    const mock = await startServer(async (request, response) => {
+      if (request.method === "POST" && request.url === "/api/v1/ws/ticket") {
+        assert.equal(request.headers["x-silicon-key"], "permanent-silicon-key");
+        await requestJson(request);
+        json(response, 200, { ticket: "delegated-silicon-ticket", expires_in: 60 });
+        return;
+      }
+      json(response, 404, { detail: request.url });
+    });
+    mock.server.on("upgrade", (request, socket) => {
+      upgradedSocket = socket;
+      const url = new URL(request.url, mock.baseUrl);
+      assert.equal(url.pathname, "/ws/v1/");
+      assert.equal(url.searchParams.get("ticket"), "delegated-silicon-ticket");
+      assert.equal(url.searchParams.has("silicon_key"), false);
+      const accept = createHash("sha1")
+        .update(`${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest("base64");
+      socket.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+      socket.write(serverWebSocketFrame({
+        type: "hello",
+        subscribed_rooms: [],
+        cursor: "event-cursor",
+        account_cursor: "account-cursor",
+        protocol_version: 1,
+        protocol_min: 1,
+        protocol_max: 1,
+        heartbeat_interval_ms: 25_000,
+        heartbeat_timeout_ms: 62_500,
+      }));
+      setImmediate(() => socket.end());
+      socket.on("error", () => {});
+    });
+    try {
+      const result = await runCli([
+        "--api", mock.baseUrl,
+        "--key", "permanent-silicon-key",
+        "--json",
+        "listen", "all", "--once", "--no-sync", "--no-spool",
+      ], tempDir);
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "");
+    } finally {
+      upgradedSocket?.destroy();
+      await closeServer(mock.server);
+    }
+  });
+});
+
 test("Carbon registration completes both verified channels and binds a CLI device", async () => {
   await withTempDir(async (tempDir) => {
     const calls = [];
@@ -1477,6 +1593,42 @@ test("concurrent Carbon commands serialize rotating refresh tokens", async () =>
   });
 });
 
+test("a rejected Silicon key opens a shared request circuit until credentials change", async () => {
+  await withTempDir(async (tempDir) => {
+    let requests = 0;
+    const mock = await startServer(async (request, response) => {
+      if (request.url !== "/api/v1/rooms/") {
+        json(response, 404, { detail: request.url });
+        return;
+      }
+      requests += 1;
+      if (request.headers["x-silicon-key"] === "valid-key") {
+        json(response, 200, []);
+      } else {
+        json(response, 401, { detail: "invalid key" });
+      }
+    });
+    try {
+      const invalid = ["--api", mock.baseUrl, "--key", "invalid-key", "--json", "rooms", "list"];
+      const first = await runCli(invalid, tempDir);
+      const second = await runCli(invalid, tempDir);
+      assert.equal(first.code, 1);
+      assert.equal(second.code, 1);
+      assert.equal(requests, 1);
+      assert.match(second.stderr, /waiting for a key change/i);
+
+      const repaired = await runCli(
+        ["--api", mock.baseUrl, "--key", "valid-key", "--json", "rooms", "list"],
+        tempDir,
+      );
+      assert.equal(repaired.code, 0, repaired.stderr);
+      assert.equal(requests, 2);
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
 test("first-class frontend parity commands keep Glass routes and mutation identities", async () => {
   await withTempDir(async (tempDir) => {
     const calls = [];
@@ -1553,6 +1705,613 @@ test("first-class frontend parity commands keep Glass routes and mutation identi
       const invite = await runCli(["--api", mock.baseUrl, "--json", "invites", "show", "public-token"], tempDir);
       assert.equal(invite.code, 0, invite.stderr);
       assert.equal(JSON.parse(invite.stdout).team.slug, "acme");
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
+test("durable work help is available before authentication", async () => {
+  await withTempDir(async (tempDir) => {
+    for (const args of [["work", "--help"], ["work", "task", "--help"]]) {
+      const result = await runCli(args, tempDir);
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /Durable work updates/);
+      assert.match(result.stdout, /work blocker create\|resolve/);
+      assert.doesNotMatch(result.stderr, /authentication|API key|access token/i);
+    }
+  });
+});
+
+test("durable work commands preserve the complete task and work-event REST contract", async () => {
+  await withTempDir(async (tempDir) => {
+    const calls = [];
+    const mock = await startServer(async (request, response, baseUrl) => {
+      const url = new URL(request.url, baseUrl);
+      const body = request.method === "GET" ? null : await requestJson(request);
+      calls.push({
+        method: request.method,
+        path: url.pathname,
+        query: Object.fromEntries(url.searchParams),
+        body,
+      });
+      json(response, request.method === "POST" ? 201 : 200, {
+        ok: true,
+        task_id: "task-fitness",
+        revision: calls.length,
+      });
+    });
+    try {
+      const common = [
+        "--api", mock.baseUrl,
+        "--key", "silicon-key",
+        "--json",
+        "work",
+      ];
+      const invoke = async (...args) => {
+        const result = await runCli([...common, ...args], tempDir);
+        assert.equal(result.code, 0, result.stderr);
+        assert.equal(JSON.parse(result.stdout).ok, true);
+      };
+      const timing = {
+        estimate_seconds: 21_600,
+        active_elapsed_seconds: 1_200,
+        timer_state: "running",
+        timer_updated_at: "2026-07-23T08:20:00Z",
+      };
+      const historyEntry = (overrides = {}) => ({
+        history_id: "history-1",
+        kind: "note",
+        summary: "Work progressed",
+        revision: 1,
+        created_at: "2026-07-23T08:20:00Z",
+        ...overrides,
+      });
+      const eventBase = {
+        schema_version: 1,
+        task_id: "task-fitness",
+        room_id: "room-fitness",
+        task_title: "Build Fitness App",
+        timing,
+        history: [],
+        revision: 1,
+        created_at: "2026-07-23T08:20:00Z",
+        updated_at: "2026-07-23T08:20:00Z",
+      };
+      const task = {
+        schema_version: 1,
+        task_id: "task-fitness",
+        room_id: "room-fitness",
+        title: "Build Fitness App",
+        description: "Build and verify the application",
+        state: "running",
+        estimate_seconds: 21_600,
+        active_elapsed_seconds: 0,
+        timer_state: "running",
+        timer_updated_at: "2026-07-23T08:00:00Z",
+        todos: [],
+        history: [],
+        revision: 1,
+        created_at: "2026-07-23T08:00:00Z",
+        updated_at: "2026-07-23T08:00:00Z",
+      };
+      const taskPatch = {
+        description: "UI completed; data flow is now being implemented",
+        active_elapsed_seconds: 1_200,
+        history: [
+          historyEntry({
+            history_id: "history-ui-complete",
+            kind: "description_updated",
+            summary: "UI completed",
+            blocks: [{ type: "text", body: "Starting the data layer", format: "plain" }],
+          }),
+        ],
+        revision: 2,
+      };
+      const todo = {
+        todo_id: "todo-ui",
+        title: "UI/UX",
+        description: "Design the main flow",
+        state: "yet_to_start",
+        revision: 1,
+        history: [],
+        created_at: "2026-07-23T08:00:00Z",
+        updated_at: "2026-07-23T08:00:00Z",
+      };
+      const todoPatch = {
+        state: "completed",
+        description: "Main flow designed and reviewed",
+        history: [
+          historyEntry({
+            history_id: "history-todo-reviewed",
+            kind: "todo_updated",
+            summary: "Review passed",
+            entity_id: "todo-ui",
+            state: "completed",
+          }),
+        ],
+        revision: 2,
+      };
+      const milestone = {
+        ...eventBase,
+        work_event_id: "event-ui-done",
+        kind: "milestone",
+        body: "UI/UX done",
+        blocks: [
+          { type: "text", body: "UI/UX step completed. Onto code now.", format: "plain" },
+          { type: "image", media_id: "media-preview", alt: "Approved preview" },
+        ],
+      };
+      const milestonePath = path.join(tempDir, "milestone.json");
+      await fs.writeFile(milestonePath, JSON.stringify(milestone));
+      const blocker = {
+        ...eventBase,
+        work_event_id: "event-blocker-color",
+        kind: "blocker",
+        body: "Should the primary color be red or blue?",
+        blocks: [
+          { type: "text", body: "Should the primary color be red or blue?", format: "plain" },
+          { type: "image", media_id: "media-options", alt: "Color options" },
+          { type: "remote_browser", session_id: "browser-1", url: "https://preview.example" },
+        ],
+        blocker_id: "blocker-color",
+        state: "open",
+        resolved_at: null,
+        timing: { ...timing, timer_state: "paused", timer_pause_reason: "blocker" },
+      };
+      const blockerResolution = {
+        state: "resolved",
+        resolved_at: "2026-07-23T08:40:00Z",
+        body: "Use blue",
+        blocks: [
+          { type: "text", body: "Use blue", format: "plain" },
+          { type: "file", media_id: "media-brand-guide", filename: "brand.pdf" },
+        ],
+        revision: 2,
+      };
+      const workerGroup = {
+        ...eventBase,
+        work_event_id: "event-workers",
+        kind: "worker_group",
+        body: "Started 3 workers",
+        blocks: [],
+        group_id: "group-social",
+        workers: [],
+      };
+      const workerGroupPatch = {
+        body: "All three social tasks completed",
+        history: [historyEntry({ history_id: "history-workers-complete", kind: "worker_updated" })],
+        revision: 4,
+      };
+      const worker = {
+        worker_id: "worker-linkedin",
+        invocation_id: "invoke-linkedin-1",
+        name: "LinkedIn post",
+        state: "in_progress",
+        description: "Drafting the post",
+        revision: 1,
+        history: [],
+        created_at: "2026-07-23T08:45:00Z",
+        updated_at: "2026-07-23T08:45:00Z",
+      };
+      const workerPatch = {
+        state: "completed",
+        description: "Post drafted and scheduled",
+        history: [
+          historyEntry({
+            history_id: "history-worker-approved",
+            kind: "worker_updated",
+            summary: "Draft approved",
+            entity_id: "invoke-linkedin-1",
+          }),
+        ],
+        revision: 2,
+        updated_at: "2026-07-23T09:00:00Z",
+      };
+      const call = {
+        ...eventBase,
+        work_event_id: "event-call-saket",
+        kind: "call",
+        body: "Calling Saket's manager",
+        blocks: [],
+        call_id: "call-saket",
+        direction: "outbound",
+        target_kind: "manager",
+        target_id: "saket",
+        target_name: "Saket's manager",
+        state: "connecting",
+        transcript: [],
+      };
+      const callPatch = {
+        state: "completed",
+        transcript: [
+          {
+            transcript_id: "transcript-1",
+            speaker_kind: "silicon",
+            speaker_id: "saket-manager",
+            speaker_name: "Saket's manager",
+            body: "Approved",
+            blocks: [
+              { type: "text", body: "Approved", format: "plain" },
+              { type: "file", media_id: "media-approval", filename: "approval.pdf" },
+            ],
+            revision: 1,
+            created_at: "2026-07-23T09:10:00Z",
+            updated_at: "2026-07-23T09:10:00Z",
+          },
+        ],
+        revision: 2,
+      };
+      const completion = {
+        ...eventBase,
+        work_event_id: "event-complete",
+        kind: "completion",
+        body: "Fitness app delivered and verified",
+        blocks: [],
+        timing: { ...timing, active_elapsed_seconds: 17_532, timer_state: "stopped" },
+      };
+      const failure = {
+        ...eventBase,
+        work_event_id: "event-failure",
+        kind: "failure",
+        body: "Build could not recover",
+        blocks: [{ type: "file", media_id: "media-build-log", filename: "build.log" }],
+        timing: { ...timing, timer_state: "stopped" },
+      };
+      const cancellation = {
+        ...eventBase,
+        work_event_id: "event-cancel",
+        kind: "cancellation",
+        body: "Cancelled by the requester",
+        blocks: [],
+        timing: { ...timing, timer_state: "stopped" },
+      };
+
+      await invoke("task", "create", "--data", JSON.stringify(task));
+      await invoke(
+        "task", "list", "room-fitness", "--state", "running", "--cursor", "next page", "--limit", "25",
+      );
+      await invoke("task", "show", "task-fitness");
+      await invoke("task", "patch", "task-fitness", "--data", JSON.stringify(taskPatch));
+      await invoke("todo", "add", "task-fitness", "--data", JSON.stringify(todo));
+      await invoke("todo", "patch", "task-fitness", "todo-ui", "--data", JSON.stringify(todoPatch));
+      await invoke("milestone", "update", "task-fitness", "--data-file", milestonePath);
+      await invoke("blocker", "create", "task-fitness", "--data", JSON.stringify(blocker));
+      await invoke(
+        "blocker", "resolve", "task-fitness", "blocker-color", "--data", JSON.stringify(blockerResolution),
+      );
+      await invoke("worker-group", "create", "task-fitness", "--data", JSON.stringify(workerGroup));
+      await invoke(
+        "worker-group", "patch", "task-fitness", "group-social", "--data", JSON.stringify(workerGroupPatch),
+      );
+      await invoke("worker", "create", "task-fitness", "group-social", "--data", JSON.stringify(worker));
+      await invoke(
+        "worker", "patch", "task-fitness", "group-social", "invoke-linkedin-1", "--data", JSON.stringify(workerPatch),
+      );
+      await invoke("call", "create", "task-fitness", "--data", JSON.stringify(call));
+      await invoke("call", "patch", "task-fitness", "call-saket", "--data", JSON.stringify(callPatch));
+      await invoke("complete", "task-fitness", "--data", JSON.stringify(completion));
+      await invoke("fail", "task-fitness", "--data", JSON.stringify(failure));
+      await invoke("cancel", "task-fitness", "--data", JSON.stringify(cancellation));
+
+      const durablePosts = calls.filter((call) => call.method === "POST");
+      assert.equal(durablePosts.length, 11);
+      for (const call of durablePosts) {
+        assert.match(call.body.client_id, /^cli_[a-f0-9]{32}$/);
+        delete call.body.client_id;
+      }
+
+      assert.deepEqual(calls, [
+        { method: "POST", path: "/api/v1/work/tasks", query: {}, body: task },
+        {
+          method: "GET",
+          path: "/api/v1/work/tasks",
+          query: { room_id: "room-fitness", state: "running", cursor: "next page", limit: "25" },
+          body: null,
+        },
+        { method: "GET", path: "/api/v1/work/tasks/task-fitness", query: {}, body: null },
+        { method: "PATCH", path: "/api/v1/work/tasks/task-fitness", query: {}, body: taskPatch },
+        { method: "POST", path: "/api/v1/work/tasks/task-fitness/todos", query: {}, body: todo },
+        {
+          method: "PATCH",
+          path: "/api/v1/work/tasks/task-fitness/todos/todo-ui",
+          query: {},
+          body: todoPatch,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/milestones",
+          query: {},
+          body: milestone,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/blockers",
+          query: {},
+          body: blocker,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/blockers/blocker-color/resolve",
+          query: {},
+          body: blockerResolution,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/worker-groups",
+          query: {},
+          body: workerGroup,
+        },
+        {
+          method: "PATCH",
+          path: "/api/v1/work/tasks/task-fitness/worker-groups/group-social",
+          query: {},
+          body: workerGroupPatch,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/worker-groups/group-social/invocations",
+          query: {},
+          body: worker,
+        },
+        {
+          method: "PATCH",
+          path: "/api/v1/work/tasks/task-fitness/worker-groups/group-social/invocations/invoke-linkedin-1",
+          query: {},
+          body: workerPatch,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/calls",
+          query: {},
+          body: call,
+        },
+        {
+          method: "PATCH",
+          path: "/api/v1/work/tasks/task-fitness/calls/call-saket",
+          query: {},
+          body: callPatch,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/complete",
+          query: {},
+          body: completion,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/fail",
+          query: {},
+          body: failure,
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/cancel",
+          query: {},
+          body: cancellation,
+        },
+      ]);
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
+test("work POST mutations reuse a journaled client id and respect an explicit override", async () => {
+  await withTempDir(async (tempDir) => {
+    const requests = [];
+    const mock = await startServer(async (request, response) => {
+      assert.equal(request.method, "POST");
+      assert.equal(request.url, "/api/v1/work/tasks");
+      const payload = await requestJson(request);
+      requests.push(payload);
+      if (requests.length === 1) {
+        json(response, 500, { detail: "response was lost" });
+        return;
+      }
+      json(response, 201, { ok: true, task_id: `task-${requests.length}` });
+    });
+    try {
+      const basePayload = {
+        schema_version: 1,
+        room_id: "room-fitness",
+        title: "Build Fitness App",
+        description: "Build and verify the application",
+        state: "running",
+        estimate_seconds: 21_600,
+      };
+      const common = [
+        "--api", mock.baseUrl,
+        "--key", "silicon-key",
+        "--json",
+        "work", "task", "create",
+      ];
+      const first = await runCli([...common, "--data", JSON.stringify(basePayload)], tempDir);
+      assert.equal(first.code, 1);
+      const retried = await runCli([...common, "--data", JSON.stringify(basePayload)], tempDir);
+      assert.equal(retried.code, 0, retried.stderr);
+      assert.match(requests[0].client_id, /^cli_[a-f0-9]{32}$/);
+      assert.equal(requests[1].client_id, requests[0].client_id);
+
+      const explicit = await runCli([
+        ...common,
+        "--data", JSON.stringify({ ...basePayload, title: "Build Fitness App v2" }),
+        "--client-id", "work-task-explicit-1",
+      ], tempDir);
+      assert.equal(explicit.code, 0, explicit.stderr);
+      assert.equal(requests[2].client_id, "work-task-explicit-1");
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
+test("work estimate inputs add the 5 percent buffer without changing the wire schema", async () => {
+  await withTempDir(async (tempDir) => {
+    const requests = [];
+    const mock = await startServer(async (request, response) => {
+      const payload = await requestJson(request);
+      requests.push({ method: request.method, path: request.url, payload });
+      json(response, 201, {
+        ok: true,
+        task_id: "task-fitness",
+        ...(request.url.endsWith("/milestones") ? { work_event_id: "event-ui" } : {}),
+      });
+    });
+    try {
+      const common = ["--api", mock.baseUrl, "--key", "silicon-key", "--json", "work"];
+      const task = await runCli([
+        ...common,
+        "task", "create",
+        "--data", JSON.stringify({
+          schema_version: 1,
+          room_id: "room-fitness",
+          title: "Build Fitness App",
+          realistic_estimate_seconds: 100,
+        }),
+        "--client-id", "task-estimate-1",
+      ], tempDir);
+      assert.equal(task.code, 0, task.stderr);
+
+      const milestone = await runCli([
+        ...common,
+        "milestone", "update", "task-fitness",
+        "--data", JSON.stringify({
+          work_event_id: "event-ui",
+          kind: "milestone",
+          body: "UI complete",
+          timing: {
+            realistic_estimate_seconds: 200,
+            active_elapsed_seconds: 40,
+            timer_state: "running",
+            timer_updated_at: "2026-07-23T08:00:00Z",
+          },
+        }),
+        "--client-id", "milestone-estimate-1",
+      ], tempDir);
+      assert.equal(milestone.code, 0, milestone.stderr);
+
+      assert.deepEqual(requests, [
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks",
+          payload: {
+            schema_version: 1,
+            room_id: "room-fitness",
+            title: "Build Fitness App",
+            estimate_seconds: 105,
+            client_id: "task-estimate-1",
+          },
+        },
+        {
+          method: "POST",
+          path: "/api/v1/work/tasks/task-fitness/milestones",
+          payload: {
+            work_event_id: "event-ui",
+            kind: "milestone",
+            body: "UI complete",
+            timing: {
+              estimate_seconds: 210,
+              active_elapsed_seconds: 40,
+              timer_state: "running",
+              timer_updated_at: "2026-07-23T08:00:00Z",
+            },
+            client_id: "milestone-estimate-1",
+          },
+        },
+      ]);
+
+      const conflict = await runCli([
+        ...common,
+        "task", "create",
+        "--data", JSON.stringify({
+          room_id: "room-fitness",
+          title: "Conflicting estimate",
+          realistic_estimate_seconds: 100,
+          estimate_seconds: 106,
+        }),
+      ], tempDir);
+      assert.equal(conflict.code, 2);
+      assert.match(conflict.stderr, /conflicts with the 5% buffered realistic estimate \(105\)/);
+
+      const invalid = await runCli([
+        ...common,
+        "milestone", "update", "task-fitness",
+        "--data", JSON.stringify({
+          body: "Invalid estimate",
+          timing: { realistic_estimate_seconds: -1 },
+        }),
+      ], tempDir);
+      assert.equal(invalid.code, 2);
+      assert.match(invalid.stderr, /must be a non-negative finite number/);
+
+      const ambiguous = await runCli([
+        ...common,
+        "milestone", "update", "task-fitness",
+        "--data", JSON.stringify({
+          body: "Ambiguous estimate location",
+          realistic_estimate_seconds: 100,
+          timing: { timer_state: "running" },
+        }),
+      ], tempDir);
+      assert.equal(ambiguous.code, 2);
+      assert.match(ambiguous.stderr, /payload with timing must place estimate fields inside timing/);
+      assert.equal(requests.length, 2);
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
+test("manager progress preserves stable activity history identity", async () => {
+  await withTempDir(async (tempDir) => {
+    let captured = null;
+    const mock = await startServer(async (request, response, baseUrl) => {
+      const url = new URL(request.url, baseUrl);
+      captured = {
+        method: request.method,
+        path: url.pathname,
+        body: await requestJson(request),
+      };
+      json(response, 200, { ok: true });
+    });
+    try {
+      const missingGroup = await runCli([
+        "--api", mock.baseUrl,
+        "--key", "silicon-key",
+        "progress", "room-fitness", "thinking", "Starting",
+      ], tempDir);
+      assert.equal(missingGroup.code, 2);
+      assert.match(missingGroup.stderr, /requires --group/);
+      assert.equal(captured, null);
+
+      const result = await runCli([
+        "--api", mock.baseUrl,
+        "--key", "silicon-key",
+        "--json",
+        "progress", "room-fitness", "spawning_worker", "Starting the UI worker",
+        "--group", "run-fitness",
+        "--task", "task-fitness",
+        "--frame", "activity-2",
+        "--revision", "3",
+        "--at", "2026-07-23T08:20:00Z",
+        "--pct", "0",
+      ], tempDir);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(captured, {
+        method: "POST",
+        path: "/api/v1/rooms/room-fitness/progress",
+        body: {
+          state: "spawning_worker",
+          note: "Starting the UI worker",
+          progress_group_id: "run-fitness",
+          task_id: "task-fitness",
+          frame_id: "activity-2",
+          revision: 3,
+          occurred_at: "2026-07-23T08:20:00Z",
+          progress_pct: 0,
+        },
+      });
     } finally {
       await closeServer(mock.server);
     }

@@ -117,32 +117,39 @@ export function MediaPreviewer({
 
   // Fetch text content lazily when source/text files are previewed.
   const [textState, setTextState] = React.useState<{
-    url: string;
+    key: string;
     text: string | null;
     error: boolean;
   } | null>(null);
+  const textKey = `${sourceMediaId ?? ""}\n${url}`;
   React.useEffect(() => {
     if (!open || !isText || !url) return;
     let alive = true;
-    fetch(url, { mode: "cors" })
-      .then((r) => {
+    const directText = () => fetch(url, { mode: "cors" }).then((r) => {
         if (!r.ok) throw new Error(`status ${r.status}`);
         return r.text();
-      })
+      });
+    // Stable authenticated media bytes make .txt/.json previews work even
+    // when an older presigned URL expired or the storage bucket omits CORS.
+    // The direct path remains necessary for this sender's pre-scan blob URL.
+    const text = sourceMediaId
+      ? api.mediaTextPreview(sourceMediaId, 256 * 1024).catch(directText)
+      : directText();
+    text
       .then((t) => {
-        if (alive) setTextState({ url, text: t, error: false });
+        if (alive) setTextState({ key: textKey, text: t, error: false });
       })
       .catch(() => {
-        if (alive) setTextState({ url, text: null, error: true });
+        if (alive) setTextState({ key: textKey, text: null, error: true });
       });
     return () => {
       alive = false;
     };
-  }, [open, isText, url]);
+  }, [open, isText, sourceMediaId, textKey, url]);
 
   const label = filename?.trim() || "preview";
-  const textForUrl = textState?.url === url ? textState.text : null;
-  const textError = textState?.url === url ? textState.error : false;
+  const textForUrl = textState?.key === textKey ? textState.text : null;
+  const textError = textState?.key === textKey ? textState.error : false;
   const activeSourceMode = hasPreviewPane ? sourceMode : "code";
   const showSourceToggle = isText && hasPreviewPane;
   const renderedSourceOpen = isText && activeSourceMode === "preview";

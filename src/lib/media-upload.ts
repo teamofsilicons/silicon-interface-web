@@ -261,6 +261,8 @@ type MediaUploadOptions = {
   /** A send-intent upload retains its source bytes until the event outbox has
    * a durable authoritative acknowledgement. */
   retainSourceUntilEventAck?: boolean;
+  /** Whole-file digest already computed for the local media reuse cache. */
+  wholeSha256?: { hex: string; base64: string };
 };
 
 function uploadAbortError(): DOMException {
@@ -348,7 +350,7 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
   }
   const source = durable.blob ?? file;
   if (!source) throw new Error("durable media source is missing");
-  const whole = await sha256(source);
+  const whole = opts.wholeSha256 ?? await sha256(source);
   throwIfUploadAborted(signal);
   const session = await api.createMultipartUpload({
     client_id: clientId, mime, size: source.size, kind, filename,
@@ -384,7 +386,9 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
     if (cached) return cached;
     const start = (number - 1) * session.part_size;
     const part = source.slice(start, Math.min(start + session.part_size, source.size));
-    const checksum = (await sha256(part)).base64;
+    const checksum = session.part_count === 1 && number === 1
+      ? whole.base64
+      : (await sha256(part)).base64;
     expectedPartChecksums.set(number, checksum);
     return checksum;
   };

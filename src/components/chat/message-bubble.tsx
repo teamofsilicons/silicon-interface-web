@@ -14,6 +14,7 @@ import {
   ListChecks,
   MusicNote,
   PencilSimple,
+  PuzzlePiece,
   Share,
   Smiley,
   Sparkle,
@@ -37,6 +38,16 @@ import { emojiOnly } from "@/lib/emoji";
 import { type MessageReceiptStatus } from "@/lib/message-receipt";
 import { cn, messageTime } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
+import { workEventPreview } from "@/lib/work-update-presentation";
+import {
+  toolSetupRequestFromEvent,
+  type ToolSetupRequestMessage,
+} from "@/lib/tool-setup-request";
+import {
+  parseToolSetupAssignment,
+  TOOL_SETUP_STATE_EVENT,
+  type ToolSetupStatus,
+} from "@/lib/tool-setup";
 import type { MentionTarget } from "@/lib/mentions";
 import {
   correctionActionLabel,
@@ -47,6 +58,7 @@ import {
 
 import { downloadAsset, MediaPreviewer, type AnnotationOpenRequest } from "./media-previewer";
 import { MessageReceiptGlyph } from "./message-receipt-glyph";
+import { ToolSetupDialog } from "./tool-setup-dialog";
 
 import { Badge } from "@/components/ui/badge";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -373,10 +385,13 @@ export function MessageBubble({
     );
   }
   const redacted = event.redacted_at !== null;
+  const toolSetupRequest = redacted ? null : toolSetupRequestFromEvent(event);
   // §1.3 — only text/tts can stream; never show the pill for non-streamable
   // types whose `is_final` happens to be false (e.g. a media event).
   const mightStream =
-    (event.type === "m.text" || event.type === "m.tts") && !event.is_final;
+    !toolSetupRequest
+    && (event.type === "m.text" || event.type === "m.tts")
+    && !event.is_final;
   // Prefer the sender's handle (carbon username == carbon_id, or silicon name);
   // fall back to the kind only if we don't have it (e.g. system events).
   const senderLabel = senderDisplayName?.trim()
@@ -416,7 +431,11 @@ export function MessageBubble({
   // Message actions are reached via the 3-dot button (and the hover reply/react
   // buttons) only — no right-click takeover, no double-click. `moreOpen` is the
   // controlled state for that dropdown.
-  const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false && !redacted;
+  const canForward =
+    !toolSetupRequest
+    && SELECTABLE_FORWARD_TYPES.has(event.type)
+    && event.is_final !== false
+    && !redacted;
   // Failure details are attempt-local. Once a message has any accepted/
   // delivered/read state they must not keep a stale correction menu alive.
   const actionableFailure =
@@ -447,6 +466,7 @@ export function MessageBubble({
   const soloEmoji =
     event.type === "m.text" &&
     !redacted &&
+    !toolSetupRequest &&
     // Base the reply exclusion on the event field, not the resolved parent:
     // `replyToEvent` is undefined when the parent isn't loaded in `eventById`,
     // which would otherwise let a reply render bare/big (QA hold on #125).
@@ -633,6 +653,7 @@ export function MessageBubble({
               event={event}
               isMine={isMine}
               isOwnSilicon={!!isOwnSilicon}
+              canForward={canForward}
               myReactions={myReactionEmojis}
               moreOpen={moreOpen}
               onMoreOpenChange={setMoreOpen}
@@ -670,7 +691,7 @@ export function MessageBubble({
                       : "border-border bg-card hover:bg-accent",
                   )}
                 >
-                  <span>{emoji}</span>
+                  <span className="emoji-glyph">{emoji}</span>
                   <span className="font-mono opacity-70">{who.length}</span>
                 </button>
               );
@@ -799,6 +820,7 @@ function BubbleActions({
   event,
   isMine,
   isOwnSilicon,
+  canForward,
   myReactions,
   moreOpen,
   onMoreOpenChange,
@@ -818,6 +840,7 @@ function BubbleActions({
   event: Event;
   isMine: boolean;
   isOwnSilicon: boolean;
+  canForward: boolean;
   myReactions: Set<string>;
   /** Controlled open state for the "more" dropdown — shared with the bubble's
    *  right-click / double-click gestures so all three open the same menu. */
@@ -838,8 +861,7 @@ function BubbleActions({
 }) {
   const canDelete = isMine && !!onDelete;
   const canTakeBack = isMine && isOwnSilicon;
-  const canForward = SELECTABLE_FORWARD_TYPES.has(event.type) && event.is_final !== false;
-  const canEdit = isMine && !!onEdit && editableTextForEvent(event) !== null;
+  const canEdit = canForward && isMine && !!onEdit && editableTextForEvent(event) !== null;
   // Session repair is an app-level recovery operation, never a valid action
   // on one message. In particular, a message menu must never offer "sign in".
   const correctionActions = (failure?.correctionActions ?? []).filter(
@@ -942,7 +964,7 @@ function BubbleActions({
                       type="button"
                       onClick={() => onReact(event, e)}
                       className={cn(
-                        "inline-flex h-7 w-7 items-center justify-center text-base transition-colors",
+                        "emoji-glyph inline-flex h-7 w-7 items-center justify-center text-base transition-colors",
                         active ? "bg-primary" : "hover:bg-accent",
                       )}
                       title={active ? `remove ${e}` : `react ${e}`}
@@ -1207,6 +1229,9 @@ function replyPreview(ev: Event): string {
       return "Silicon Browser link";
     case "m.tts":
       return c.text ? String(c.text) : "audio";
+    case "m.work_task":
+    case "m.work_event":
+      return workEventPreview(ev) ?? "work update";
     default:
       return "message";
   }
@@ -1416,6 +1441,86 @@ function Body({
   );
 }
 
+function ToolSetupRequestCard({
+  request,
+  isMine,
+}: {
+  request: ToolSetupRequestMessage;
+  isMine?: boolean;
+}) {
+  const [setupOpen, setSetupOpen] = React.useState(false);
+  const [liveStatus, setLiveStatus] = React.useState<ToolSetupStatus | null>(null);
+  React.useEffect(() => {
+    const onSetupState = (event: globalThis.Event) => {
+      const next = parseToolSetupAssignment(
+        (event as CustomEvent<unknown>).detail,
+        request.requestId,
+      );
+      if (next) setLiveStatus(next.status);
+    };
+    window.addEventListener(TOOL_SETUP_STATE_EVENT, onSetupState);
+    return () => window.removeEventListener(TOOL_SETUP_STATE_EVENT, onSetupState);
+  }, [request.requestId]);
+  const context = request.integrationName || request.toolKey;
+  const actionLabel =
+    liveStatus === "completed"
+      ? "Setup complete"
+      : liveStatus === "in_progress"
+        ? "View setup status"
+        : liveStatus === "failed"
+          ? "Retry setup"
+          : liveStatus === "cancelled" || liveStatus === "expired"
+            ? "View request"
+            : "Set up now";
+  return (
+    <>
+      <section
+        aria-label={`Set up ${request.toolName}`}
+        className={cn(
+          "w-80 max-w-full overflow-hidden border text-foreground",
+          isMine ? "border-primary-foreground/25 bg-primary-foreground/95" : "bg-card",
+        )}
+      >
+        <div className="flex items-start gap-3 border-b px-3.5 py-3">
+          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center bg-foreground text-background">
+            <PuzzlePiece className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+              Silicon Extend
+            </div>
+            <div className="truncate text-sm font-semibold">{request.toolName}</div>
+            {context && (
+              <div className="truncate text-[11px] text-muted-foreground">{context}</div>
+            )}
+          </div>
+        </div>
+        <div className="space-y-2.5 px-3.5 py-3">
+          <p className="text-xs leading-relaxed">{request.body}</p>
+          {request.note && !request.body.trim().endsWith(request.note) && (
+            <p className="border-l-2 border-foreground/20 pl-2 text-[11px] leading-relaxed text-muted-foreground">
+              {request.note}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => setSetupOpen(true)}
+            className="inline-flex min-h-9 w-full items-center justify-center gap-1.5 bg-foreground px-3 py-2 text-xs font-medium text-background transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            {actionLabel}
+          </button>
+        </div>
+      </section>
+      <ToolSetupDialog
+        open={setupOpen}
+        onOpenChange={setSetupOpen}
+        requestId={request.requestId}
+        summary={request}
+      />
+    </>
+  );
+}
+
 function BodyContent({
   event,
   isMine,
@@ -1443,6 +1548,10 @@ function BodyContent({
   };
   switch (event.type) {
     case "m.text": {
+      const setupRequest = toolSetupRequestFromEvent(event);
+      if (setupRequest) {
+        return <ToolSetupRequestCard request={setupRequest} isMine={isMine} />;
+      }
       // §2.8 — a silicon can emit an empty/whitespace m.text; don't render a
       // blank padded bubble. Show a quiet placeholder only once it's final and
       // there's nothing else to show (no link preview, not mid-stream).
@@ -1459,7 +1568,7 @@ function BodyContent({
       // (decided in MessageBubble, which also excludes replies, forwards, and
       // link previews). Emoji mixed with text keeps the standard renderer.
       if (soloEmoji) {
-        return <div className="text-5xl leading-none">{body}</div>;
+        return <div className="emoji-glyph text-5xl leading-none">{body}</div>;
       }
       // A message written in markdown renders as real markdown (headings,
       // lists, code, tables…); plain chatter keeps the lightweight inline
@@ -1500,6 +1609,7 @@ function BodyContent({
             localUrl={c.local_url ? String(c.local_url) : null}
             caption={c.caption ? String(c.caption) : undefined}
             showCaption={false}
+            initialStatus={event.media_meta?.status}
             width={event.media_meta?.width ?? (typeof c.width === "number" ? c.width : null)}
             height={event.media_meta?.height ?? (typeof c.height === "number" ? c.height : null)}
             replyToEventId={event.event_id}
@@ -1528,6 +1638,7 @@ function BodyContent({
             filename={c.filename ? String(c.filename) : undefined}
             caption={c.caption ? String(c.caption) : undefined}
             showCaption={false}
+            initialStatus={event.media_meta?.status}
             width={event.media_meta?.width ?? null}
             height={event.media_meta?.height ?? null}
             replyToEventId={event.event_id}
@@ -1571,6 +1682,7 @@ function BodyContent({
                   mime={item.mime}
                   filename={item.filename || undefined}
                   showCaption={false}
+                  initialStatus={item.status}
                   width={item.width}
                   height={item.height}
                   replyToEventId={event.event_id}
@@ -1603,6 +1715,7 @@ function BodyContent({
               localUrl={c.local_url ? String(c.local_url) : null}
               localDurationMs={typeof c.duration_ms === "number" ? c.duration_ms : null}
               localPeaks={localPeaks}
+              initialStatus={event.media_meta?.status}
               replyToEventId={event.event_id}
             />
           ) : (
@@ -1619,6 +1732,7 @@ function BodyContent({
             <MediaAttachment
               mediaId={String(c.media_id)}
               mime={c.mime ? String(c.mime) : "audio/mpeg"}
+              initialStatus={event.media_meta?.status}
               replyToEventId={event.event_id}
             />
           ) : (

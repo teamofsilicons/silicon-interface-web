@@ -46,8 +46,17 @@ test("desktop shell caches normalized chat navigation and serves it offline", as
     clone() { return this; },
   };
   let online = true;
-  const source = await fs.readFile(new URL("../../public/sw.js", import.meta.url), "utf8");
-  assert.match(source, /silicon-interface-shell-v4/);
+  const source = (await fs.readFile(new URL("../../public/sw.js", import.meta.url), "utf8"))
+    .replace(
+      'self.SILICON_RELEASE = "__SILICON_INTERFACE_RELEASE_ID__";',
+      'self.SILICON_RELEASE = "interface-test-release";',
+    );
+  assert.match(
+    source,
+    /self\.SILICON_RELEASE = "(?:__SILICON_INTERFACE_RELEASE_ID__|interface-[A-Za-z0-9-]+)"/,
+  );
+  assert.match(source, /silicon-interface-shell-v6-/);
+  assert.match(source, /SILICON_DEVELOPMENT_BUILD/);
   assert.match(source, /SILICON_REPLACING_WORKER/);
   vm.runInNewContext(source, {
     self,
@@ -93,6 +102,52 @@ test("desktop shell caches normalized chat navigation and serves it offline", as
     respondWith(value) { responsePromise = value; },
   });
   assert.equal((await responsePromise).marker, "cached-chat-shell");
+});
+
+test("development service workers do not intercept changing Next assets", async () => {
+  const handlers = new Map();
+  const source = (await fs.readFile(new URL("../../public/sw.js", import.meta.url), "utf8"))
+    .replace(
+      'self.SILICON_RELEASE = "__SILICON_INTERFACE_RELEASE_ID__";',
+      'self.SILICON_RELEASE = "interface-test-release";',
+    );
+  assert.match(source, /self\.SILICON_RELEASE = "interface-[A-Za-z0-9-]+"/);
+  vm.runInNewContext(source, {
+    self: {
+      location: { origin: "http://127.0.0.1:3000" },
+      addEventListener(type, handler) { handlers.set(type, handler); },
+      skipWaiting() {},
+      clients: { claim: async () => undefined },
+      registration: {
+        active: null,
+        getNotifications: async () => [],
+        showNotification: async () => undefined,
+      },
+    },
+    caches: {
+      async keys() { return []; },
+      async open() { throw new Error("development assets must not open the shell cache"); },
+    },
+    indexedDB: undefined,
+    navigator: {},
+    fetch: async () => { throw new Error("the browser should own the request"); },
+    Request,
+    Response,
+    URL,
+    URLSearchParams,
+    Date,
+  });
+
+  let intercepted = false;
+  handlers.get("fetch")({
+    request: {
+      method: "GET",
+      mode: "cors",
+      url: "http://127.0.0.1:3000/_next/static/chunks/app/dev/work-updates/page.js",
+    },
+    respondWith() { intercepted = true; },
+  });
+  assert.equal(intercepted, false);
 });
 
 test("the shell checks for a replacement while a tab remains open", async () => {

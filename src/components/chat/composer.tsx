@@ -22,6 +22,7 @@ import {
   ackOutbox,
   enqueueOutbox,
   listOutbox,
+  outboxTerminalState,
   type OutboxEntry,
 } from "@/lib/outbox";
 import {
@@ -45,7 +46,18 @@ import { track } from "@/lib/analytics";
 import { ALL_EMOJI_LIST, searchEmoji } from "@/lib/emoji";
 import { emojiShortcodeQuery } from "@/lib/emoji-shortcode";
 import { computePeaks, isGifMedia, measureImage, measureVideo } from "@/lib/media-meta";
+import { workEventPreview } from "@/lib/work-update-presentation";
+import {
+  evictLocalMediaPreview,
+  retainLocalMediaPreview,
+} from "@/lib/media-cache";
 import { uploadMediaResumable } from "@/lib/media-upload";
+import {
+  cachedMediaForHash,
+  forgetCachedMedia,
+  hashMediaBlob,
+  rememberCachedMedia,
+} from "@/lib/media-hash-cache";
 import { beginPendingSendControl } from "@/lib/pending-send-control";
 import {
   acknowledgeMediaSend,
@@ -54,13 +66,16 @@ import {
   MEDIA_OUTBOX_ACKNOWLEDGED_EVENT,
   MEDIA_OUTBOX_STAGED_EVENT,
   prepareMediaOutboxPayload,
+  preparedUploadedMediaPayload,
   stageMediaSendIntent,
+  stageUploadedMediaSendIntent,
 } from "@/lib/media-send";
 import {
   listRoomMediaUploads,
   patchMediaUpload,
   readMediaUpload,
   removeMediaUpload,
+  stageReusedMediaUpload,
 } from "@/lib/media-upload-store";
 import {
   clearDraftAfterSend,
@@ -377,6 +392,7 @@ function StagedAttachment({
 
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const [remoteUrl, setRemoteUrl] = React.useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = React.useState(false);
   const previewUrl = fileUrl ?? remoteUrl;
 
   const openPreview = async () => {
@@ -385,6 +401,7 @@ function StagedAttachment({
       return;
     }
     if (!mediaId) return;
+    setPreviewLoading(true);
     try {
       const r = await api.mediaDetail(mediaId);
       if (r.download_url) {
@@ -393,6 +410,8 @@ function StagedAttachment({
       }
     } catch {
       toast.error("couldn't open attachment");
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -423,10 +442,21 @@ function StagedAttachment({
               {isPdf ? <FilePdf className="h-5 w-5" /> : isAudio ? <Microphone className="h-5 w-5" /> : <FileIcon className="h-5 w-5" />}
             </div>
           )}
-          {/* Hover affordance — it's clickable to expand. */}
-          <div className="absolute inset-0 hidden place-items-center bg-black/35 group-hover:grid">
-            <ArrowsOutSimple className="h-4 w-4 text-white" />
-          </div>
+          {(uploading || previewLoading) && (
+            <div
+              className="absolute inset-0 grid place-items-center bg-background/65"
+              role="status"
+              aria-label={uploading ? "uploading attachment" : "loading attachment"}
+            >
+              <CircleNotch className="h-5 w-5 animate-spin" />
+            </div>
+          )}
+          {/* Hover affordance — it's clickable to expand once loading ends. */}
+          {!uploading && !previewLoading ? (
+            <div className="absolute inset-0 hidden place-items-center bg-black/35 group-hover:grid">
+              <ArrowsOutSimple className="h-4 w-4 text-white" />
+            </div>
+          ) : null}
         </div>
         <div className="min-w-0 flex-1">
           <FileName name={name} className="text-xs font-medium" />
@@ -520,7 +550,7 @@ function EmojiQuickPicker({
               )}
               title={`:${r.name}:`}
             >
-              <span className="text-lg leading-none">{r.emoji}</span>
+              <span className="emoji-glyph text-lg leading-none">{r.emoji}</span>
             </button>
           ))}
         </div>
@@ -546,7 +576,7 @@ function EmojiQuickPicker({
           )}
           title={`:${r.name}:`}
         >
-          <span className="text-lg leading-none">{r.emoji}</span>
+          <span className="emoji-glyph text-lg leading-none">{r.emoji}</span>
         </button>
       ))}
     </div>
@@ -685,6 +715,9 @@ function previewOf(ev: Event): string {
   if (ev.type === "m.voice") return "voice note";
   if (ev.type === "m.remote_browser") return "Silicon Browser link";
   if (ev.type === "m.tts") return "audio";
+  if (ev.type === "m.work_task" || ev.type === "m.work_event") {
+    return workEventPreview(ev) ?? "work update";
+  }
   return ev.type;
 }
 
@@ -1157,19 +1190,97 @@ export function Composer({
       try {
         updateAttachment(id, { pct: 0, loaded: 0 });
         const mime = file.type || "application/octet-stream";
+        const kind = file.type.startsWith("image/") ? "image" : "file";
+        const outboxOwner = authStore.getCarbon()?.carbon_id ?? null;
+        if (!outboxOwner) throw new Error("Please sign in again before uploading this file");
+        const digest = await hashMediaBlob(file);
+        if (abortController.signal.aborted) throw new DOMException("aborted", "AbortError");
+        const cached = cachedMediaForHash({
+          ownerId: outboxOwner,
+          roomId,
+          digest,
+          size: file.size,
+          mime,
+          kind,
+        });
+        if (cached) {
+          try {
+            const detail = await api.mediaDetail(cached.mediaId);
+            if (
+              !["pending", "ready"].includes(detail.media.status) ||
+              detail.media.size !== file.size ||
+              detail.media.mime !== mime ||
+              detail.media.kind !== kind
+            ) {
+              throw new Error("cached media no longer matches");
+            }
+            if (abortController.signal.aborted) throw new DOMException("aborted", "AbortError");
+            await stageReusedMediaUpload({
+              ownerId: `carbon:${outboxOwner}`,
+              roomId,
+              clientId: id,
+              outboxClientId: id,
+              name: file.name,
+              mime,
+              kind,
+              size: file.size,
+              mediaId: cached.mediaId,
+            });
+            rememberCachedMedia({
+              ownerId: outboxOwner,
+              roomId,
+              digest,
+              mediaId: cached.mediaId,
+              size: file.size,
+              mime,
+              kind,
+            });
+            retainLocalMediaPreview(cached.mediaId, file);
+            updateAttachment(id, {
+              status: "ready",
+              mediaId: cached.mediaId,
+              mime,
+              pct: null,
+              loaded: null,
+            });
+            return;
+          } catch (error) {
+            if (
+              abortController.signal.aborted ||
+              (error instanceof DOMException && error.name === "AbortError")
+            ) {
+              throw error;
+            }
+            forgetCachedMedia(outboxOwner, roomId, digest.hex);
+          }
+        }
         const mediaId = await uploadMediaResumable({
           clientId: id,
           outboxClientId: id,
           file,
           mime,
-          kind: file.type.startsWith("image/") ? "image" : "file",
+          kind,
           filename: file.name,
           roomId,
           onProgress: (pct, loaded) => updateAttachment(id, { pct, loaded }),
           xhrRef: ref,
           signal: abortController.signal,
           retainSourceUntilEventAck: true,
+          wholeSha256: digest,
         });
+        rememberCachedMedia({
+          ownerId: outboxOwner,
+          roomId,
+          digest,
+          mediaId,
+          size: file.size,
+          mime,
+          kind,
+        });
+        // The upload is complete and the immutable media id is now known. Keep
+        // these already-local bytes available to the timeline so pressing Send
+        // cannot regress the sender to a scan/presign loading placeholder.
+        retainLocalMediaPreview(mediaId, file);
         updateAttachment(id, {
           status: "ready",
           mediaId,
@@ -1207,6 +1318,8 @@ export function Composer({
 
   // Abort (if uploading) and drop a staged attachment.
   const removeAttachment = React.useCallback((id: string) => {
+    const mediaId = attachmentsRef.current.find((item) => item.id === id)?.mediaId;
+    evictLocalMediaPreview(mediaId);
     uploadAbortRefs.current.get(id)?.abort();
     uploadAbortRefs.current.delete(id);
     xhrRefs.current.get(id)?.current?.abort();
@@ -2478,6 +2591,44 @@ export function Composer({
     }
   };
 
+  /** Uploading already completed when an attachment becomes ready. Send its
+   * stable media identity immediately while the durable outbox remains the
+   * retry authority; never wait for a later recovery sweep to start the POST. */
+  const sendUploadedAttachmentImmediately = (
+    outboxOwner: string,
+    stagedEntry: OutboxEntry,
+  ) => {
+    const payload = preparedUploadedMediaPayload(stagedEntry);
+    if (!payload) {
+      onFail(stagedEntry.clientId, new Error("uploaded media identity is missing"));
+      return;
+    }
+    void withOutboxClientLock(outboxOwner, stagedEntry.clientId, async () => {
+      // A targeted terminal lookup avoids reconciling every unrelated outbox
+      // row on the click path. Cancellation/acceptance still wins the lock.
+      if (await outboxTerminalState(outboxOwner, stagedEntry.clientId)) return;
+      const control = beginPendingSendControl(outboxOwner, stagedEntry.clientId);
+      try {
+        const real = await api.sendEvent(
+          stagedEntry.roomId,
+          payload,
+          stagedEntry.clientId,
+          control.signal,
+        );
+        onAck(stagedEntry.clientId, real);
+        await acknowledgeMediaSend(outboxOwner, stagedEntry, undefined, {
+          roomId: stagedEntry.roomId,
+          event: real,
+        });
+      } finally {
+        control.finish();
+      }
+    }).catch(async (error) => {
+      onFail(stagedEntry.clientId, error);
+      await persistOutboxFailure(outboxOwner, stagedEntry.clientId, error).catch(() => false);
+    });
+  };
+
   const processDurableGif = async (
     initial: OutboxEntry,
     optimisticAlreadyAdded = false,
@@ -2495,24 +2646,6 @@ export function Composer({
     let optimisticAdded = optimisticAlreadyAdded;
     let activityStarted = false;
     try {
-      // This is the first external fetch. The provider id/URL/title/dimensions,
-      // room, reply, and immutable client id are already in the outbox.
-      entry = await ensureMediaOutboxStaged(outboxOwner, entry);
-      setGifAcquisitions((current) =>
-        current.filter((item) => item.entry.clientId !== entry.clientId),
-      );
-      const acquisition = entry.media?.acquisition;
-      if (!optimisticAlreadyAdded) {
-        onOptimisticAdd(entry.clientId, {
-          type: "m.image",
-          content: {
-            ...(entry.content ?? {}),
-            ...(acquisition?.url ? { local_url: acquisition.url } : {}),
-          },
-          ...(entry.replyTo ? { reply_to_event_id: entry.replyTo } : {}),
-        });
-        optimisticAdded = true;
-      }
       gifUploadsInFlightRef.current += 1;
       activityStarted = true;
       if (gifUploadsInFlightRef.current === 1) {
@@ -2525,7 +2658,25 @@ export function Composer({
         // Another tab or the global recovery loop may already have committed
         // and acknowledged this exact durable GIF intent.
         if (!current) return;
-        entry = current;
+        // Acquisition and staging share the same per-client lock as global
+        // recovery. Two first attempts can no longer fetch/stage the same GIF
+        // concurrently and make the visible attempt appear to fail.
+        entry = await ensureMediaOutboxStaged(outboxOwner, current);
+        setGifAcquisitions((items) =>
+          items.filter((item) => item.entry.clientId !== entry.clientId),
+        );
+        const acquisition = entry.media?.acquisition;
+        if (!optimisticAdded) {
+          onOptimisticAdd(entry.clientId, {
+            type: "m.image",
+            content: {
+              ...(entry.content ?? {}),
+              ...(acquisition?.url ? { local_url: acquisition.url } : {}),
+            },
+            ...(entry.replyTo ? { reply_to_event_id: entry.replyTo } : {}),
+          });
+          optimisticAdded = true;
+        }
         const control = beginPendingSendControl(outboxOwner, entry.clientId);
         try {
           const payload = await prepareMediaOutboxPayload(
@@ -2601,7 +2752,10 @@ export function Composer({
         roomId,
         clientId: newClientId(),
         gifId: gif.id,
-        sourceUrl: gif.downloadUrl,
+        // Archive the same compact animated rendition already visible in the
+        // picker. The previous full rendition made the browser download and
+        // then upload several unnecessary megabytes before event acceptance.
+        sourceUrl: gif.previewUrl,
         title: gif.title,
         filename: `${safeTitle || gif.id}.gif`,
         width: gif.width,
@@ -2845,12 +2999,13 @@ export function Composer({
             filename: a.name,
             ...(bundleId ? { bundle_id: bundleId } : {}),
           };
-          const entry = await stageMediaSendIntent({
+          const entry = await stageUploadedMediaSendIntent({
             outboxOwnerId: outboxOwner,
             mediaOwnerId: `carbon:${outboxOwner}`,
             roomId,
             clientId: a.id,
-            ...(a.file ? { blob: a.file } : {}),
+            mediaId: a.mediaId as string,
+            size: a.size,
             kind: a.mime.startsWith("image/") ? "image" : "file",
             type: fileType,
             filename: a.name,
@@ -2868,7 +3023,7 @@ export function Composer({
             },
             { timeoutMs: sendTimeoutMs(a.size) },
           );
-          wakeOutboxRecovery(outboxOwner, a.id);
+          sendUploadedAttachmentImmediately(outboxOwner, entry);
           queuedAttachmentIds.add(a.id);
           track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         }
@@ -3172,6 +3327,12 @@ export function Composer({
                   : "— saved; acquiring source…"}
             </span>
           </span>
+          {!error && (
+            <CircleNotch
+              className="h-4 w-4 shrink-0 animate-spin text-muted-foreground"
+              aria-label="loading GIF"
+            />
+          )}
           {error && (
             <button
               type="button"

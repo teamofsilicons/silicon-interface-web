@@ -5,6 +5,11 @@ import { ArrowUpRight } from "@phosphor-icons/react/dist/ssr";
 
 import { cn } from "@/lib/utils";
 
+const BROWSER_RING_SIZE = 84;
+const BROWSER_RING_STROKE = 4;
+const BROWSER_RING_RADIUS = (BROWSER_RING_SIZE - BROWSER_RING_STROKE) / 2;
+const BROWSER_RING_CIRCUMFERENCE = 2 * Math.PI * BROWSER_RING_RADIUS;
+
 /** The Silicon Browser mark: a filled square with the Silicon up-left glyph.
  *  Themed via tokens (foreground square, background glyph) so it matches the
  *  brand avatars and adapts to light/dark. */
@@ -38,34 +43,39 @@ export function RemoteBrowserCard({
 }) {
   const expMs = expiresAt ? Date.parse(expiresAt) : 0;
   const validExp = expMs > 0 && Number.isFinite(expMs);
-
-  // Tick every second so the ring glides; the minute label updates each minute.
-  const [now, setNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    // Don't tick forever. Once the link is expired (or has no valid expiry)
-    // there's nothing to animate — a permanent 1s interval is wasted work.
-    if (!validExp) return;
-    if (now >= expMs) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [validExp, expMs, now]);
-
   const totalMs = (ttlMinutes ?? 60) * 60_000;
+
+  // Start from a value derived entirely from the props so the server render and
+  // the first client render are identical. The real clock takes over as soon as
+  // hydration completes.
+  const [now, setNow] = React.useState(() => (validExp ? expMs - totalMs : 0));
+  React.useEffect(() => {
+    if (!validExp) return;
+
+    let intervalId: number | undefined;
+    const tick = () => {
+      const next = Date.now();
+      setNow(next);
+      if (next >= expMs && intervalId !== undefined) window.clearInterval(intervalId);
+    };
+    const startId = window.setTimeout(() => {
+      tick();
+      if (Date.now() < expMs) intervalId = window.setInterval(tick, 1000);
+    }, 0);
+    return () => {
+      window.clearTimeout(startId);
+      if (intervalId !== undefined) window.clearInterval(intervalId);
+    };
+  }, [validExp, expMs]);
+
   const remainMs = validExp ? Math.max(0, expMs - now) : 0;
   // An explicit early close expires the card regardless of the remaining timer.
   const expired = closed || !validExp || remainMs <= 0;
-  const frac = totalMs > 0 ? Math.max(0, Math.min(1, remainMs / totalMs)) : 0;
+  const fraction = totalMs > 0 ? Math.max(0, Math.min(1, remainMs / totalMs)) : 0;
   const minutesLeft = Math.ceil(remainMs / 60_000);
   // "expires soon" should mean something — only flag it near the end. Otherwise
   // show the actual remaining time so the label tracks the ring.
   const expiresSoon = !expired && remainMs <= 5 * 60_000;
-
-  // Ring geometry — a generous, legible dial.
-  const size = 84;
-  const stroke = 4;
-  const r = (size - stroke) / 2;
-  const circ = 2 * Math.PI * r;
-  const offset = circ * (1 - frac);
 
   // Only http(s) links are clickable — refuse javascript:/data:/file: so a
   // silicon-sent card can never become an injection vector.
@@ -133,34 +143,39 @@ export function RemoteBrowserCard({
       {/* Countdown dial. */}
       <div className="flex flex-col items-center gap-2 px-3.5 py-4">
         <div className="relative inline-flex items-center justify-center">
-          <svg width={size} height={size} className="-rotate-90">
+          <svg width={BROWSER_RING_SIZE} height={BROWSER_RING_SIZE} className="-rotate-90">
             <circle
-              cx={size / 2}
-              cy={size / 2}
-              r={r}
+              cx={BROWSER_RING_SIZE / 2}
+              cy={BROWSER_RING_SIZE / 2}
+              r={BROWSER_RING_RADIUS}
               fill="none"
               stroke="currentColor"
-              strokeWidth={stroke}
+              strokeWidth={BROWSER_RING_STROKE}
               className="opacity-10"
             />
             <circle
-              cx={size / 2}
-              cy={size / 2}
-              r={r}
+              cx={BROWSER_RING_SIZE / 2}
+              cy={BROWSER_RING_SIZE / 2}
+              r={BROWSER_RING_RADIUS}
               fill="none"
               stroke="currentColor"
-              strokeWidth={stroke}
+              strokeWidth={BROWSER_RING_STROKE}
               strokeLinecap="round"
-              strokeDasharray={circ}
-              strokeDashoffset={offset}
+              strokeDasharray={BROWSER_RING_CIRCUMFERENCE}
+              strokeDashoffset={BROWSER_RING_CIRCUMFERENCE * (1 - fraction)}
+              suppressHydrationWarning
               className="transition-[stroke-dashoffset] duration-1000 ease-linear"
             />
           </svg>
-          <span className="absolute text-xl font-semibold tabular-nums leading-none">
+          <span
+            suppressHydrationWarning
+            className="absolute text-xl font-semibold tabular-nums leading-none"
+          >
             {expired ? "0" : minutesLeft}
           </span>
         </div>
         <span
+          suppressHydrationWarning
           className={cn(
             "text-[11px]",
             expiresSoon ? "text-foreground" : "text-muted-foreground",

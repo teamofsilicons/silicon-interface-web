@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { ensureDeviceRegistration } from "@/lib/device-registration";
 import {
+  isAuthoritativeSessionRevocation,
   sessionBootDecision,
   type WebSessionRestoreState,
 } from "@/lib/session-bootstrap";
@@ -63,13 +64,16 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         if (!alive) return;
         if (state === "restored") retryDelay = RESTORE_RETRY_MS;
         anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
+        const hasRetainedOwner = state === "anonymous"
+          ? authStore.hasPersistedOwner()
+          : Boolean(authStore.getCarbon());
         const decision = sessionBootDecision(
           state,
-          Boolean(authStore.getCarbon()),
+          hasRetainedOwner,
           anonymousConfirmations,
         );
         if (decision === "login") {
-          authStore.clear();
+          if (state === "revoked") authStore.clear("revoked");
           router.replace("/auth/login");
           return;
         }
@@ -90,13 +94,13 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           try {
             await api.me().then((me) => authStore.setCarbon(me));
           } catch (error) {
-            const rejected =
-              error instanceof ApiError &&
-              error.status === 401;
+            const rejected = error instanceof ApiError &&
+              isAuthoritativeSessionRevocation(error.status, error.body);
             if (rejected) {
-              // `api.me()` has already attempted one renewable-cookie refresh.
-              // A second 401 is authoritative invalid-session evidence.
-              authStore.clear();
+              // Only a typed backend revocation may end an established local
+              // session. Generic 401s can be stale-token or cookie-availability
+              // races and remain in the retry path below.
+              authStore.clear("revoked");
               router.replace("/auth/login");
               return;
             }
@@ -175,14 +179,18 @@ export function AuthRouteGuard({ children }: { children: React.ReactNode }) {
         const state = await restoreBrowserAuthority();
         if (!alive) return;
         anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
+        const hasRetainedOwner = state === "anonymous"
+          ? authStore.hasPersistedOwner()
+          : Boolean(authStore.getCarbon());
         const decision = sessionBootDecision(
           state,
-          Boolean(authStore.getCarbon()),
+          hasRetainedOwner,
           anonymousConfirmations,
         );
         if (decision === "enter" || decision === "enter-and-retry") {
           router.replace("/chat");
         } else if (decision === "login") {
+          if (state === "revoked") authStore.clear("revoked");
           setAnonymous(true);
         } else {
           schedule(decision === "confirm-anonymous" ? ANONYMOUS_CONFIRM_MS : RESTORE_RETRY_MS);

@@ -742,6 +742,7 @@ function accountProjectionKey(update: AccountSyncUpdate): string {
   if (update.kind === "room.notifications") return `room.notifications:${update.room_id}`;
   if (update.kind === "room.list_preferences") return `room.list_preferences:${update.room_id}`;
   if (update.kind === "client.operation") return `client.operation:${update.object_id}`;
+  if (update.kind === "extend.request") return `extend.request:${update.object_id}`;
   return `${update.kind}:${update.object_id}`;
 }
 

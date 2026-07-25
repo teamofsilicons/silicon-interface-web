@@ -165,7 +165,7 @@ export function ComposerExpressionPicker({
                 onClick={() => pickEmoji(entry.emoji)}
                 title={entry.name}
                 aria-label={entry.name}
-                className="inline-flex aspect-square min-h-9 items-center justify-center border border-transparent text-xl transition-colors hover:border-border hover:bg-accent focus-visible:border-foreground focus-visible:bg-accent"
+                className="emoji-glyph inline-flex aspect-square min-h-9 items-center justify-center border border-transparent text-xl transition-colors hover:border-border hover:bg-accent focus-visible:border-foreground focus-visible:bg-accent"
               >
                 {entry.emoji}
               </button>

@@ -41,6 +41,26 @@ test("archive view is principal-scoped while search spans both views", () => {
   assert.equal(projection.roomVisibleInArchiveView(archived, false, true), true);
 });
 
+test("an emptied archive keeps its Back to conversations chrome", () => {
+  assert.equal(projection.useStandaloneRoomListEmptyState(false, true, 0, true), false);
+  assert.equal(projection.useStandaloneRoomListEmptyState(false, true, 0, false), true);
+  assert.equal(projection.useStandaloneRoomListEmptyState(false, true, 2, false), false);
+  assert.equal(projection.useStandaloneRoomListEmptyState(true, true, 0, false), false);
+});
+
+test("archive entry previews the newest archived activity independent of pin state", () => {
+  const active = room("active", 99);
+  const oldPinned = room("old-pinned", 3, {
+    list_preferences: { pinned: true, archived: true },
+  });
+  const newest = room("newest", 8, {
+    list_preferences: { pinned: false, archived: true },
+  });
+  const entry = projection.projectArchivedRoomListEntry([active, oldPinned, newest]);
+  assert.equal(entry.count, 2);
+  assert.equal(entry.latest?.room_id, "newest");
+});
+
 test("server status cannot displace a stronger draft or attention state", () => {
   const value = room("room", 1);
   assert.equal(projection.serverRoomListStatus(value), null);

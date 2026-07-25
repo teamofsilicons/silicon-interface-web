@@ -24,6 +24,11 @@ import { cn, dayLabel, relativeTimeAgo } from "@/lib/utils";
 import { observePresenceActivity, presenceIsOnline } from "@/lib/presence-state";
 import { authStore, useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
+import {
+  siliconMaintenancePeers,
+  siliconMaintenanceRoomMessage,
+  siliconPeerProjectionSignature,
+} from "@/lib/silicon-maintenance";
 import { vibrate } from "@/lib/sounds";
 import {
   shouldPromptNotifications,
@@ -33,8 +38,40 @@ import {
   requestBrowserNotifications,
 } from "@/lib/notifications";
 import { projectRedactedEvent, projectRedactedWindow } from "@/lib/redaction-state";
-import type { AnnotationDraft, Event, EventType, HeldSend, ProgressState, Room, TeamMembership, WsFrame } from "@/lib/types";
+import type {
+  AnnotationDraft,
+  Event,
+  EventType,
+  HeldSend,
+  ProgressState,
+  Room,
+  TeamMembership,
+  WsFrame,
+} from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
+import { orderRunAnchoredReplies } from "@/lib/run-anchored-timeline";
+import { parseWorkTimelineRecord } from "@/lib/work-update-validation";
+import {
+  workEventCountsAsUnread,
+  workEventPreview,
+} from "@/lib/work-update-presentation";
+import {
+  createWorkUpdateState,
+  reduceWorkTimelineRecord,
+  type WorkUpdateState,
+} from "@/lib/work-update-state";
+import { dedupeWorkTimelineEnvelopes } from "@/lib/work-timeline-dedupe";
+import type { WorkTimelineRecord } from "@/lib/work-update-types";
+import {
+  getManagerActivityState,
+  recordManagerActivity,
+  settleCachedManagerActivity,
+  visibleCachedManagerActivities,
+} from "@/lib/work-manager-activity-cache";
+import {
+  eventReplacesManagerActivity,
+  visibleManagerActivityGroups,
+} from "@/lib/work-manager-activity";
 import {
   appendRoomEventSnippet,
   readRoomEventSnippet,
@@ -159,6 +196,15 @@ import {
 import { useVoiceRecordingSession } from "@/lib/voice-recording-session";
 import { loadCachedTeamRoster, saveCachedTeamRoster } from "@/lib/sidebar-cache";
 import {
+  readRoomScrollMemory,
+  rememberRoomScroll,
+  type RoomScrollMemory,
+} from "@/lib/room-scroll-memory";
+import {
+  queueRoomEventJump,
+  takeRoomEventJump,
+} from "@/lib/room-event-navigation";
+import {
   canSendPlaintextToRoom,
   mergeDeliverySummaries,
   normalizeDeliveryObject,
@@ -210,6 +256,10 @@ import { AnnotationStudio } from "@/components/chat/annotation-studio/annotation
 import { ForwardDialog } from "@/components/chat/forward-dialog";
 import { RoomSendProvider } from "@/components/chat/room-send-context";
 import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
+import {
+  WorkEventCard,
+  WorkManagerActivityHistory,
+} from "@/components/chat/work-updates";
 import { sendTimeoutMs } from "@/lib/send-timeout";
 import type { AnnotationOpenRequest } from "@/components/chat/media-previewer";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
@@ -305,7 +355,78 @@ interface ProgressEntry {
     | "partially_delivered"
     | "delivered"
     | "partially_read"
-    | "read";
+      | "read";
+}
+
+function progressStateForManagerKind(
+  kind: import("@/lib/work-update-types").ManagerActivityKind,
+): ProgressState {
+  if (kind === "reading") return "reading_file";
+  if (kind === "writing") return "writing_file";
+  if (kind === "executing") return "executing";
+  if (kind === "searching_web") return "searching_web";
+  if (kind === "spawning_worker") return "spawning_worker";
+  if (kind === "calling") return "calling";
+  if (kind === "done") return "done";
+  return "thinking";
+}
+
+function cachedManagerProgress(roomId: string): ProgressEntry | null {
+  const groups = visibleCachedManagerActivities(roomId);
+  const group = [...groups].reverse().find((candidate) => candidate.display === "active") ??
+    groups.at(-1);
+  const frame = group?.current ?? group?.history.at(-1);
+  if (!group || !frame) return null;
+  const updatedAt = Date.parse(group.updated_at);
+  return {
+    roomId,
+    groupId: group.progress_group_id,
+    state: progressStateForManagerKind(frame.kind),
+    note: frame.note,
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+    source: "server",
+    pct: frame.progress_pct,
+  };
+}
+
+function managerProgressAfterFrame(
+  roomId: string,
+  current: ProgressEntry | null,
+  incoming: ProgressEntry,
+): ProgressEntry | null {
+  const projected = cachedManagerProgress(roomId);
+  if (!projected) return null;
+  if (projected.groupId === incoming.groupId) return incoming;
+  if (current?.groupId === projected.groupId) {
+    return {
+      ...projected,
+      handle: current.handle,
+      anchorEventId: current.anchorEventId,
+    };
+  }
+  return projected;
+}
+
+function materializedWorkRecord(
+  state: WorkUpdateState,
+  incoming: WorkTimelineRecord,
+): WorkTimelineRecord {
+  try {
+    const next = reduceWorkTimelineRecord(state, incoming);
+    if (incoming.type === "m.work_task") {
+      return { type: "m.work_task", task: next.tasks[incoming.task.task_id] };
+    }
+    return { type: "m.work_event", event: next.events[incoming.event.work_event_id] };
+  } catch {
+    // A producer that mutates an immutable identity cannot take down the chat;
+    // retain the last coherent card while Glass rejects the bad revision.
+    if (incoming.type === "m.work_task") {
+      const current = state.tasks[incoming.task.task_id];
+      return current ? { type: "m.work_task", task: current } : incoming;
+    }
+    const current = state.events[incoming.event.work_event_id];
+    return current ? { type: "m.work_event", event: current } : incoming;
+  }
 }
 
 type ActivityReceipt = NonNullable<ProgressEntry["receipt"]>;
@@ -357,6 +478,9 @@ function replyPreviewOf(event: Event): string {
   if (event.type === "m.voice") return "voice note";
   if (event.type === "m.remote_browser") return "Silicon Browser link";
   if (event.type === "m.tts") return "audio";
+  if (event.type === "m.work_task" || event.type === "m.work_event") {
+    return workEventPreview(event) ?? "work update";
+  }
   return event.type;
 }
 
@@ -400,6 +524,7 @@ const PROGRESS_MESSAGE_TYPES = new Set([
   "m.tts",
   "m.remote_browser",
 ]);
+
 const MIN_PROGRESS_STATUS_MS = 1000;
 // How long recipient activity shows before switching to the
 // actual silicon work progress.
@@ -661,10 +786,13 @@ export function RoomView({
   // initial-paint epoch as the event state; later room updates arrive through
   // the normal socket/history reducers instead of restarting history loading.
   const [openedRoomProjection] = React.useState(room);
+  const [openedScrollMemory] = React.useState(() => readRoomScrollMemory(room.room_id));
   const [events, setEvents] = React.useState<LocalEvent[]>(() =>
     seedTimelineWithRoomTail(
       openedRoomProjection,
-      readRoomEventSnippet(openedRoomProjection.room_id) ?? [],
+      openedScrollMemory?.events.length
+        ? openedScrollMemory.events
+        : (readRoomEventSnippet(openedRoomProjection.room_id) ?? []),
     ).map((event) => {
       const local = event as LocalEvent;
       const cachedStatus = local._status;
@@ -676,10 +804,18 @@ export function RoomView({
           : undefined;
       return {
         ...event,
-        is_final: true,
+        // The room handoff cache may contain an in-flight streamed message.
+        // Preserve that fact so reopening cannot replace manager activity
+        // before the matching event.final frame arrives.
+        is_final: event.is_final !== false,
         _status: cachedStatus ?? fallbackStatus,
       };
     }),
+  );
+  const [workUpdateState, setWorkUpdateState] = React.useState(createWorkUpdateState);
+  const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
+  const [managerActivityState, setManagerActivityState] = React.useState(
+    getManagerActivityState,
   );
   const peers = React.useMemo(() => (Array.isArray(room.peers) ? room.peers : []), [room.peers]);
   // Direct 1-on-1 peer and its saved-contact record (if any) — drives the
@@ -721,26 +857,48 @@ export function RoomView({
             ? "offline"
             : null;
   const contact = peer ? contacts?.get(contactKey(peer.kind, peer.id)) : undefined;
-  const siliconConnectionKey =
-    peer?.kind === "silicon" ? `${room.room_id}:${peer.id}` : null;
-  const [polledSiliconConnection, setPolledSiliconConnection] = React.useState<{
-    key: string;
-    metadataState: string;
-    state: string;
+  const siliconPeers = React.useMemo(
+    () => peers.filter((item) => item.kind === "silicon"),
+    [peers],
+  );
+  const metadataSiliconProjectionSignature = React.useMemo(
+    () => siliconPeerProjectionSignature(peers),
+    [peers],
+  );
+  const [polledSiliconRoom, setPolledSiliconRoom] = React.useState<{
+    roomId: string;
+    metadataSignature: string;
+    peers: typeof siliconPeers;
   } | null>(null);
-  // A poll result only applies to the exact room+peer it queried. Deriving the
-  // fallback directly from room metadata prevents a stale offline result from
-  // flashing when the user switches rooms, without an effect-driven reset.
-  const metadataSiliconConnectionState =
-    peer?.kind === "silicon" ? peer.connection_state || "online" : "online";
+  // A poll result only applies to the exact room projection it queried. A
+  // websocket-driven phase/revision change invalidates an older in-flight poll
+  // immediately, so polling repairs missed frames without masking live ones.
+  const polledSiliconProjectionApplies =
+    polledSiliconRoom?.roomId === room.room_id &&
+    polledSiliconRoom.metadataSignature === metadataSiliconProjectionSignature;
+  const effectiveSiliconPeers = polledSiliconProjectionApplies
+    ? polledSiliconRoom.peers
+    : siliconPeers;
+  const effectiveDirectSilicon =
+    peer?.kind === "silicon"
+      ? effectiveSiliconPeers.find((item) => item.id === peer.id) ?? peer
+      : null;
   const siliconConnectionState =
-    siliconConnectionKey &&
-    polledSiliconConnection?.key === siliconConnectionKey &&
-    polledSiliconConnection.metadataState === metadataSiliconConnectionState
-      ? polledSiliconConnection.state
-      : metadataSiliconConnectionState;
+    effectiveDirectSilicon?.connection_state || "online";
+  const activeSiliconMaintenancePeers = React.useMemo(
+    () => siliconMaintenancePeers(effectiveSiliconPeers),
+    [effectiveSiliconPeers],
+  );
+  const siliconMaintenanceActive = activeSiliconMaintenancePeers.length > 0;
+  const siliconMaintenanceMessage = React.useMemo(
+    () => siliconMaintenanceRoomMessage(effectiveSiliconPeers),
+    [effectiveSiliconPeers],
+  );
   const siliconUnavailable =
-    peer?.kind === "silicon" && !connectionStatePending && siliconConnectionState !== "online";
+    peer?.kind === "silicon" &&
+    !connectionStatePending &&
+    siliconConnectionState !== "online" &&
+    !siliconMaintenanceActive;
   const [saveOpen, setSaveOpen] = React.useState(false);
   const headerTitle = peer
     ? contact?.name || null // null → render the styled @id below
@@ -755,22 +913,20 @@ export function RoomView({
   const readOnly = !!room.observed;
   const showsProgressForReplies = !readOnly && peers.some((p) => p.kind === "silicon");
   React.useEffect(() => {
-    if (peer?.kind !== "silicon" || connectionStatePending) return;
+    if (siliconPeers.length === 0 || connectionStatePending) return;
     let alive = true;
     const poll = async () => {
       try {
         const next = await api.roomDetail(room.room_id);
-        const nextPeer =
-          next.kind === "direct" ? next.peers.find((item) => item.kind === "silicon") : null;
-        if (alive && nextPeer) {
-          setPolledSiliconConnection({
-            key: `${room.room_id}:${nextPeer.id}`,
-            metadataState: peer.connection_state || "online",
-            state: nextPeer.connection_state || "online",
+        if (alive) {
+          setPolledSiliconRoom({
+            roomId: room.room_id,
+            metadataSignature: metadataSiliconProjectionSignature,
+            peers: next.peers.filter((item) => item.kind === "silicon"),
           });
         }
       } catch {
-        /* keep the offline flag and retry on the next tick */
+        /* keep the last authoritative projection and retry on the next tick */
       }
     };
     void poll();
@@ -779,19 +935,110 @@ export function RoomView({
       alive = false;
       window.clearInterval(timer);
     };
-  }, [connectionStatePending, peer?.connection_state, peer?.kind, room.room_id]);
+  }, [
+    connectionStatePending,
+    metadataSiliconProjectionSignature,
+    room.room_id,
+    siliconPeers.length,
+  ]);
 
-  // Transport and reconciliation continue while text is selected, but the
-  // rendered conversation-cell projection stays on one immutable snapshot.
-  // This mirrors Signal's separation between its live model and visible cells:
-  // native Range endpoints never move, while no streaming delta is delayed.
+  // Selection ownership is imperative. Starting or ending a browser Range must
+  // not schedule a React render: even a logically identical timeline render can
+  // make the browser re-anchor the scroll container during a double-click.
+  // Loaded message rows already stay mounted and retain stable event keys.
   const textSelectionActiveRef = React.useRef(false);
   const eventProjectionRef = React.useRef(events);
+  const eventLookupRef = React.useRef(new Map(events.map((event) => [event.event_id, event])));
   React.useLayoutEffect(() => {
     eventProjectionRef.current = events;
+    eventLookupRef.current = new Map(events.map((event) => [event.event_id, event]));
   }, [events]);
-  const [selectionEventSnapshot, setSelectionEventSnapshot] =
-    React.useState<LocalEvent[] | null>(null);
+  React.useEffect(() => {
+    const records = events
+      .map((event) => parseWorkTimelineRecord(event.type, event.content))
+      .filter((record): record is WorkTimelineRecord => {
+        if (!record) return false;
+        return record.type === "m.work_task"
+          ? record.task.room_id === room.room_id
+          : record.event.room_id === room.room_id;
+      });
+    if (records.length === 0) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setWorkUpdateState((current) => {
+        let next = current;
+        for (const record of records) {
+          try {
+            next = reduceWorkTimelineRecord(next, record);
+          } catch {
+            // The validated card can still render; an identity mutation must not
+            // erase the last coherent history already retained in this room.
+          }
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [events, room.room_id]);
+  React.useEffect(() => {
+    if (!events.some((event) => event.type === "m.progress")) return;
+    const ordered = [...events].sort((left, right) =>
+      left.created_at.localeCompare(right.created_at) || left.event_id.localeCompare(right.event_id)
+    );
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      let next = getManagerActivityState();
+      let sawActivity = false;
+      for (const event of ordered) {
+        if (event.type === "m.progress") {
+          const groupId = String(event.content.progress_group_id || event.event_id);
+          next = recordManagerActivity(
+            {
+              ...event.content,
+              room_id: room.room_id,
+              progress_group_id: groupId,
+              event_id: event.event_id,
+            },
+            {
+              room_id: room.room_id,
+              occurred_at: event.created_at,
+              frame_id: event.event_id,
+            },
+          );
+          sawActivity = true;
+        } else if (
+          sawActivity &&
+          eventReplacesManagerActivity(event)
+        ) {
+          next = settleCachedManagerActivity(room.room_id, {
+            reason: "final_message",
+            progress_group_id:
+              typeof event.content.progress_group_id === "string"
+                ? event.content.progress_group_id
+                : null,
+            occurred_at: event.created_at,
+            final_message_event_id: event.event_id,
+          });
+        }
+      }
+      if (cancelled) return;
+      setManagerActivityState(next);
+      const reconstructedProgress = cachedManagerProgress(room.room_id);
+      if (!reconstructedProgress) clearRoomProgress(room.room_id);
+      setActiveProgress((current) =>
+        current?.source === "local"
+          ? current
+          : reconstructedProgress,
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [events, room.room_id]);
   // While a desired-state mutation is in flight, this projection wins over
   // delayed/out-of-order WS echoes. Requests for the same reaction are chained
   // so rapid cross-device-style toggles converge in click order.
@@ -820,7 +1067,6 @@ export function RoomView({
   // read before this point when they are visibly rendered; hydration still
   // controls history/pagination readiness.
   const [hydrated, setHydrated] = React.useState(false);
-  const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
   // Drives the "waiting → delivered → read" activity sequence.
   const receiptTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearReceiptTimer = React.useCallback(() => {
@@ -1164,13 +1410,15 @@ export function RoomView({
   );
 
   const sectionRef = React.useRef<HTMLElement>(null);
-  // History is paged, but every loaded row stays in the DOM. Native browser
-  // ranges cannot survive a virtualizer recycling their anchor/focus nodes,
-  // especially while selection auto-scrolls across the viewport.
+  // History is paged, but every loaded row stays mounted so prepends do not
+  // recycle the nodes owned by a native text Range.
   const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
   const timelineContentRef = React.useRef<HTMLDivElement | null>(null);
   const timelineInteractionRef = React.useRef<HTMLDivElement | null>(null);
+  const pendingRoomScrollRestoreRef = React.useRef<RoomScrollMemory | null>(
+    openedScrollMemory && !openedScrollMemory.atBottom ? openedScrollMemory : null,
+  );
   // Selection is tracked imperatively so `selectstart` never schedules a
   // React render or changes timeline geometry underneath the native Range.
   const activeRoomIdRef = React.useRef(room.room_id);
@@ -1178,45 +1426,83 @@ export function RoomView({
     activeRoomIdRef.current = room.room_id;
   }, [room.room_id]);
   const selectionGestureRef = React.useRef(false);
-  const selectionEndWaitersRef = React.useRef(new Set<() => void>());
-  const updateTextSelectionActive = React.useCallback((active: boolean, renderLatest = true) => {
+  const updateTextSelectionActive = React.useCallback((active: boolean) => {
     if (textSelectionActiveRef.current === active) return;
     textSelectionActiveRef.current = active;
     if (active) {
-      setSelectionEventSnapshot((current) => current ?? eventProjectionRef.current);
       timelineInteractionRef.current?.setAttribute("data-timeline-selection-active", "true");
     } else {
-      if (renderLatest) setSelectionEventSnapshot(null);
       timelineInteractionRef.current?.removeAttribute("data-timeline-selection-active");
     }
-    if (!active && selectionEndWaitersRef.current.size > 0) {
-      const waiters = [...selectionEndWaitersRef.current];
-      selectionEndWaitersRef.current.clear();
-      waiters.forEach((resolve) => resolve());
-    }
   }, []);
-  const waitForTextSelectionEnd = React.useCallback(() => {
-    if (!textSelectionActiveRef.current) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      selectionEndWaitersRef.current.add(resolve);
-    });
-  }, []);
+  const clearTimelineTextSelection = React.useCallback(() => {
+    selectionGestureRef.current = false;
+    window.getSelection()?.removeAllRanges();
+    updateTextSelectionActive(false);
+  }, [updateTextSelectionActive]);
   // Tracks whether the user is parked at the bottom — gates "stick to bottom".
-  const stickToBottomRef = React.useRef(true);
+  const stickToBottomRef = React.useRef(openedScrollMemory?.atBottom ?? true);
   // A newly opened room owns one initial trip to the authoritative tail. Cache
   // hydration and native scroll restoration may emit passive scroll events
   // before that tail commits; those events must not strand reload in history.
-  const initialBottomPendingRef = React.useRef(true);
+  const initialBottomPendingRef = React.useRef(
+    !openedScrollMemory || openedScrollMemory.atBottom,
+  );
   // Every manual interaction advances this epoch. Delayed resize/send frames
   // must still own the same epoch before they may mutate scrollTop.
   const scrollOwnershipEpochRef = React.useRef(0);
   const pendingBottomScrollFrameRef = React.useRef<number | null>(null);
   const bottomAnimationFrameRef = React.useRef<number | null>(null);
   const lastTouchClientYRef = React.useRef<number | null>(null);
+  const scrollbarGestureRef = React.useRef<{ lastScrollTop: number } | null>(null);
   // A user-directed trip toward newer messages may explicitly renew follow
   // ownership once it reaches the physical tail. Passive layout scrolls never
   // set this flag, so media/reaction resizing cannot steal reader control.
   const returningToBottomRef = React.useRef(false);
+
+  // RoomView is keyed by room identity, so its layout-effect cleanup runs while
+  // the outgoing room's DOM and mounted rows are still measurable. Remember a
+  // stable event/pixel anchor plus the loaded projection; reopening within an
+  // hour can render that exact window before the network round-trip completes.
+  React.useLayoutEffect(() => {
+    return () => {
+      const scroller = scrollerRef.current;
+      const projectedEvents = eventProjectionRef.current;
+      if (!scroller) {
+        rememberRoomScroll(room.room_id, {
+          anchorEventId: null,
+          anchorOffset: 0,
+          scrollTop: 0,
+          atBottom: true,
+          events: projectedEvents,
+        });
+        return;
+      }
+      const viewport = scroller.getBoundingClientRect();
+      // Cleanup intentionally samples the latest message-row registry; a copy
+      // from effect setup would describe the room's first paint, not its exit.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      const anchor = [...messageNodeRefs.current.entries()]
+        .filter(([, node]) => node.isConnected)
+        .map(([eventId, node]) => {
+          const rect = node.getBoundingClientRect();
+          return { eventId, top: rect.top, bottom: rect.bottom };
+        })
+        .filter((candidate) => candidate.bottom > viewport.top && candidate.top < viewport.bottom)
+        .sort((left, right) => left.top - right.top)[0];
+      rememberRoomScroll(room.room_id, {
+        anchorEventId: anchor?.eventId ?? null,
+        anchorOffset: anchor ? anchor.top - viewport.top : 0,
+        scrollTop: scroller.scrollTop,
+        atBottom: isTimelineAtBottom({
+          scrollHeight: scroller.scrollHeight,
+          scrollTop: scroller.scrollTop,
+          clientHeight: scroller.clientHeight,
+        }),
+        events: projectedEvents,
+      });
+    };
+  }, [room.room_id]);
   // The first visible event and its exact viewport pixel remain authoritative
   // while a prepended page finishes sizing. Older media, previews, fonts, and
   // sender regrouping can all change height after the first React commit.
@@ -1298,7 +1584,11 @@ export function RoomView({
     stickToBottomRef.current = false;
     returningToBottomRef.current = false;
     scrollOwnershipEpochRef.current += 1;
-    clearHistoryViewportAnchor();
+    // Explicit reader input always wins, including during the narrow window
+    // between accepting an older-history page and committing its rows. Leaving
+    // an awaiting anchor alive here lets its later correction undo the user's
+    // wheel/drag and makes the scroller feel locked.
+    clearHistoryViewportAnchor(true);
     cancelPendingBottomScroll();
     cancelBottomAnimation();
   }, [cancelBottomAnimation, cancelPendingBottomScroll, clearHistoryViewportAnchor]);
@@ -1363,7 +1653,9 @@ export function RoomView({
   }, [cancelPendingBottomScroll, scrollToBottom]);
 
   const activateBottomFollowFromArrow = React.useCallback(() => {
-    if (textSelectionActiveRef.current) return;
+    // A double-click leaves a persistent browser Range. It must not disable the
+    // explicit page-down control; clear it and let the user's click win.
+    clearTimelineTextSelection();
     clearHistoryViewportAnchor(true);
     initialBottomPendingRef.current = false;
     scrollOwnershipEpochRef.current += 1;
@@ -1372,7 +1664,7 @@ export function RoomView({
     setTimelineAtBottom(true);
     setUnseenBelow(0);
     animateToBottom();
-  }, [animateToBottom, clearHistoryViewportAnchor]);
+  }, [animateToBottom, clearHistoryViewportAnchor, clearTimelineTextSelection]);
 
   const acquireBottomFollowAtCurrentTail = React.useCallback(() => {
     const scroller = scrollerRef.current;
@@ -1420,18 +1712,22 @@ export function RoomView({
     const onSelectStart = (event: globalThis.Event) => {
       const target = event.target;
       if (!(target instanceof Node) || !root.contains(target)) return;
-      // A native selection gesture owns the viewport until the reader
-      // explicitly returns to the end. Never let a heartbeat or resize pull it.
-      releaseBottomStick();
+      // `selectstart` also fires for an ordinary click. Do not freeze the event
+      // projection until the browser confirms that the Range actually spans
+      // text.
       selectionGestureRef.current = true;
-      updateTextSelectionActive(true);
     };
     const onSelectionChange = () => {
+      const selectionActive = hasTimelineSelection();
+      if (selectionActive && !textSelectionActiveRef.current) {
+        // A real native selection now owns the viewport until the reader
+        // explicitly returns to the end. Heartbeats and resizes cannot pull it.
+        releaseBottomStick();
+      }
       if (selectionGestureRef.current) {
-        if (hasTimelineSelection()) updateTextSelectionActive(true);
+        if (selectionActive) updateTextSelectionActive(true);
         return;
       }
-      const selectionActive = hasTimelineSelection();
       updateTextSelectionActive(selectionActive);
     };
     const onPointerEnd = () => {
@@ -1449,19 +1745,9 @@ export function RoomView({
       window.removeEventListener("pointerup", onPointerEnd);
       window.removeEventListener("pointercancel", onPointerEnd);
       selectionGestureRef.current = false;
-      updateTextSelectionActive(false, false);
+      updateTextSelectionActive(false);
     };
   }, [releaseBottomStick, room.room_id, updateTextSelectionActive]);
-
-  // A history page that finishes while the user is selecting must not prepend
-  // and regroup the first row underneath the browser's live Range.
-  // Release any waiter on unmount/room change as well so no request is left
-  // suspended behind a selection that belongs to an obsolete timeline.
-  React.useEffect(() => () => {
-    const waiters = [...selectionEndWaitersRef.current];
-    selectionEndWaitersRef.current.clear();
-    waiters.forEach((resolve) => resolve());
-  }, [room.room_id]);
 
   // ----- Photo URL lookup per sender (for in-message avatars) -----
   const peerByHandle = React.useMemo(() => {
@@ -1655,20 +1941,28 @@ export function RoomView({
     scrollOwnershipEpochRef.current += 1;
     cancelPendingBottomScroll();
     cancelBottomAnimation();
-    initialBottomPendingRef.current = true;
-    stickToBottomRef.current = true;
+    const restoringRememberedPosition = Boolean(
+      openedScrollMemory && !openedScrollMemory.atBottom,
+    );
+    pendingRoomScrollRestoreRef.current = restoringRememberedPosition
+      ? openedScrollMemory
+      : null;
+    initialBottomPendingRef.current = !restoringRememberedPosition;
+    stickToBottomRef.current = !restoringRememberedPosition;
     const roomOpenScrollEpoch = scrollOwnershipEpochRef.current;
     clearHistoryViewportAnchor(true);
     const cachedEvents = seedTimelineWithRoomTail(
       openedRoomProjection,
-      readRoomEventSnippet(roomId) ?? [],
+      openedScrollMemory?.events.length
+        ? openedScrollMemory.events
+        : (readRoomEventSnippet(roomId) ?? []),
     );
     // eslint-disable-next-line react-hooks/set-state-in-effect -- room changes require one atomic pre-paint reset so stale timeline/outbox state never appears in the next room.
     setLoading(!cachedEvents.some(isTimelineEvent));
     setHydrated(false);
-    // Messages present when the chat opens are historical — force them final so
-    // a missed finalize frame doesn't replay the "streaming…" state as if the
-    // message just arrived. Live streaming still flows in via WS frames.
+    // The handoff cache can contain a currently streaming message. Preserve
+    // its authoritative final bit so it cannot prematurely replace a live
+    // manager-activity run while this room opens.
     setEvents(
       cachedEvents.map((e) => {
         const local = e as LocalEvent;
@@ -1679,7 +1973,7 @@ export function RoomView({
             : undefined;
         return {
           ...e,
-          is_final: true,
+          is_final: e.is_final !== false,
           _status: cachedStatus ?? fallbackStatus,
         };
       }),
@@ -1687,7 +1981,8 @@ export function RoomView({
     // Restore an in-flight silicon progress line captured at the page level
     // while this room was closed, so reopening a chat where work is still
     // running shows progress immediately instead of waiting for the next frame.
-    setActiveProgress(getRoomProgress(roomId));
+    setActiveProgress(getRoomProgress(roomId) ?? cachedManagerProgress(roomId));
+    setManagerActivityState(getManagerActivityState());
     clearReceiptTimer();
     setActivities({});
     restoredDraftReplyIdRef.current = null;
@@ -1699,8 +1994,8 @@ export function RoomView({
     setFocusSender(null);
     setProfileOpen(false);
     setUnseenBelow(0);
-    timelineTailVisibleRef.current = true;
-    setTimelineAtBottom(true);
+    timelineTailVisibleRef.current = !restoringRememberedPosition;
+    setTimelineAtBottom(!restoringRememberedPosition);
     deltaBufferRef.current.clear();
     firstContactRef.current = false;
     let durableCacheAvailable = false;
@@ -1722,8 +2017,6 @@ export function RoomView({
       let ownsOlderIndicator = false;
       let indicatorVisibleAt = performance.now();
       if (protectReaderPosition) {
-        await waitForTextSelectionEnd();
-        if (!mounted) return;
         if (!loadingOlderRef.current) {
           loadingOlderRef.current = true;
           ownsOlderIndicator = true;
@@ -1900,10 +2193,9 @@ export function RoomView({
       .then(async ({ events: evs, hasMore, cursor, boundaryEventId }) => {
         if (!mounted) return;
         reportHistoryHealthy();
-        // Loaded history is complete — mark final so it doesn't replay
-        // "streaming…" on open (live deltas still arrive via WS). Reconcile
-        // the full cached set so read/delivered ticks survive hydration.
-        const finalized = evs.map((e) => ({ ...e, is_final: true }));
+        // Reconcile the full authoritative window so read/delivered ticks and
+        // an in-flight event's final bit both survive hydration.
+        const finalized = evs.map((e) => ({ ...e, is_final: e.is_final !== false }));
         await commitInitialTimelineRows(finalized);
         void persistHistoryEvents(finalized).catch(() => undefined);
         if (!mounted) return;
@@ -1934,6 +2226,7 @@ export function RoomView({
     cancelPendingBottomScroll,
     clearHistoryViewportAnchor,
     openedRoomProjection,
+    openedScrollMemory,
     room.room_id,
     myUsername,
     clearReceiptTimer,
@@ -1945,7 +2238,6 @@ export function RoomView({
     scheduleBottomScroll,
     setEvents,
     timelineOwner,
-    waitForTextSelectionEnd,
   ]);
 
   // The page-level worker owns retries even when the originating composer is
@@ -2033,9 +2325,13 @@ export function RoomView({
           // connect of a fresh page load, and the cache (persisted across
           // refresh) is the only record of an in-flight task. A local receipt
           // line is left alone. If the task finished, the cache was cleared by a
-          // `done`/message frame and this resolves to null.
+          // final message; a done run without a final message retains its
+          // expandable activity history.
+          setManagerActivityState(getManagerActivityState());
           setActiveProgress((p) =>
-            p && p.source !== "server" ? p : getRoomProgress(room.room_id),
+            p && p.source !== "server"
+              ? p
+              : getRoomProgress(room.room_id) ?? cachedManagerProgress(room.room_id),
           );
         })
         .catch((error) => reportHistoryFailure(error));
@@ -2265,35 +2561,48 @@ export function RoomView({
       const updatesExisting = events.some((e) => e.event_id === incoming.event_id);
       if (incoming.type === "m.progress") {
         const state = (incoming.content.state as ProgressState) || "thinking";
+        const groupId = String(incoming.content.progress_group_id || incoming.event_id);
+        const nextManagerActivity = recordManagerActivity(
+          {
+            ...incoming.content,
+            room_id: room.room_id,
+            progress_group_id: groupId,
+            event_id: incoming.event_id,
+          },
+          {
+            room_id: room.room_id,
+            occurred_at: incoming.created_at,
+            frame_id: incoming.event_id,
+          },
+        );
+        setManagerActivityState(nextManagerActivity);
         clearReceiptTimer(); // real progress takes over from any receipt line
-        if (state === "done") {
-          // Done just clears the live ProgressLine — no timeline row. The
-          // silicon's own follow-up message carries the outcome.
-          setActiveProgress(null);
-        } else {
-          setActiveProgress({
-            roomId: room.room_id,
-            groupId: String(incoming.content.progress_group_id || incoming.event_id),
-            state,
-            note: String(incoming.content.note || ""),
-            updatedAt: Date.now(),
-            source: "server",
-            pct: numOrNull(incoming.content.progress_pct),
-            handle: incoming.sender_handle,
-            anchorEventId: incoming.content.run_anchor_event_id
-              ? String(incoming.content.run_anchor_event_id)
-              : null,
-          });
-        }
+        const incomingProgress: ProgressEntry = {
+          roomId: room.room_id,
+          groupId,
+          state,
+          note: String(incoming.content.note || ""),
+          updatedAt: Date.now(),
+          source: "server",
+          pct: numOrNull(incoming.content.progress_pct),
+          handle: incoming.sender_handle,
+          anchorEventId: incoming.content.run_anchor_event_id
+            ? String(incoming.content.run_anchor_event_id)
+            : null,
+        };
+        setActiveProgress((current) =>
+          managerProgressAfterFrame(room.room_id, current, incomingProgress)
+        );
         return;
-      }
-      if (!updatesExisting && !mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) {
-        clearReceiptTimer();
-        setActiveProgress(null);
       }
       // Count genuinely new incoming messages while the user is reading
       // history. Existing-event updates (edits/finalization) do not badge.
-      if (!updatesExisting && !mine && PROGRESS_MESSAGE_TYPES.has(incoming.type) && !stickToBottomRef.current) {
+      if (
+        !updatesExisting &&
+        !mine &&
+        (PROGRESS_MESSAGE_TYPES.has(incoming.type) || workEventCountsAsUnread(incoming)) &&
+        !stickToBottomRef.current
+      ) {
         setUnseenBelow((count) => count + 1);
       }
       // The received tone is played once, globally, by the chat page (so it
@@ -2311,6 +2620,21 @@ export function RoomView({
             body: ((incoming.content.body as string) ?? "") + buffered.body,
           },
         };
+      }
+      if (!updatesExisting && !mine && eventReplacesManagerActivity(merged)) {
+        clearReceiptTimer();
+        const settled = settleCachedManagerActivity(room.room_id, {
+          reason: "final_message",
+          progress_group_id:
+            typeof merged.content.progress_group_id === "string"
+              ? merged.content.progress_group_id
+              : null,
+          occurred_at:
+            incoming.is_final === false ? new Date().toISOString() : merged.created_at,
+          final_message_event_id: merged.event_id,
+        });
+        setManagerActivityState(settled);
+        setActiveProgress(cachedManagerProgress(room.room_id));
       }
       recentServerEventRef.current.set(merged.event_id, merged);
       if (recentServerEventRef.current.size > 256) {
@@ -2382,6 +2706,26 @@ export function RoomView({
         return updated;
       });
     } else if (f.type === "event.final") {
+      const pendingEvent = eventLookupRef.current.get(f.event_id) ??
+        recentServerEventRef.current.get(f.event_id);
+      if (pendingEvent) {
+        const finalizedEvent = { ...pendingEvent, is_final: true };
+        recentServerEventRef.current.set(f.event_id, finalizedEvent);
+        if (eventReplacesManagerActivity(finalizedEvent)) {
+          clearReceiptTimer();
+          const settled = settleCachedManagerActivity(room.room_id, {
+            reason: "final_message",
+            progress_group_id:
+              typeof finalizedEvent.content.progress_group_id === "string"
+                ? finalizedEvent.content.progress_group_id
+                : null,
+            occurred_at: new Date().toISOString(),
+            final_message_event_id: finalizedEvent.event_id,
+          });
+          setManagerActivityState(settled);
+          setActiveProgress(cachedManagerProgress(room.room_id));
+        }
+      }
       setEvents((prev) => {
         const idx = prev.findIndex((e) => e.event_id === f.event_id);
         if (idx < 0) {
@@ -2496,22 +2840,27 @@ export function RoomView({
       }
     } else if (f.type === "progress") {
       if (f.state && f.progress_group_id) {
+        const occurredAt = new Date().toISOString();
+        const nextManagerActivity = recordManagerActivity(f, {
+          room_id: room.room_id,
+          occurred_at: occurredAt,
+        });
+        setManagerActivityState(nextManagerActivity);
         clearReceiptTimer(); // real progress takes over from any receipt line
-        if (f.state === "done") {
-          setActiveProgress(null);
-        } else {
-          setActiveProgress({
-            roomId: room.room_id,
-            groupId: f.progress_group_id,
-            state: f.state as ProgressState,
-            note: f.note || "",
-            updatedAt: Date.now(),
-            source: "server",
-            pct: numOrNull(f.progress_pct),
-            handle: f.member_handle ?? null,
-            anchorEventId: f.run_anchor_event_id ?? null,
-          });
-        }
+        const incomingProgress: ProgressEntry = {
+          roomId: room.room_id,
+          groupId: f.progress_group_id,
+          state: f.state as ProgressState,
+          note: f.note || "",
+          updatedAt: Date.now(),
+          source: "server",
+          pct: numOrNull(f.progress_pct),
+          handle: f.member_handle ?? null,
+          anchorEventId: f.run_anchor_event_id ?? null,
+        };
+        setActiveProgress((current) =>
+          managerProgressAfterFrame(room.room_id, current, incomingProgress)
+        );
       }
       // #5 — Activity beacon (typing | uploading | recording). Skip my own
       // beacons; track per-handle so we can show "@alice is recording…"
@@ -2679,13 +3028,13 @@ export function RoomView({
     if (!scroller) return;
     const viewport = scroller.getBoundingClientRect();
     const candidates: Array<{ event: Event; top: number; bottom: number; height: number }> = [];
-    for (const event of events) {
+    for (const [eventId, node] of messageNodeRefs.current) {
+      const event = eventLookupRef.current.get(eventId);
       if (
+        !event ||
         !hasAuthoritativeEventId(event) ||
         !isUnreadEligibleEvent(event)
       ) continue;
-      const node = messageNodeRefs.current.get(event.event_id);
-      if (!node) continue;
       const rect = node.getBoundingClientRect();
       candidates.push({ event, top: rect.top, bottom: rect.bottom, height: rect.height });
     }
@@ -2698,7 +3047,7 @@ export function RoomView({
     );
     if (!target) return;
     commitReadTarget(target);
-  }, [commitReadTarget, events, myUsername, readOnly]);
+  }, [commitReadTarget, myUsername, readOnly]);
 
   React.useEffect(() => {
     const run = () => requestAnimationFrame(markVisibleRead);
@@ -3178,7 +3527,7 @@ export function RoomView({
     return out;
   }, [selectedEventIds, events]);
 
-  const renderedEvents = selectionEventSnapshot ?? events;
+  const renderedEvents = events;
 
   // Aggregate reactions: target_event_id → { emoji → [sender_handle] }
   const reactionsByTarget = React.useMemo(() => {
@@ -3454,7 +3803,10 @@ export function RoomView({
             break;
           }
           setEvents((prev) => {
-            const finalized = older.map((event) => ({ ...event, is_final: true }));
+            const finalized = older.map((event) => ({
+              ...event,
+              is_final: event.is_final !== false,
+            }));
             return mergeServerEvents(
               prev,
               finalized,
@@ -3526,6 +3878,15 @@ export function RoomView({
     ],
   );
   /* eslint-enable react-hooks/immutability */
+
+  React.useEffect(() => {
+    const eventId = takeRoomEventJump(room.room_id);
+    if (!eventId) return;
+    const frame = window.requestAnimationFrame(() => {
+      void jumpToReplyTarget(eventId);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [jumpToReplyTarget, room.room_id]);
 
   // The studio hands off a flattened annotation set here: reply to the original
   // file message (so replies + the silicon have a clear reference) and stage the
@@ -3638,8 +3999,6 @@ export function RoomView({
   );
 
   const onAck = React.useCallback((clientId: string, real: Event) => {
-    // Sent — the sidebar's last_event will reflect it; drop the pending preview.
-    markPendingPreviewAccepted(room.room_id, clientId);
     let identity = bindAcceptedTimelineEvent(timelineOwner, clientId, real);
     if (!identity) {
       identity = ensureTimelineIdentitySync(
@@ -3652,6 +4011,13 @@ export function RoomView({
     }
     const accepted = applyTimelineIdentity(real, identity, true) as LocalEvent;
     onEventAccepted?.(accepted);
+    // Keep the accepted text in the sidebar until its room projection catches
+    // this exact event. Clearing first can expose the previous message for a
+    // render (or indefinitely when a slower room snapshot races the ack).
+    markPendingPreviewAccepted(room.room_id, clientId, {
+      eventId: accepted.event_id,
+      at: accepted.created_at,
+    });
     appendRoomEventSnippet(room.room_id, {
       ...accepted,
       _status: "sent",
@@ -3673,6 +4039,27 @@ export function RoomView({
     // Server acceptance is still waiting; a recipient receipt upgrades it.
     if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(real.type)) {
       showReceipt("waiting");
+    }
+    if (real.delivery_state === "queued_for_maintenance") {
+      const queuedFor = real.maintenance_recipients?.length
+        ? real.maintenance_recipients
+        : real.maintenance
+          ? [real.maintenance]
+          : [];
+      const names = queuedFor
+        .map((recipient) => recipient.name)
+        .filter((name): name is string => Boolean(name));
+      toast.info("Message safely queued", {
+        id: `maintenance-queued:${real.event_id}`,
+        description:
+          names.length === 1
+            ? `${names[0]} is updating. ${
+              real.delivery_acknowledgement ||
+              "You do not need to resend this message."
+            }`
+            : real.delivery_acknowledgement ||
+              "Silicon is updating. You do not need to resend this message.",
+      });
     }
   }, [
     showsProgressForReplies,
@@ -4153,7 +4540,7 @@ export function RoomView({
             return;
           }
           if (action === "repair_session") {
-            router.push("/auth/login?notice=session-expired");
+            toast.info("Session renewal will keep retrying automatically.");
             return;
           }
           if (action === "repair_device" && !(await ensureDeviceRegistration())) {
@@ -4248,7 +4635,7 @@ export function RoomView({
           return;
         }
         if (action === "repair_session") {
-          router.push("/auth/login?notice=session-expired");
+          toast.info("Session renewal will keep retrying automatically.");
           return;
         }
         if (action === "request_access") {
@@ -4275,7 +4662,6 @@ export function RoomView({
       releaseCorrection,
       copyEventToComposer,
       room.room_id,
-      router,
       setEvents,
       setPendingTextCorrection,
       setReplacementTarget,
@@ -4614,6 +5000,10 @@ export function RoomView({
       pinsByKey: pins,
     };
   }, [filteredEvents]);
+  const canonicalDisplayRows = React.useMemo(
+    () => dedupeWorkTimelineEnvelopes(displayRows),
+    [displayRows],
+  );
   const cancelLatestHeld = () => {
     for (let i = visibleEvents.length - 1; i >= 0; i--) {
       const event = visibleEvents[i] as LocalEvent;
@@ -4630,6 +5020,10 @@ export function RoomView({
   // still in flight — including inter-silicon chats where every message is a
   // silicon, and multi-step tasks that post then keep working.
   const shouldShowActiveProgress = !search && activeProgress?.roomId === room.room_id;
+  const activeManagerActivityGroups = React.useMemo(
+    () => visibleManagerActivityGroups(managerActivityState, room.room_id),
+    [managerActivityState, room.room_id],
+  );
   const progressAvatarHandle = React.useMemo(() => {
     // §1.6 — prefer the handle the progress frame actually attributed the work
     // to, instead of guessing "most recent silicon sender".
@@ -4653,8 +5047,8 @@ export function RoomView({
   // swap, so identity beats timestamps here (wall-clock skew put the status
   // above the latest message). Record the newest message's key when a run
   // begins.
-  const lastRowKey = displayRows.length
-    ? timelineRenderKey(displayRows[displayRows.length - 1])
+  const lastRowKey = canonicalDisplayRows.length
+    ? timelineRenderKey(canonicalDisplayRows[canonicalDisplayRows.length - 1])
     : null;
   const [runAnchorKey, setRunAnchorKey] = React.useState<string | null>(null);
   // Capture the anchor ONCE, on the rising edge of "a run is active" — the
@@ -4701,12 +5095,12 @@ export function RoomView({
       return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     };
 
-    // Run anchors control progress placement only. Message rows always retain
-    // Glass' chronological order; moving a late reply beside an older prompt
-    // makes the newest message appear in the middle of the conversation.
-    const present = new Set(displayRows.map((e) => e.event_id));
+    // Glass owns the run association. Reorder only replies whose server anchor
+    // is present in this loaded window; partial history and old servers retain
+    // their canonical stream order.
+    const present = new Set(canonicalDisplayRows.map((e) => e.event_id));
     const repliesByAnchor = new Map<string, Row[]>();
-    for (const e of displayRows) {
+    for (const e of canonicalDisplayRows) {
       const anchor = e.run_anchor_event_id;
       if (e.sender_kind === "silicon" && anchor && present.has(anchor)) {
         const list = repliesByAnchor.get(anchor) ?? [];
@@ -4714,31 +5108,30 @@ export function RoomView({
         repliesByAnchor.set(anchor, list);
       }
     }
-    const rows: Row[] = displayRows;
+    const rows: Row[] = orderRunAnchoredReplies(canonicalDisplayRows);
 
     const runActiveRaw = !search && shouldShowActiveProgress && !holdingMessage;
-    let lastReal: Row | null = null;
-    for (let i = rows.length - 1; i >= 0; i--) {
-      if (!isSystem(rows[i])) {
-        lastReal = rows[i];
-        break;
-      }
-    }
     // Prefer the server anchor; fall back to the client rising-edge anchor when
     // the backend doesn't stamp one (older server, or a cron/proactive run).
     const useServerAnchor = !!activeAnchorId && present.has(activeAnchorId);
     let runActive: boolean;
-    if (useServerAnchor) {
-      // Show the status until a reply for this run lands (an anchored reply).
-      runActive = runActiveRaw && !repliesByAnchor.has(activeAnchorId);
+    if (activeManagerActivityGroups.length > 0) {
+      // Canonical room-scoped groups already encode final-message settlement.
+      // Do not let a stale legacy anchor hide another group's retained history.
+      runActive = runActiveRaw;
+    } else if (useServerAnchor) {
+      // Interim normal messages and durable work cards may be anchored to the
+      // same run. Only a committed conversational answer replaces activity.
+      const replacingReply = repliesByAnchor.get(activeAnchorId)?.some(
+        eventReplacesManagerActivity,
+      ) ?? false;
+      runActive = runActiveRaw && !replacingReply;
     } else {
       const anchorIdx =
         runActiveRaw && runAnchorKey ? rows.findIndex((e) => keyOf(e) === runAnchorKey) : -1;
       const repliedAfterAnchor =
-        anchorIdx >= 0 && rows.slice(anchorIdx + 1).some((e) => e.sender_kind === "silicon");
-      runActive =
-        runActiveRaw &&
-        (room.observed ? !repliedAfterAnchor : lastReal?.sender_kind !== "silicon");
+        anchorIdx >= 0 && rows.slice(anchorIdx + 1).some(eventReplacesManagerActivity);
+      runActive = runActiveRaw && !repliedAfterAnchor;
     }
 
     const raw: Array<{ item: Item; iso: string }> = [];
@@ -4807,22 +5200,59 @@ export function RoomView({
     }
     return raw.map((r) => r.item);
   }, [
-    displayRows,
+    canonicalDisplayRows,
     search,
     shouldShowActiveProgress,
     holdingMessage,
     runAnchorKey,
-    room.observed,
     activeAnchorId,
+    activeManagerActivityGroups.length,
   ]);
+
+  // Keep every loaded row mounted. Message panels have dynamic heights (media,
+  // link previews, edits and progress rows), so recycling them from estimates
+  // can move the viewport when a row is measured or an ordinary click rerenders.
+  // History remains paged; stable mounted nodes keep scroll and selections exact.
+  React.useLayoutEffect(() => {
+    const remembered = pendingRoomScrollRestoreRef.current;
+    const scroller = scrollerRef.current;
+    if (!remembered || !scroller || timelineItems.length === 0 || search?.trim()) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingRoomScrollRestoreRef.current !== remembered) return;
+      const node = remembered.anchorEventId
+        ? messageNodeRefs.current.get(remembered.anchorEventId)
+        : null;
+      if (node?.isConnected) {
+        const actualOffset =
+          node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+        scroller.scrollTop += actualOffset - remembered.anchorOffset;
+      } else {
+        const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        scroller.scrollTop = Math.min(remembered.scrollTop, maxTop);
+      }
+      pendingRoomScrollRestoreRef.current = null;
+      initialBottomPendingRef.current = false;
+      stickToBottomRef.current = false;
+      timelineTailVisibleRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [search, timelineItems]);
 
   const lastTimelineEventId = displayRows.length
     ? displayRows[displayRows.length - 1].event_id
     : null;
+  // File bundles render their text/caption event as the visible timeline row;
+  // the trailing media event is only a pin inside it. Resolve that projection
+  // before testing visibility or the arrow can remain over a visibly-latest
+  // message even though its raw media event has no standalone DOM node.
+  const lastRenderedTimelineEventId = lastTimelineEventId
+    ? renderedEventIdFor(lastTimelineEventId)
+    : null;
   const newestMessageIsVisible = React.useCallback(() => {
     const scroller = scrollerRef.current;
-    const node = lastTimelineEventId
-      ? messageNodeRefs.current.get(lastTimelineEventId)
+    const node = lastRenderedTimelineEventId
+      ? messageNodeRefs.current.get(lastRenderedTimelineEventId)
       : null;
     if (!scroller || !node) return false;
     const viewport = scroller.getBoundingClientRect();
@@ -4833,7 +5263,7 @@ export function RoomView({
       messageTop: message.top,
       messageBottom: message.bottom,
     });
-  }, [lastTimelineEventId]);
+  }, [lastRenderedTimelineEventId]);
 
   // Restore the exact event/pixel captured before a prepend. Keep the anchor
   // alive after this first pre-paint correction: late media/preview sizing is
@@ -4951,6 +5381,20 @@ export function RoomView({
     [allRooms, room.room_id, router],
   );
 
+  const seeProfileAttachmentInChat = React.useCallback(
+    (eventId: string, targetRoomId: string) => {
+      setProfileOpen(false);
+      setFocusSender(null);
+      if (targetRoomId === room.room_id) {
+        void jumpToReplyTarget(eventId);
+        return;
+      }
+      queueRoomEventJump(targetRoomId, eventId);
+      router.push(`/chat?room=${encodeURIComponent(targetRoomId)}`);
+    },
+    [jumpToReplyTarget, room.room_id, router],
+  );
+
   // §2.7 — load the previous page of history (the API supports a `before`
   // cursor). Prepends older events; the stable event/pixel snapshot keeps the
   // viewport anchored (see the prepend effect above).
@@ -5022,10 +5466,6 @@ export function RoomView({
         cursor: olderCursor,
         boundaryEventId: olderBoundaryEventId,
       } = result;
-      // Preserve the native Range if this request began before selection.
-      // Applying the prepend after selection clears is lossless and avoids a
-      // virtual-row re-key underneath the browser.
-      await waitForTextSelectionEnd();
       if (activeRoomIdRef.current !== requestedRoomId) return;
       if (older.length === 0) {
         setHasMore(false);
@@ -5041,7 +5481,10 @@ export function RoomView({
       // taller document, even when the page came from IndexedDB or memory.
       flushSync(() => {
         setEvents((prev) => {
-          const finalized = older.map((event) => ({ ...event, is_final: true }));
+          const finalized = older.map((event) => ({
+            ...event,
+            is_final: event.is_final !== false,
+          }));
           return mergeServerEvents(
             prev,
             finalized,
@@ -5089,7 +5532,6 @@ export function RoomView({
     persistHistoryEvents,
     preserveHistoryViewportAnchor,
     setEvents,
-    waitForTextSelectionEnd,
   ]);
 
   // If the history cursor arrives while the viewport is already parked at the
@@ -5099,7 +5541,6 @@ export function RoomView({
     const scroller = scrollerRef.current;
     if (!hydrated || !scroller) return;
     if (shouldLoadOlderNearTimelineTop({
-      selectionActive: textSelectionActiveRef.current,
       scrollTop: scroller.scrollTop,
       hasMore,
       loadingOlder: loadingOlderRef.current,
@@ -5148,17 +5589,52 @@ export function RoomView({
         <>
           {dayBand}
           <div className="my-3">
-            <ProgressLine
-              entry={activeProgress}
-              avatarSeed={progressAvatarHandle || headerSeed}
-              avatarSrc={progressAvatarSrc}
-              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
-              staleMs={progressStaleMs}
-              onDismiss={() => {
-                clearRoomProgress(room.room_id);
-                setActiveProgress(null);
-              }}
-            />
+            {activeManagerActivityGroups.length > 0 ? (
+              <div className="grid gap-2">
+                {activeManagerActivityGroups.map((group) => (
+                  <WorkManagerActivityHistory
+                    key={`${group.room_id}:${group.progress_group_id}`}
+                    group={group}
+                    avatarSeed={
+                      (progressAvatarHandle
+                        ? peerByHandle.get(progressAvatarHandle)?.id
+                        : null) ||
+                      progressAvatarHandle ||
+                      headerSeed
+                    }
+                    avatarSrc={progressAvatarSrc}
+                    avatarAsciiSrc={
+                      progressAvatarHandle
+                        ? asciiFor("silicon", progressAvatarHandle) ?? headerAscii
+                        : headerAscii
+                    }
+                    avatarFamily={
+                      (progressAvatarHandle
+                        ? peerByHandle.get(progressAvatarHandle)?.kind
+                        : null) ?? "silicon"
+                    }
+                  />
+                ))}
+              </div>
+            ) : (
+              <ProgressLine
+                entry={activeProgress}
+                avatarSeed={progressAvatarHandle || headerSeed}
+                avatarSrc={progressAvatarSrc}
+                avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
+                staleMs={progressStaleMs}
+                onDismiss={() => {
+                  const settled = settleCachedManagerActivity(room.room_id, {
+                    reason: "dismissed",
+                    progress_group_id: activeProgress.groupId,
+                    occurred_at: new Date().toISOString(),
+                  });
+                  setManagerActivityState(settled);
+                  clearRoomProgress(room.room_id);
+                  setActiveProgress(cachedManagerProgress(room.room_id));
+                }}
+              />
+            )}
           </div>
         </>
       );
@@ -5171,6 +5647,22 @@ export function RoomView({
           {item.events.map((e, j) => {
             const renderedId = e.event_id;
             const authoritative = hasAuthoritativeEventId(e);
+            const parsedWorkCandidate = parseWorkTimelineRecord(e.type, e.content);
+            const parsedWork = parsedWorkCandidate && (
+              parsedWorkCandidate.type === "m.work_task"
+                ? parsedWorkCandidate.task.room_id === room.room_id
+                : parsedWorkCandidate.event.room_id === room.room_id
+            )
+              ? parsedWorkCandidate
+              : null;
+            const workRecord = parsedWork
+              ? materializedWorkRecord(workUpdateState, parsedWork)
+              : null;
+            const workEventIsMine = isMyEvent(e, myUsername);
+            const showWorkTaskAvatar =
+              workRecord?.type === "m.work_task" &&
+              !workEventIsMine &&
+              e.sender_kind === "silicon";
             return (
               <React.Fragment key={timelineRenderKey(e)}>
                 <div
@@ -5186,6 +5678,40 @@ export function RoomView({
                     highlightedEventId === renderedId && "bg-primary/5 ring-2 ring-primary/40",
                   )}
                 >
+                {workRecord ? (
+                  <div
+                    className={cn(
+                      "flex w-full items-start",
+                      workEventIsMine ? "justify-end" : "justify-start",
+                      showWorkTaskAvatar && "gap-2",
+                    )}
+                  >
+                    {showWorkTaskAvatar ? (
+                      <IdAvatar
+                        seed={e.sender_public_id || e.sender_handle || "?"}
+                        src={photoFor(e.sender_kind, e.sender_handle)}
+                        asciiSrc={asciiFor(e.sender_kind, e.sender_handle)}
+                        size={28}
+                        family="silicon"
+                        className="mt-0.5"
+                      />
+                    ) : null}
+                    <WorkEventCard
+                      event={workRecord}
+                      task={
+                        workRecord.type === "m.work_event"
+                          ? workUpdateState.tasks[workRecord.event.task_id]
+                          : undefined
+                      }
+                      onReply={
+                        readOnly || !authoritative || workRecord.type !== "m.work_event" ||
+                          workRecord.event.kind !== "blocker"
+                          ? undefined
+                          : () => onReply(e)
+                      }
+                    />
+                  </div>
+                ) : (
                 <MessageBubble
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
@@ -5256,6 +5782,7 @@ export function RoomView({
                   mentionTargets={messageMentionTargets}
                   onMentionClick={openSenderProfile}
                 />
+                )}
                 </div>
               </React.Fragment>
             );
@@ -5461,6 +5988,7 @@ export function RoomView({
         focusSender={focusSender}
         contentRoomId={focusSender ? focusedDirectRoom?.room_id ?? null : room.room_id}
         onMessage={focusSender || peer ? openDirectMessage : undefined}
+        onSeeInChat={seeProfileAttachmentInChat}
       />
 
       {/* data-private masks all message text out of PostHog session replays
@@ -5470,8 +5998,7 @@ export function RoomView({
         className="relative flex min-h-0 min-w-0 flex-1"
       >
       {searching ? (
-        // Search results are a small, bounded set — a plain scroll area is fine
-        // (no virtualization needed).
+        // Search results are a small, bounded set with their own plain scroll area.
         <ScrollArea ref={scrollRootRef} className="flex-1" data-private>
           <div className="w-full px-6 py-4">
             {searchNotice ? (
@@ -5540,15 +6067,29 @@ export function RoomView({
           className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [overflow-anchor:none] [overscroll-behavior-y:contain]"
           onPointerDownCapture={(event) => {
             if (event.button === 0 && event.target === event.currentTarget) {
-              // A pointer on the bare scroll surface includes scrollbar drags.
-              // Revoke synchronously; the later scroll event is too late to
-              // beat a resize/incoming-message bottom correction.
-              releaseBottomStick();
-              returningToBottomRef.current = true;
+              // A pointer on the bare surface includes scrollbar interaction,
+              // but merely pressing it is not an upward-scroll intent. Keep an
+              // arrow-acquired follow epoch until the scrollbar actually moves
+              // toward history.
+              scrollbarGestureRef.current = {
+                lastScrollTop: event.currentTarget.scrollTop,
+              };
+              cancelPendingBottomScroll();
             }
           }}
+          onPointerUpCapture={() => {
+            scrollbarGestureRef.current = null;
+          }}
+          onPointerCancelCapture={() => {
+            scrollbarGestureRef.current = null;
+          }}
           onWheelCapture={(event) => {
-            clearHistoryViewportAnchor();
+            clearHistoryViewportAnchor(true);
+            // A wheel gesture owns the viewport immediately. Even a downward
+            // gesture can arrive while the page-down animation is still
+            // writing scrollTop; stop that writer before native scrolling.
+            cancelBottomAnimation();
+            cancelPendingBottomScroll();
             if (
               initialBottomPendingRef.current ||
               wheelMovesTowardTimelineHistory(event.deltaY)
@@ -5556,11 +6097,11 @@ export function RoomView({
               releaseBottomStick();
             } else {
               returningToBottomRef.current = event.deltaY > 0;
-              cancelPendingBottomScroll();
             }
           }}
           onTouchStartCapture={(event) => {
-            clearHistoryViewportAnchor();
+            clearHistoryViewportAnchor(true);
+            cancelBottomAnimation();
             if (initialBottomPendingRef.current) releaseBottomStick();
             else cancelPendingBottomScroll();
             returningToBottomRef.current = false;
@@ -5591,7 +6132,20 @@ export function RoomView({
             lastTouchClientYRef.current = null;
           }}
           onKeyDownCapture={(event) => {
-            clearHistoryViewportAnchor();
+            const scrollKey = [
+              "ArrowUp",
+              "ArrowDown",
+              "PageUp",
+              "PageDown",
+              "Home",
+              "End",
+              " ",
+            ].includes(event.key);
+            if (scrollKey) {
+              clearHistoryViewportAnchor(true);
+              cancelBottomAnimation();
+              cancelPendingBottomScroll();
+            }
             if (
               initialBottomPendingRef.current ||
               keyMovesTowardTimelineHistory(event.key, event.shiftKey)
@@ -5599,15 +6153,20 @@ export function RoomView({
               releaseBottomStick();
             } else if (["ArrowDown", "PageDown", "End", " "].includes(event.key)) {
               returningToBottomRef.current = true;
-              cancelPendingBottomScroll();
             }
           }}
           onScroll={(event) => {
             const scroller = event.currentTarget;
+            const scrollbarGesture = scrollbarGestureRef.current;
+            if (scrollbarGesture) {
+              if (scroller.scrollTop < scrollbarGesture.lastScrollTop - 1) {
+                releaseBottomStick();
+              }
+              scrollbarGesture.lastScrollTop = scroller.scrollTop;
+            }
             if (returningToBottomRef.current) acquireBottomFollowAtCurrentTail();
             updateTimelineBottomState();
             if (shouldLoadOlderNearTimelineTop({
-              selectionActive: textSelectionActiveRef.current,
               scrollTop: scroller.scrollTop,
               hasMore,
               loadingOlder: loadingOlderRef.current,
@@ -5618,11 +6177,13 @@ export function RoomView({
           }}
         >
           <div ref={timelineContentRef} className="flex min-h-full flex-col justify-end">
-            {timelineItems.map((item) => (
-              <div key={item.key} className="px-6" style={{ display: "flow-root" }}>
-                {renderTimelineItem(item)}
-              </div>
-            ))}
+            <div className="w-full shrink-0">
+              {timelineItems.map((item) => (
+                <div key={item.key} className="px-6" style={{ display: "flow-root" }}>
+                  {renderTimelineItem(item)}
+                </div>
+              ))}
+            </div>
             {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
             <div className="h-4 shrink-0" />
           </div>
@@ -5703,6 +6264,20 @@ export function RoomView({
                 This private encrypted room needs a newer E2EE-capable client. Your draft stays
                 saved here, but plaintext sending is disabled.
               </span>
+            </div>
+          )}
+          {siliconMaintenanceActive && (
+            <div
+              className="flex items-center justify-center gap-2 border-t border-input bg-muted/40 px-6 py-3 text-xs text-muted-foreground"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <WarningCircle
+                className="h-3.5 w-3.5 text-amber-500"
+                aria-hidden="true"
+              />
+              <span>{siliconMaintenanceMessage}</span>
             </div>
           )}
           {siliconUnavailable && (
@@ -6204,14 +6779,22 @@ function truncateProgressLine(value: string): string {
 
 function progressStateLabel(state: ProgressState): string {
   switch (state) {
+    case "reading":
+      return "Reading";
     case "reading_file":
       return "Reading file";
+    case "writing":
+      return "Writing";
     case "writing_file":
       return "Writing file";
     case "executing":
       return "Executing command";
     case "searching_web":
       return "Searching web";
+    case "spawning_worker":
+      return "Spawning worker";
+    case "calling":
+      return "Calling";
     case "done":
       return "Wrapping up";
     case "thinking":

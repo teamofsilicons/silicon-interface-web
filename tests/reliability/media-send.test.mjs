@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,9 +8,11 @@ import {
   ensureMediaOutboxStaged,
   journalRemoteGifIntent,
   prepareMediaOutboxPayload,
+  preparedUploadedMediaPayload,
   replaceMediaOutboxSource,
   restartMediaUploadGeneration,
   stageMediaSendIntent,
+  stageUploadedMediaSendIntent,
   sweepAcknowledgedMediaCleanup,
 } from "../../src/lib/media-send.ts";
 import {
@@ -27,6 +30,11 @@ import {
 import { ApiError } from "../../src/lib/api.ts";
 import { classifySendFailure } from "../../src/lib/send-failure.ts";
 import { deleteDatabase, indexedDB, installBrowser, MemoryStorage } from "./helpers.mjs";
+
+const composerSource = await readFile(
+  new URL("../../src/components/chat/composer.tsx", import.meta.url),
+  "utf8",
+);
 
 function openDatabase(name) {
   return new Promise((resolve, reject) => {
@@ -349,11 +357,110 @@ test("an already uploaded document can become a durable media send without resta
   });
   assert.equal(entry.operation, "media");
   assert.equal(entry.media.size, blob.size);
+  assert.equal(entry.media.uploadedMediaId, "01J00000000000000000000000");
+  assert.equal(entry.content.media_id, "01J00000000000000000000000");
   assert.equal(await (await readMediaUpload(`carbon:${owner}`, clientId)).blob.text(), "document bytes");
+
+  assert.deepEqual(preparedUploadedMediaPayload(entry), {
+    type: "m.file",
+    content: {
+      filename: "document.pdf",
+      mime: "application/pdf",
+      media_id: "01J00000000000000000000000",
+    },
+  });
+  let uploadCalls = 0;
+  const payload = await prepareMediaOutboxPayload(owner, entry, {
+    ensure: async () => entry,
+    read: readMediaUpload,
+    upload: async () => {
+      uploadCalls += 1;
+      throw new Error("completed bytes must never be uploaded again");
+    },
+    transcribe: async () => "",
+  });
+  assert.equal(uploadCalls, 0);
+  assert.equal(payload.content.media_id, "01J00000000000000000000000");
 
   assert.equal(await cancelPendingMediaSend(owner, entry), true);
   assert.deepEqual(await listOutbox(owner), []);
   assert.equal(await readMediaUpload(`carbon:${owner}`, clientId), null);
+});
+
+test("the composer posts an uploaded attachment immediately instead of waiting for recovery", () => {
+  const helperStart = composerSource.indexOf("const sendUploadedAttachmentImmediately");
+  const helperEnd = composerSource.indexOf("const processDurableGif", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const helper = composerSource.slice(helperStart, helperEnd);
+  assert.match(helper, /withOutboxClientLock/);
+  assert.match(helper, /preparedUploadedMediaPayload/);
+  assert.match(helper, /outboxTerminalState/);
+  assert.doesNotMatch(helper, /prepareMediaOutboxPayload/);
+  assert.doesNotMatch(helper, /listOutbox/);
+  assert.match(helper, /api\.sendEvent/);
+  assert.match(helper, /acknowledgeMediaSend/);
+
+  const attachmentStart = composerSource.indexOf("const entry = await stageUploadedMediaSendIntent", helperEnd);
+  const attachmentEnd = composerSource.indexOf("queuedAttachmentIds.add", attachmentStart);
+  assert.ok(attachmentStart >= 0 && attachmentEnd > attachmentStart);
+  const attachmentSend = composerSource.slice(attachmentStart, attachmentEnd);
+  assert.match(attachmentSend, /stageUploadedMediaSendIntent/);
+  assert.match(attachmentSend, /sendUploadedAttachmentImmediately\(outboxOwner, entry\)/);
+  assert.doesNotMatch(attachmentSend, /wakeOutboxRecovery/);
+});
+
+test("the uploaded attachment handoff journals only its stable media identity", async () => {
+  installBrowser();
+  const owner = "fast-uploaded-handoff-owner";
+  let enqueueCalls = 0;
+  const entry = await stageUploadedMediaSendIntent({
+    outboxOwnerId: owner,
+    mediaOwnerId: `carbon:${owner}`,
+    roomId: "fast-room",
+    clientId: "fast-client",
+    mediaId: "stable-media-id",
+    size: 42,
+    kind: "file",
+    type: "m.file",
+    filename: "instant.pdf",
+    mime: "application/pdf",
+    optimisticContent: { filename: "instant.pdf", mime: "application/pdf" },
+  }, async (_owner, value) => {
+    enqueueCalls += 1;
+    return value;
+  });
+  assert.equal(enqueueCalls, 1);
+  assert.equal(entry.content.media_id, "stable-media-id");
+  assert.equal(entry.media.uploadedMediaId, "stable-media-id");
+  assert.equal(entry.media.size, 42);
+  assert.deepEqual(preparedUploadedMediaPayload(entry), {
+    type: "m.file",
+    content: {
+      filename: "instant.pdf",
+      mime: "application/pdf",
+      media_id: "stable-media-id",
+    },
+  });
+});
+
+test("the visible GIF sender acquires its source under the outbox client lock", () => {
+  const start = composerSource.indexOf("const processDurableGif");
+  const end = composerSource.indexOf("const sendGif", start);
+  assert.ok(start >= 0 && end > start);
+  const sender = composerSource.slice(start, end);
+  const lock = sender.indexOf("withOutboxClientLock");
+  const acquire = sender.indexOf("ensureMediaOutboxStaged", lock);
+  assert.ok(lock >= 0 && acquire > lock, "source acquisition must be serialized with recovery");
+  assert.equal(sender.indexOf("ensureMediaOutboxStaged", 0), acquire);
+});
+
+test("GIF sending archives the compact picker rendition", () => {
+  const start = composerSource.indexOf("const sendGif");
+  const end = composerSource.indexOf("const sendTextOptimistic", start);
+  assert.ok(start >= 0 && end > start);
+  const sender = composerSource.slice(start, end);
+  assert.match(sender, /sourceUrl: gif\.previewUrl/);
+  assert.doesNotMatch(sender, /sourceUrl: gif\.downloadUrl/);
 });
 
 test("a legacy failed voice retry never waits for transcription", async () => {

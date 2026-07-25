@@ -42,6 +42,7 @@ import type {
   JwtPair,
   LoginStartResponse,
   MediaObject,
+  ProgressState,
   Room,
   Silicon,
   SiliconPublic,
@@ -53,6 +54,26 @@ import type {
   ThreadReadResult,
   SyncPageRange,
 } from "./types";
+import type {
+  WorkBlockerEvent,
+  WorkCallEvent,
+  WorkPersistentEvent,
+  WorkTaskSnapshot,
+  WorkWorkerGroupEvent,
+} from "./work-update-types";
+import type {
+  ToolSetupRequestResponse,
+  ToolSetupStartPayload,
+  ToolSetupStartResponse,
+} from "./tool-setup";
+
+export interface WorkTaskPage {
+  tasks: WorkTaskSnapshot[];
+  cursor: string | null;
+  has_more: boolean;
+}
+
+export type WorkMutationPayload = Record<string, unknown>;
 
 export type ReactivityBucket = "hour" | "day" | "month";
 
@@ -160,6 +181,48 @@ function retryAfterMs(resp: Response, body: unknown): number | null {
 // Concurrent 401s share a single in-flight refresh so we don't stampede the
 // endpoint.
 let refreshInflight: Promise<WebSessionRestoreState> | null = null;
+const SEND_TRACE_LOOKUP_BUDGET_MS = 250;
+const SEND_TRANSPORT_TIMEOUT_MS = 15_000;
+
+async function settleWithin<T>(
+  promise: Promise<T>,
+  budgetMs: number,
+  fallback: T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), budgetMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function signalWithDeadline(
+  upstream: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const abort = () => controller.abort(upstream?.reason);
+  if (upstream?.aborted) abort();
+  else upstream?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(
+    () => controller.abort(new DOMException("Send transport timed out", "TimeoutError")),
+    timeoutMs,
+  );
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      upstream?.removeEventListener("abort", abort);
+    },
+  };
+}
+
 async function tryRefresh(): Promise<WebSessionRestoreState> {
   if (refreshInflight) return refreshInflight;
   const refreshOnce = async () => {
@@ -176,9 +239,14 @@ async function tryRefresh(): Promise<WebSessionRestoreState> {
         r.refresh ?? null,
         authStore.getCarbon() ?? undefined,
       );
-      return "restored" as const;
+      return authStore.wasExplicitlyLoggedOut()
+        ? "anonymous" as const
+        : "restored" as const;
     } catch (error) {
-      return classifySessionRestoreFailure(error instanceof ApiError ? error.status : null);
+      return classifySessionRestoreFailure(
+        error instanceof ApiError ? error.status : null,
+        error instanceof ApiError ? error.body : undefined,
+      );
     }
   };
   const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
@@ -270,6 +338,8 @@ async function call<T>(
       if (refreshState === "restored") {
         return call<T>(method, path, body, { ...opts, _retried: true, traceparent });
       }
+      if (refreshState === "revoked") authStore.clear("revoked");
+      else authStore.expireAccess();
     }
   }
   const ct = resp.headers.get("content-type") || "";
@@ -314,6 +384,8 @@ async function callBlob(
     }
     const refreshState = await tryRefresh();
     if (refreshState === "restored") return callBlob(path, true);
+    if (refreshState === "revoked") authStore.clear("revoked");
+    else authStore.expireAccess();
   }
   if (!resp.ok) {
     const parsed = await resp.json().catch(() => null) as { detail?: string } | null;
@@ -518,6 +590,7 @@ export const api = {
       "GET",
       `/api/v1/teams/${slug}/invitees?offset=${offset}&limit=${limit}`,
     ),
+
   inviteInfo: (token: string) => call<InviteInfo>("GET", `/api/v1/invites/${encodeURIComponent(token)}`),
   acceptInvite: (token: string, body: { code?: string } = {}) =>
     call<{ joined: string; scope: string; role: TeamRole }>(
@@ -653,12 +726,21 @@ export const api = {
   ) => {
     const ownerId = authStore.getCarbon()?.carbon_id ?? "";
     const traceparent = client_id && ownerId
-      ? await outboxTraceparent(ownerId, client_id).catch(() => "")
+      ? await settleWithin(
+          outboxTraceparent(ownerId, client_id).catch(() => ""),
+          SEND_TRACE_LOOKUP_BUDGET_MS,
+          "",
+        )
       : "";
-    return call<Event>("POST", `/api/v1/rooms/${room_id}/events`, {
-      ...payload,
-      content: client_id ? { ...(payload.content ?? {}), client_id } : payload.content,
-    }, { traceparent, signal });
+    const deadline = signalWithDeadline(signal, SEND_TRANSPORT_TIMEOUT_MS);
+    try {
+      return await call<Event>("POST", `/api/v1/rooms/${room_id}/events`, {
+        ...payload,
+        content: client_id ? { ...(payload.content ?? {}), client_id } : payload.content,
+      }, { traceparent, signal: deadline.signal });
+    } finally {
+      deadline.cleanup();
+    }
   },
 
   clientOperation: (
@@ -705,7 +787,6 @@ export const api = {
     "POST",
     "/api/v1/telemetry/client-durable-commits",
     payload,
-    { includeDeviceId: false },
   ),
 
   heldSends: (room_id: string) =>
@@ -742,6 +823,123 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),
   finalizeEvent: (event_id: string) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/final`, {}),
+
+  // -------- durable work updates --------
+  // These routes intentionally mirror the silicon-interface CLI. Glass owns
+  // persistence and publishes the resulting m.work_task / m.work_event rows;
+  // the web client only consumes and renders those authoritative revisions.
+  workTasks: (params: {
+    room_id?: string;
+    state?: WorkTaskSnapshot["state"];
+    cursor?: string;
+    limit?: number;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (params.room_id) query.set("room_id", params.room_id);
+    if (params.state) query.set("state", params.state);
+    if (params.cursor) query.set("cursor", params.cursor);
+    if (params.limit != null) query.set("limit", String(params.limit));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return call<WorkTaskPage>("GET", `/api/v1/work/tasks${suffix}`);
+  },
+  createWorkTask: (payload: WorkMutationPayload) =>
+    call<WorkTaskSnapshot>("POST", "/api/v1/work/tasks", payload),
+  workTask: (task_id: string) =>
+    call<WorkTaskSnapshot>("GET", `/api/v1/work/tasks/${encodeURIComponent(task_id)}`),
+  patchWorkTask: (task_id: string, payload: WorkMutationPayload) =>
+    call<WorkTaskSnapshot>(
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}`,
+      payload,
+    ),
+  addWorkTodo: (task_id: string, payload: WorkMutationPayload) =>
+    call<WorkTaskSnapshot>(
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/todos`,
+      payload,
+    ),
+  patchWorkTodo: (task_id: string, todo_id: string, payload: WorkMutationPayload) =>
+    call<WorkTaskSnapshot>(
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/todos/${encodeURIComponent(todo_id)}`,
+      payload,
+    ),
+  addWorkMilestone: (task_id: string, payload: WorkMutationPayload) =>
+    call<WorkPersistentEvent>(
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/milestones`,
+      payload,
+    ),
+  createWorkBlocker: (task_id: string, payload: WorkMutationPayload) =>
+    call<WorkBlockerEvent>(
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/blockers`,
+      payload,
+    ),
+  resolveWorkBlocker: (
+    task_id: string,
+    blocker_id: string,
+    payload: WorkMutationPayload = {},
+  ) => call<WorkBlockerEvent>(
+    "POST",
+    `/api/v1/work/tasks/${encodeURIComponent(task_id)}/blockers/${encodeURIComponent(blocker_id)}/resolve`,
+    payload,
+  ),
+  createWorkWorkerGroup: (task_id: string, payload: WorkMutationPayload) =>
+    call<WorkWorkerGroupEvent>(
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/worker-groups`,
+      payload,
+    ),
+  patchWorkWorkerGroup: (
+    task_id: string,
+    group_id: string,
+    payload: WorkMutationPayload,
+  ) => call<WorkWorkerGroupEvent>(
+    "PATCH",
+    `/api/v1/work/tasks/${encodeURIComponent(task_id)}/worker-groups/${encodeURIComponent(group_id)}`,
+    payload,
+  ),
+  createWorkWorker: (
+    task_id: string,
+    group_id: string,
+    payload: WorkMutationPayload,
+  ) => call<WorkWorkerGroupEvent>(
+    "POST",
+    `/api/v1/work/tasks/${encodeURIComponent(task_id)}/worker-groups/${encodeURIComponent(group_id)}/invocations`,
+    payload,
+  ),
+  patchWorkWorker: (
+    task_id: string,
+    group_id: string,
+    invocation_id: string,
+    payload: WorkMutationPayload,
+  ) => call<WorkWorkerGroupEvent>(
+    "PATCH",
+    `/api/v1/work/tasks/${encodeURIComponent(task_id)}/worker-groups/${encodeURIComponent(group_id)}/invocations/${encodeURIComponent(invocation_id)}`,
+    payload,
+  ),
+  createWorkCall: (task_id: string, payload: WorkMutationPayload) =>
+    call<WorkCallEvent>(
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/calls`,
+      payload,
+    ),
+  patchWorkCall: (task_id: string, call_id: string, payload: WorkMutationPayload) =>
+    call<WorkCallEvent>(
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(task_id)}/calls/${encodeURIComponent(call_id)}`,
+      payload,
+    ),
+  transitionWorkTask: (
+    task_id: string,
+    transition: "complete" | "fail" | "cancel",
+    payload: WorkMutationPayload = {},
+  ) => call<WorkPersistentEvent>(
+    "POST",
+    `/api/v1/work/tasks/${encodeURIComponent(task_id)}/${transition}`,
+    payload,
+  ),
   editEvent: (event_id: string, body: string, baseVersion: number) =>
     call<Event>("POST", `/api/v1/events/${event_id}/edit`, {
       body,
@@ -864,8 +1062,12 @@ export const api = {
   postProgress: (
     room_id: string,
     payload: {
-      state: string;
+      state: ProgressState;
+      frame_id?: string;
       progress_group_id?: string;
+      task_id?: string | null;
+      revision?: number;
+      occurred_at?: string;
       note?: string;
       progress_pct?: number;
       summary?: string;
@@ -887,6 +1089,33 @@ export const api = {
     call<{ ok: boolean } | { detail: string }>(
       "POST",
       `/api/v1/events/${event_id}/delete`,
+      {},
+    ),
+
+  // -------- request-scoped tool setup --------
+  // Interface deliberately exposes no Extend directory or connection
+  // management client. These three assigned-request capabilities are the
+  // complete surface a Carbon needs to finish a Silicon's in-chat request.
+  toolSetupRequest: (request_id: string, signal?: AbortSignal) =>
+    call<ToolSetupRequestResponse>(
+      "GET",
+      `/api/v1/extend/requests/${encodeURIComponent(request_id)}`,
+      undefined,
+      { signal },
+    ),
+  startToolSetupRequest: (
+    request_id: string,
+    payload: ToolSetupStartPayload = {},
+  ) =>
+    call<ToolSetupStartResponse>(
+      "POST",
+      `/api/v1/extend/requests/${encodeURIComponent(request_id)}/start`,
+      payload,
+    ),
+  cancelToolSetupRequest: (request_id: string) =>
+    call<ToolSetupRequestResponse>(
+      "POST",
+      `/api/v1/extend/requests/${encodeURIComponent(request_id)}/cancel`,
       {},
     ),
 

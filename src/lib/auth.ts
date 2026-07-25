@@ -7,6 +7,7 @@ import { env } from "./env";
 import type { AuthSession, Carbon } from "./types";
 
 const CARBON_KEY = "silicon-interface:carbon";
+const EXPLICIT_LOGOUT_KEY = "silicon-interface:explicit-logout";
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
 let siliconKey: string | null = null;
@@ -105,10 +106,18 @@ export function purgeStoredCredentials() {
 }
 purgeStoredCredentials();
 
-type Listener = () => void;
+export type AuthChange =
+  | "session"
+  | "tokens"
+  | "profile"
+  | "silicon-key"
+  | "access-expired"
+  | "cleared";
+
+type Listener = (change: AuthChange) => void;
 const listeners = new Set<Listener>();
-function emit() {
-  for (const fn of listeners) fn();
+function emit(change: AuthChange) {
+  for (const fn of listeners) fn(change);
 }
 
 function safeGet(key: string): string | null {
@@ -148,7 +157,17 @@ export const authStore = {
   getBoundDeviceId: () => deviceClaim(accessToken),
   getRefresh: () => refreshToken,
   getSiliconKey: () => siliconKey,
-  wasExplicitlyLoggedOut: () => explicitlyLoggedOut,
+  wasExplicitlyLoggedOut: () =>
+    explicitlyLoggedOut || safeGet(EXPLICIT_LOGOUT_KEY) === "1",
+  hasPersistedOwner(): boolean {
+    const raw = safeGet(CARBON_KEY);
+    if (!raw) return false;
+    try {
+      return hydratePersistedCarbon(JSON.parse(raw)) !== null;
+    } catch {
+      return false;
+    }
+  },
   getCarbon(): Carbon | null {
     if (currentCarbon) return currentCarbon;
     const raw = safeGet(CARBON_KEY);
@@ -164,15 +183,25 @@ export const authStore = {
   },
   setSession(session: AuthSession) {
     explicitlyLoggedOut = false;
+    safeSet(EXPLICIT_LOGOUT_KEY, null);
     accessToken = session.access;
     refreshToken = session.refresh ?? null;
     currentCarbon = session.carbon;
     safeSet(CARBON_KEY, JSON.stringify(persistedCarbonIdentity(session.carbon)));
     identifyCarbon(session.carbon);
-    emit();
+    emit("session");
   },
-  setTokens(access: string, refresh?: string | null, carbon?: Carbon) {
+  setTokens(
+    access: string,
+    refresh?: string | null,
+    carbon?: Carbon,
+    source: "automatic" | "interactive" = "automatic",
+  ) {
+    // A refresh/device request that was already in flight when the user
+    // clicked logout must not resurrect the session after clear() returns.
+    if (source === "automatic" && authStore.wasExplicitlyLoggedOut()) return;
     explicitlyLoggedOut = false;
+    if (source === "interactive") safeSet(EXPLICIT_LOGOUT_KEY, null);
     accessToken = access;
     refreshToken = refresh ?? null;
     if (carbon) {
@@ -180,19 +209,23 @@ export const authStore = {
       safeSet(CARBON_KEY, JSON.stringify(persistedCarbonIdentity(carbon)));
       identifyCarbon(carbon);
     }
-    emit();
+    emit("tokens");
   },
   setCarbon(carbon: Carbon) {
+    if (authStore.wasExplicitlyLoggedOut()) return;
     currentCarbon = carbon;
     safeSet(CARBON_KEY, JSON.stringify(persistedCarbonIdentity(carbon)));
     // Keep PostHog person properties fresh (login, profile edits, tz sync).
     identifyCarbon(carbon);
-    emit();
+    emit("profile");
   },
   setSiliconKey(key: string | null) {
-    if (key) explicitlyLoggedOut = false;
+    if (key) {
+      explicitlyLoggedOut = false;
+      safeSet(EXPLICIT_LOGOUT_KEY, null);
+    }
     siliconKey = key;
-    emit();
+    emit("silicon-key");
   },
   /**
    * Drop stale request authority without revoking the browser session or
@@ -201,10 +234,11 @@ export const authStore = {
   expireAccess() {
     accessToken = null;
     refreshToken = null;
-    emit();
+    emit("access-expired");
   },
-  clear() {
-    explicitlyLoggedOut = true;
+  clear(reason: "user" | "revoked" = "user") {
+    explicitlyLoggedOut = reason === "user";
+    if (reason === "user") safeSet(EXPLICIT_LOGOUT_KEY, "1");
     const current = authStore.getCarbon();
     if (typeof window !== "undefined") {
       window.dispatchEvent(
@@ -216,7 +250,7 @@ export const authStore = {
     // Revoke/delete the HttpOnly refresh cookie. This is intentionally
     // fire-and-forget so logout never waits on a network path before clearing
     // the in-memory authority and protected local state.
-    if (typeof window !== "undefined") {
+    if (reason === "user" && typeof window !== "undefined") {
       void fetch(`${env.apiBase}/api/v1/auth/logout`, {
         method: "POST",
         credentials: "include",
@@ -229,7 +263,7 @@ export const authStore = {
     safeSet(CARBON_KEY, null);
     siliconKey = null;
     resetAnalytics();
-    emit();
+    emit("cleared");
   },
   subscribe(fn: Listener): () => void {
     listeners.add(fn);
@@ -238,6 +272,17 @@ export const authStore = {
     };
   },
 };
+
+export function handleAuthStorageChange(key: string | null, newValue: string | null): void {
+  if (key !== EXPLICIT_LOGOUT_KEY || newValue !== "1") return;
+  if (!explicitlyLoggedOut) authStore.clear();
+}
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("storage", (event) => {
+    handleAuthStorageChange(event.key, event.newValue);
+  });
+}
 
 export function useAuth() {
   const [, setTick] = React.useState(0);

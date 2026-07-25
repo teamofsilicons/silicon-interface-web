@@ -20,6 +20,7 @@ import {
 import {
   findCountry,
   guessCountryIso2,
+  normalizePhoneInput,
   normalizePhonePaste,
   parseE164,
   type Country,
@@ -53,6 +54,7 @@ function LoginPageInner() {
   const search = useSearchParams();
   const initialId = search.get("identifier") ?? search.get("email") ?? "";
   const initialPhone = initialId.startsWith("+") ? parseE164(initialId) : null;
+  const hasInitialPhone = Boolean(initialPhone);
   const noticeExisting = search.get("notice") === "existing";
   // §6d — the login pivot carries the email/phone from a sign-up bounce so the
   // user never re-types. Remember whether we pre-filled from that handoff so we
@@ -72,6 +74,7 @@ function LoginPageInner() {
     () => initialPhone?.country ?? findCountry(guessCountryIso2()) ?? findCountry("US")!,
   );
   const [number, setNumber] = React.useState(() => initialPhone?.number ?? "");
+  const phoneSelectionTouchedRef = React.useRef(Boolean(initialPhone));
 
   const [challengeId, setChallengeId] = React.useState("");
   const [options, setOptions] = React.useState<LoginChannelOption[]>([]);
@@ -106,6 +109,23 @@ function LoginPageInner() {
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [providerRetryAt]);
+
+  // The edge supplies an IP-derived country when available. Locale/timezone is
+  // the synchronous fallback above; never overwrite an explicit phone number
+  // or anything the user already selected/typed while this request was in flight.
+  React.useEffect(() => {
+    if (hasInitialPhone) return;
+    const controller = new AbortController();
+    void fetch("/api/location", { cache: "no-store", signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: { country?: string | null } | null) => {
+        if (phoneSelectionTouchedRef.current) return;
+        const detected = payload?.country ? findCountry(payload.country) : undefined;
+        if (detected) setCountry(detected);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [hasInitialPhone]);
 
   const retainDeliveryFailure = React.useCallback((error: unknown) => {
     const failure = verificationDeliveryFailure(error);
@@ -239,7 +259,7 @@ function LoginPageInner() {
         // of the follow-up profile fetch must never strand them on the login
         // screen with a valid session. Fetching `me` is a nicety; AuthGuard
         // backfills the carbon on /chat if it's missing, so we always navigate.
-        authStore.setTokens(r.access, r.refresh ?? null);
+        authStore.setTokens(r.access, r.refresh ?? null, undefined, "interactive");
         track.loggedIn({ method: "otp" });
         try {
           const me = await api.me();
@@ -360,14 +380,25 @@ function LoginPageInner() {
           <div className="space-y-4">
             <Label htmlFor="phone">phone number</Label>
             <div className="flex gap-2">
-              <CountryCodeSelect value={country.iso2} onChange={setCountry} />
+              <CountryCodeSelect
+                value={country.iso2}
+                onChange={(next) => {
+                  phoneSelectionTouchedRef.current = true;
+                  setCountry(next);
+                }}
+              />
               <Input
                 id="phone"
                 autoFocus
                 inputMode="tel"
                 placeholder="555 123 4567"
                 value={number}
-                onChange={(e) => setNumber(e.target.value)}
+                onChange={(e) => {
+                  phoneSelectionTouchedRef.current = true;
+                  const normalized = normalizePhoneInput(e.target.value, country);
+                  setCountry(normalized.country);
+                  setNumber(normalized.number);
+                }}
                 onPaste={(e) => {
                   // Normalize pasted E.164/international input so we don't
                   // double the country code ("+1 415…" → "+114155…") or keep a
@@ -376,6 +407,7 @@ function LoginPageInner() {
                   const text = e.clipboardData.getData("text");
                   if (!text.trim()) return;
                   e.preventDefault();
+                  phoneSelectionTouchedRef.current = true;
                   const { country: c, number: n } = normalizePhonePaste(text, country);
                   setCountry(c);
                   setNumber(n);

@@ -254,7 +254,7 @@ body {
   height: 100%;
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-sans), "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   /* Tight tracking on TikTok Sans, app-wide. Elements that want a different
      feel (mono, uppercase labels) set their own letter-spacing. */
   letter-spacing: -0.02em;
@@ -263,6 +263,16 @@ body {
   text-rendering: optimizeLegibility;
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* Emoji-bearing controls and emoji-only messages must ask the color face
+   first. Keeping this scoped avoids changing normal text metrics while making
+   newly standardized ZWJ sequences independent of the host OS emoji version. */
+.emoji-glyph {
+  font-family: "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  font-variant-emoji: emoji;
+  font-feature-settings: normal;
+  letter-spacing: normal;
 }
 
 /* Selection is content-first throughout the app. Interactive chrome should not
@@ -496,9 +506,34 @@ summary,
   animation: silicon-type-caret 0.9s steps(1, end) infinite;
 }
 
+/* Manager-run activity stays visually in the message flow. A quiet highlight
+   passes through the current line without turning it into a status card. */
+.manager-activity-shimmer {
+  display: inline-block;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    105deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 62%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 240% 100%;
+  background-position: 100% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: manager-activity-shimmer 2.6s ease-in-out infinite;
+}
+
 @keyframes silicon-activity-breathe {
   0%, 100% { opacity: 0.82; }
   50% { opacity: 1; }
+}
+
+@keyframes manager-activity-shimmer {
+  to { background-position: -140% 0; }
 }
 
 @keyframes silicon-core-step {
@@ -551,9 +586,15 @@ summary,
   .silicon-activity-line,
   .silicon-activity-core span,
   .silicon-activity-copy::after,
+  .manager-activity-shimmer,
   .receipt-fill,
   .copy-flash {
     animation: none;
+  }
+  .manager-activity-shimmer {
+    color: var(--foreground);
+    -webkit-text-fill-color: currentColor;
+    background-image: none;
   }
   .page-enter,
   .stagger-fade-in > *,

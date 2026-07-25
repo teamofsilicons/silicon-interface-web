@@ -65,21 +65,18 @@ test("timeline selection recognizes either endpoint without changing list layout
   }, root), false);
 });
 
-test("selection never triggers a history prepend that can detach its live Range", () => {
+test("a persistent selection never blocks older-history pagination", () => {
   assert.equal(shouldLoadOlderNearTimelineTop({
-    selectionActive: true,
     scrollTop: 0,
     hasMore: true,
     loadingOlder: false,
-  }), false);
+  }), true);
   assert.equal(shouldLoadOlderNearTimelineTop({
-    selectionActive: false,
     scrollTop: 100,
     hasMore: true,
     loadingOlder: false,
   }), true);
   assert.equal(shouldLoadOlderNearTimelineTop({
-    selectionActive: false,
     scrollTop: 161,
     hasMore: true,
     loadingOlder: false,
@@ -129,6 +126,19 @@ test("the down arrow hides when even one pixel of the newest message is visible"
     messageTop: 50,
     messageBottom: 101,
   }), true);
+  assert.match(roomViewSource, /renderedEventIdFor\(lastTimelineEventId\)/);
+});
+
+test("arrow-acquired bottom follow survives until an explicit upward gesture", () => {
+  const pointerIntent = roomViewSource.slice(
+    roomViewSource.indexOf("onPointerDownCapture"),
+    roomViewSource.indexOf("onWheelCapture"),
+  );
+  assert.doesNotMatch(pointerIntent, /releaseBottomStick\(\)/);
+  assert.match(roomViewSource, /scroller\.scrollTop < scrollbarGesture\.lastScrollTop - 1/);
+  assert.match(roomViewSource, /wheelMovesTowardTimelineHistory\(event\.deltaY\)/);
+  assert.match(roomViewSource, /touchMovesTowardTimelineHistory\(previousY, currentY\)/);
+  assert.match(roomViewSource, /keyMovesTowardTimelineHistory\(event\.key, event\.shiftKey\)/);
 });
 
 test("manual interaction invalidates every already-scheduled bottom correction", () => {
@@ -245,14 +255,14 @@ test("older-history prepends keep one event at the same pixel through late layou
   assert.match(roomViewSource, /if \(committed\) anchor\.awaitingCommit = false/);
   assert.match(roomViewSource, /flushSync\(\(\) => \{/);
   assert.match(roomViewSource, /preserveHistoryViewportAnchor\(true\);\n\s+reportHistoryHealthy/);
-  assert.match(roomViewSource, /clearHistoryViewportAnchor\(\);\n\s+if \(\n\s+initialBottomPendingRef\.current/);
+  assert.match(roomViewSource, /clearHistoryViewportAnchor\(true\);\n\s+\/\/ A wheel gesture/);
   assert.doesNotMatch(roomViewSource, /pendingPrependRef/);
   assert.match(roomViewSource, />\s*Loading older messages…\s*</);
 });
 
 test("late initial cache hydration uses the same guarded prepend as later pages", () => {
   assert.match(roomViewSource, /const commitInitialTimelineRows = async/);
-  assert.match(roomViewSource, /await waitForTextSelectionEnd\(\)/);
+  assert.doesNotMatch(roomViewSource, /waitForTextSelectionEnd|selectionEndWaitersRef/);
   assert.match(roomViewSource, /await waitForOlderHistoryIndicatorPaint\(\)/);
   assert.match(roomViewSource, /captureHistoryViewportAnchor\(incoming\)/);
   assert.match(roomViewSource, /if \(protectReaderPosition\) preserveHistoryViewportAnchor\(true\)/);
@@ -333,13 +343,75 @@ test("reader input revokes follow during intent, before the browser scroll event
   assert.equal(keyMovesTowardTimelineHistory(" ", false), false);
 });
 
+test("manual scrolling cancels every competing scroll writer immediately", () => {
+  const release = roomViewSource.slice(
+    roomViewSource.indexOf("const releaseBottomStick"),
+    roomViewSource.indexOf("const scrollToBottom"),
+  );
+  assert.match(release, /clearHistoryViewportAnchor\(true\)/);
+  assert.match(release, /cancelPendingBottomScroll\(\)/);
+  assert.match(release, /cancelBottomAnimation\(\)/);
+
+  const wheel = roomViewSource.slice(
+    roomViewSource.indexOf("onWheelCapture"),
+    roomViewSource.indexOf("onTouchStartCapture"),
+  );
+  assert.match(wheel, /cancelBottomAnimation\(\)/);
+  assert.match(wheel, /cancelPendingBottomScroll\(\)/);
+});
+
 test("sync generations keep the open conversation surface and native Range mounted", () => {
   assert.match(chatPageSource, /key=\{selectedRoom\.room_id\}/);
   assert.doesNotMatch(chatPageSource, /projectionGeneration/);
-  assert.match(roomViewSource, /selectionEventSnapshot/);
-  assert.match(roomViewSource, /setSelectionEventSnapshot\(\(current\) => current \?\? eventProjectionRef\.current\)/);
-  assert.match(roomViewSource, /const renderedEvents =/);
+  assert.doesNotMatch(roomViewSource, /selectionEventSnapshot|setSelectionEventSnapshot/);
+  assert.match(roomViewSource, /const renderedEvents = events/);
   assert.doesNotMatch(roomViewSource, /deferredEventProjectionRef/);
+});
+
+test("double-click selection never schedules a timeline render", () => {
+  const selectionOwnership = roomViewSource.slice(
+    roomViewSource.indexOf("const updateTextSelectionActive"),
+    roomViewSource.indexOf("// Tracks whether the user is parked at the bottom"),
+  );
+  assert.doesNotMatch(
+    selectionOwnership,
+    /setSelectionEventSnapshot|setEvents|setTimelineAtBottom|setUnseenBelow/,
+  );
+  assert.match(selectionOwnership, /textSelectionActiveRef\.current = active/);
+});
+
+test("page-down clears a persistent selection and always takes bottom ownership", () => {
+  const arrowActivation = roomViewSource.slice(
+    roomViewSource.indexOf("const activateBottomFollowFromArrow"),
+    roomViewSource.indexOf("const acquireBottomFollowAtCurrentTail"),
+  );
+  assert.match(arrowActivation, /clearTimelineTextSelection\(\)/);
+  assert.match(arrowActivation, /stickToBottomRef\.current = true/);
+  assert.match(arrowActivation, /animateToBottom\(\)/);
+  assert.doesNotMatch(arrowActivation, /textSelectionActiveRef\.current\) return/);
+});
+
+test("loaded chat rows stay mounted so scrolling and clicks cannot recycle the viewport", () => {
+  assert.doesNotMatch(roomViewSource, /useVirtualizer|timelineVirtualizer|virtualTimelineItems/);
+  assert.match(roomViewSource, /\{timelineItems\.map\(\(item\) => \(/);
+});
+
+test("an ordinary chat click does not promote the timeline into selection mode", () => {
+  const selectStart = roomViewSource.slice(
+    roomViewSource.indexOf("const onSelectStart"),
+    roomViewSource.indexOf("const onSelectionChange"),
+  );
+  assert.match(selectStart, /selectionGestureRef\.current = true/);
+  assert.doesNotMatch(selectStart, /releaseBottomStick/);
+  assert.doesNotMatch(selectStart, /updateTextSelectionActive\(true\)/);
+
+  const selectionChange = roomViewSource.slice(
+    roomViewSource.indexOf("const onSelectionChange"),
+    roomViewSource.indexOf("const onPointerEnd"),
+  );
+  assert.match(selectionChange, /const selectionActive = hasTimelineSelection\(\)/);
+  assert.match(selectionChange, /releaseBottomStick\(\)/);
+  assert.match(selectionChange, /if \(selectionActive\) updateTextSelectionActive\(true\)/);
 });
 
 test("opening a room clears unread state before navigation or timeline hydration", () => {

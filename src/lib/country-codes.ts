@@ -2,6 +2,8 @@
 // ISO-3166-1 alpha-2 code at render time (regional-indicator symbols), so the
 // dataset only stores name + iso2 + dial.
 
+import { TZ_COUNTRY } from "./tz-countries";
+
 export interface Country {
   iso2: string;
   name: string;
@@ -307,18 +309,55 @@ export function normalizePhonePaste(
 }
 
 /**
+ * Interpret a phone input while it is being typed. National numbers are left
+ * exactly as entered, but an explicit international prefix immediately moves
+ * the dial-code selector to the matching country. Keeping an incomplete "+9"
+ * intact is important: the next keystroke can turn it into India's "+91".
+ */
+export function normalizePhoneInput(
+  raw: string,
+  current: Country,
+): { country: Country; number: string } {
+  const compact = raw.trim().replace(/[\s()-]/g, "");
+  const explicitInternational = raw.trim().startsWith("+") || /^00\d/.test(compact);
+  if (!explicitInternational) return { country: current, number: raw };
+
+  const candidate = raw.trim().startsWith("+")
+    ? raw.trim()
+    : `+${compact.slice(2)}`;
+  return parseE164(candidate) ?? { country: current, number: raw };
+}
+
+/** Resolve the first supported region embedded in a browser language list. */
+export function countryIso2FromLanguages(languages: readonly string[]): string | null {
+  for (const language of languages) {
+    const match = /[-_]([A-Za-z]{2})(?:[-_]|$)/.exec(language ?? "");
+    if (!match) continue;
+    const iso2 = match[1].toUpperCase();
+    if (BY_ISO.has(iso2)) return iso2;
+  }
+  return null;
+}
+
+/** Resolve a supported country from the browser's IANA timezone. */
+export function countryIso2FromTimeZone(timeZone: string): string | null {
+  const iso2 = TZ_COUNTRY[timeZone]?.toUpperCase() ?? "";
+  return BY_ISO.has(iso2) ? iso2 : null;
+}
+
+/**
  * Best-effort country guess from the browser locale region (e.g. "en-GB" → GB).
  * Privacy-friendly (no network); falls back to US.
  */
 export function guessCountryIso2(): string {
   if (typeof navigator === "undefined") return "US";
   const langs = [navigator.language, ...(navigator.languages ?? [])];
-  for (const l of langs) {
-    const m = /[-_]([A-Za-z]{2})(?:[-_]|$)/.exec(l ?? "");
-    if (m) {
-      const iso = m[1].toUpperCase();
-      if (BY_ISO.has(iso)) return iso;
-    }
+  const localeCountry = countryIso2FromLanguages(langs);
+  if (localeCountry) return localeCountry;
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
+    return countryIso2FromTimeZone(timeZone) ?? "US";
+  } catch {
+    return "US";
   }
-  return "US";
 }

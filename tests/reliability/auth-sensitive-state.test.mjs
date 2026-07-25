@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { authStore, purgeStoredCredentials } from "../../src/lib/auth.ts";
+import {
+  authStore,
+  handleAuthStorageChange,
+  purgeStoredCredentials,
+} from "../../src/lib/auth.ts";
 
 function storage() {
   const values = new Map();
@@ -18,10 +22,52 @@ function storage() {
 function resetAuthMemory() {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async () => ({ ok: true });
-  authStore.clear();
+  authStore.clear("revoked");
   if (previousFetch === undefined) delete globalThis.fetch;
   else globalThis.fetch = previousFetch;
 }
+
+test("only user logout persists a reload-proof logout decision", () => {
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  const localStorage = storage();
+  globalThis.window = {
+    localStorage,
+    dispatchEvent() {},
+    atob: (value) => Buffer.from(value, "base64").toString("binary"),
+  };
+  globalThis.fetch = async () => ({ ok: true });
+
+  authStore.setTokens("access");
+  authStore.clear();
+  assert.equal(authStore.wasExplicitlyLoggedOut(), true);
+  assert.equal(localStorage.getItem("silicon-interface:explicit-logout"), "1");
+
+  authStore.setTokens("stale-refresh");
+  assert.equal(authStore.getAccess(), null);
+  assert.equal(authStore.wasExplicitlyLoggedOut(), true);
+
+  authStore.setTokens("new-access", null, undefined, "interactive");
+  assert.equal(authStore.wasExplicitlyLoggedOut(), false);
+  assert.equal(localStorage.getItem("silicon-interface:explicit-logout"), null);
+
+  authStore.clear("revoked");
+  assert.equal(authStore.wasExplicitlyLoggedOut(), false);
+  assert.equal(localStorage.getItem("silicon-interface:explicit-logout"), null);
+
+  authStore.setTokens("second-tab-access");
+  localStorage.setItem("silicon-interface:explicit-logout", "1");
+  handleAuthStorageChange("silicon-interface:explicit-logout", "1");
+  assert.equal(authStore.getAccess(), null);
+  assert.equal(authStore.wasExplicitlyLoggedOut(), true);
+  authStore.setTokens("cleanup", null, undefined, "interactive");
+  authStore.clear("revoked");
+
+  if (previousFetch === undefined) delete globalThis.fetch;
+  else globalThis.fetch = previousFetch;
+  if (previousWindow === undefined) delete globalThis.window;
+  else globalThis.window = previousWindow;
+});
 
 test("web credentials stay memory-only and legacy browser copies are purged", () => {
   const previousWindow = globalThis.window;
@@ -112,6 +158,10 @@ test("offline owner cache excludes contact data and bearer profile grants", () =
   assert.equal(live.email, "alice@example.test");
   assert.equal(live.phone, "+14155550123");
   assert.equal(live.profile_photo_url, "https://signed.example.test/private-grant");
+  assert.equal(authStore.hasPersistedOwner(), true);
+  localStorage.values.clear();
+  assert.equal(authStore.hasPersistedOwner(), false);
+  assert.equal(authStore.getCarbon().carbon_id, "owner-1");
   resetAuthMemory();
   if (previousWindow === undefined) delete globalThis.window;
   else globalThis.window = previousWindow;

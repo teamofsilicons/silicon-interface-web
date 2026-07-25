@@ -34,13 +34,25 @@ import type {
   TeamMembership,
   WsFrame,
 } from "@/lib/types";
-import { clearRoomProgress, setRoomProgress } from "@/lib/progress-cache";
+import { clearRoomProgress, getRoomProgress, setRoomProgress } from "@/lib/progress-cache";
+import {
+  recordManagerActivity,
+  settleCachedManagerActivity,
+  visibleCachedManagerActivities,
+} from "@/lib/work-manager-activity-cache";
+import { eventReplacesManagerActivity } from "@/lib/work-manager-activity";
+import {
+  isResolvedWorkBlocker,
+  workEventCountsAsUnread,
+  workEventPreview,
+  workNotificationTier,
+} from "@/lib/work-update-presentation";
 import {
   appendRoomEventSnippet,
   readRoomEventSnippet,
   saveRoomEventSnippet,
 } from "@/lib/room-snippet";
-import { evictCachedMedia } from "@/lib/media-cache";
+import { acceptMediaDetail, evictCachedMedia } from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { projectRedactedWindow } from "@/lib/redaction-state";
 import {
@@ -49,8 +61,16 @@ import {
   normalizeRooms,
   replaceRoomsPreservingReceiptFacts,
 } from "@/lib/room-shape";
-import { compareRoomListRows, roomVisibleInArchiveView } from "@/lib/room-list-projection";
-import { roomOpenReadTarget } from "@/lib/unread-boundary";
+import {
+  compareRoomListRows,
+  projectArchivedRoomListEntry,
+  roomVisibleInArchiveView,
+} from "@/lib/room-list-projection";
+import {
+  retractRoomUnreadEvent,
+  roomOpenReadTarget,
+  roomProjectsEventAsUnread,
+} from "@/lib/unread-boundary";
 import { useChatSocket } from "@/lib/ws";
 import { mergePresence, observePresenceActivity } from "@/lib/presence-state";
 import { readReceiptCoversEvent } from "@/lib/message-receipt";
@@ -116,6 +136,12 @@ import {
   type SyncStream,
 } from "@/lib/sync-integrity";
 import { startClientReliabilityTelemetry } from "@/lib/reliability-telemetry";
+import {
+  parseToolSetupAccountState,
+  TOOL_SETUP_STATE_EVENT,
+} from "@/lib/tool-setup";
+import { isToolSetupRequestId } from "@/lib/tool-setup-request";
+import { ToolSetupDialog } from "@/components/chat/tool-setup-dialog";
 
 const DEFAULT_GLOBAL_NOTIFICATIONS: GlobalNotificationPreferences = {
   enabled: true,
@@ -247,9 +273,9 @@ import {
 } from "@/lib/chat-groups";
 import { cn } from "@/lib/utils";
 
-// Message types that count toward the unread badge + drive the sidebar
-// preview. Mirrors the backend projection (reactions / system / markers /
-// progress never count).
+// Normal message types that count toward unread. Durable work events are
+// classified from their kind below: milestones/blockers/terminal results count,
+// while task snapshots, worker groups, and calls stay in-chat only.
 const COUNTABLE_TYPES = new Set([
   "m.text",
   "m.image",
@@ -261,7 +287,11 @@ const COUNTABLE_TYPES = new Set([
 ]);
 
 function isCountableEvent(ev: Event): boolean {
-  return COUNTABLE_TYPES.has(ev.type) && !ev.redacted_at;
+  if (ev.redacted_at) return false;
+  if (ev.type === "m.work_task" || ev.type === "m.work_event") {
+    return workEventCountsAsUnread(ev);
+  }
+  return COUNTABLE_TYPES.has(ev.type);
 }
 
 /** Client-side one-line preview for a live event frame — mirrors Glass's
@@ -300,6 +330,9 @@ function eventPreview(ev: Event): string | null {
       const t = String(c.text ?? "").trim();
       return t ? t.slice(0, 80) : "audio";
     }
+    case "m.work_task":
+    case "m.work_event":
+      return workEventPreview(ev);
     default:
       return null;
   }
@@ -308,6 +341,13 @@ function eventPreview(ev: Event): string | null {
 function notificationBody(ev: Event): string {
   const preview = eventPreview(ev) ?? "New message";
   return preview.length > 180 ? `${preview.slice(0, 177)}...` : preview;
+}
+
+function eventNotificationTier(ev: Event) {
+  if (ev.type === "m.work_task" || ev.type === "m.work_event") {
+    return workNotificationTier(ev);
+  }
+  return isCountableEvent(ev) ? "push" as const : "none" as const;
 }
 
 function notificationDisplay(room: Room, contacts: Map<string, Contact>) {
@@ -468,6 +508,13 @@ function ChatPageInner() {
   }, []);
   const search = useSearchParams();
   const selected = search.get("room");
+  const callbackSetupRequestId = isToolSetupRequestId(search.get("extend_request"))
+    ? search.get("extend_request")!
+    : "";
+  const [dismissedSetupRequestId, setDismissedSetupRequestId] = React.useState("");
+  const callbackSetupOpen =
+    Boolean(callbackSetupRequestId)
+    && dismissedSetupRequestId !== callbackSetupRequestId;
   const teamViewSlug = search.get("team");
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -508,6 +555,24 @@ function ChatPageInner() {
     },
     [],
   );
+  const reconcileRoomManagerActivity = React.useCallback((roomId: string) => {
+    const groups = visibleCachedManagerActivities(roomId);
+    const group = [...groups].reverse().find((candidate) => candidate.display === "active") ??
+      groups.at(-1);
+    const frame = group?.current ?? group?.history.at(-1);
+    markRoomWorking(
+      roomId,
+      group?.display === "active",
+      frame?.note ?? "",
+    );
+    // The legacy cache represents one run. Retain it only while it still
+    // describes the canonical selected group; otherwise RoomView restores the
+    // room-scoped group directly without leaking a settled identity.
+    if (!group || getRoomProgress(roomId)?.groupId !== group.progress_group_id) {
+      clearRoomProgress(roomId);
+    }
+    return group;
+  }, [markRoomWorking]);
   // Sweep expired entries so a silicon that died without a `done` stops shimmering.
   React.useEffect(() => {
     const id = window.setInterval(() => {
@@ -618,6 +683,12 @@ function ChatPageInner() {
   >());
   const finalizedBeforeEventRef = React.useRef(new Set<string>());
   const dispatchFrame = React.useCallback((f: WsFrame, opts?: { quiet?: boolean }) => {
+    if (f.type === "media.status") {
+      acceptMediaDetail(f.media_id, {
+        media: f.media,
+        download_url: f.download_url,
+      });
+    }
     if (
       (f.type === "delivery_receipt" ||
         f.type === "read_receipt" ||
@@ -706,8 +777,8 @@ function ChatPageInner() {
   });
   const { setConnection, setGlobalIssue } = useChatConnectionBanner();
   React.useEffect(() => {
-    setConnection(socket.state, socket.reconnect);
-  }, [setConnection, socket.reconnect, socket.state]);
+    setConnection(socket.applicationState, socket.reconnect);
+  }, [setConnection, socket.applicationState, socket.reconnect]);
   const { teams } = useTeams();
   const { carbon } = useAuth();
   const ownerId = carbon?.carbon_id ?? null;
@@ -1613,6 +1684,21 @@ function ChatPageInner() {
         return false;
       }
       if (update.kind === "device") {
+        return false;
+      }
+      if (update.kind === "extend.request") {
+        const parsed = parseToolSetupAccountState(update.data, update.object_id);
+        if (!parsed) {
+          throw new SyncIntegrityError(
+            "account",
+            "page_invariant",
+            "Account tool-setup request is malformed.",
+            { observedPosition: update.position },
+          );
+        }
+        window.dispatchEvent(
+          new CustomEvent(TOOL_SETUP_STATE_EVENT, { detail: parsed }),
+        );
         return false;
       }
       throw new SyncIntegrityError(
@@ -2847,12 +2933,19 @@ function ChatPageInner() {
   // `processedRef` dedup set the old `lastFrame` effect carried (QA §2.9).
   React.useEffect(() => {
     pageFrameRef.current = (f: WsFrame, opts?: { quiet?: boolean }) => {
+    let activityReplacementEvent: Event | null = null;
     // Backfilled (sync-replayed) frame: state updates yes, noise no.
     const quiet = opts?.quiet === true;
     if (f.type === "event") {
       const ev = f.event;
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       const rid = f.room_id;
+      const resolvedWorkBlocker = isResolvedWorkBlocker(ev);
+      if (resolvedWorkBlocker) {
+        if (ownerId) removeNotificationByEvent(ownerId, ev.event_id);
+        closeBrowserNotification(ev.event_id);
+        toast.dismiss(ev.event_id);
+      }
       // Cache before room lookup: a deep-linked or newly-added room may not be
       // in the current sidebar projection yet, but its opening RoomView still
       // needs this accepted frame immediately.
@@ -2892,6 +2985,9 @@ function ChatPageInner() {
         : { allowed: false, preview: false, sound: false };
       const finalizedBeforeCreate = finalizedBeforeEventRef.current.delete(liveIdentity);
       const signalReady = ev.is_final !== false || finalizedBeforeCreate;
+      if (signalReady) {
+        activityReplacementEvent = ev.is_final === false ? { ...ev, is_final: true } : ev;
+      }
       if (
         genuinelyNewEvent &&
         !signalReady &&
@@ -2908,7 +3004,7 @@ function ChatPageInner() {
         notificationAllowed: notificationPolicy.allowed,
         soundAllowed: notificationPolicy.sound,
         mine,
-        countable: isCountableEvent(ev),
+        countable: isCountableEvent(ev) && eventNotificationTier(ev) !== "in_app",
         genuinelyNew: genuinelyNewFinalMessage,
         observed: room.observed === true,
       })) {
@@ -2933,6 +3029,7 @@ function ChatPageInner() {
       // ping me. The unread indicator below still updates so the Observing tab
       // can show there's new activity.
       if (!quiet && shouldNotify && ownerId && notificationPolicy.allowed) {
+        const notificationTier = eventNotificationTier(ev);
         const body = notificationPolicy.preview ? notificationBody(ev) : "New message";
         const display = notificationDisplay(room, contacts.byPeer);
         const title = notificationPolicy.preview ? display.title : "Silicon Interface";
@@ -2946,21 +3043,27 @@ function ChatPageInner() {
           avatarUrl: display.avatarUrl,
           avatarSeed: display.avatarSeed,
         });
-        showBrowserNotification(title, {
-          body,
-          tag: ev.event_id,
-          roomId: rid,
-          silent: !notificationPolicy.sound,
-        });
+        if (notificationTier !== "in_app") {
+          showBrowserNotification(title, {
+            body,
+            tag: ev.event_id,
+            roomId: rid,
+            silent: !notificationPolicy.sound,
+            requireInteraction: notificationTier === "prominent_push",
+          });
+        }
         // Present → in-app toast; absent → the OS notification above covers it.
         if (present) {
-          toast.message(title, {
+          const options = {
+            id: ev.event_id,
             description: body,
             action: {
               label: "open",
               onClick: () => navigate(`/chat?room=${encodeURIComponent(rid)}`),
             },
-          });
+          };
+          if (notificationTier === "prominent_push") toast.error(title, options);
+          else toast.message(title, options);
         }
       }
       setRooms((prev) =>
@@ -3021,7 +3124,7 @@ function ChatPageInner() {
             const presence = observePresenceActivity(peer.presence, ev.created_at);
             return presence === peer.presence ? peer : { ...peer, presence };
           });
-          return mergeRoomReceiptProjection(r, {
+          const projected = mergeRoomReceiptProjection(r, {
             ...r,
             peers,
             last_event:
@@ -3089,6 +3192,9 @@ function ChatPageInner() {
                 }
               : r.unread_boundary,
           });
+          return resolvedWorkBlocker && roomProjectsEventAsUnread(r, ev, myUsername)
+            ? retractRoomUnreadEvent(projected, ev.event_id)
+            : projected;
         }),
       );
       // A real event landed for this room — clear any "waiting" sidebar
@@ -3171,7 +3277,7 @@ function ChatPageInner() {
             notificationAllowed: notificationPolicy.allowed,
             soundAllowed: notificationPolicy.sound,
             mine,
-            countable: isCountableEvent(ev),
+            countable: isCountableEvent(ev) && eventNotificationTier(ev) !== "in_app",
             genuinelyNew: true,
             observed: room.observed === true,
           })) {
@@ -3189,6 +3295,7 @@ function ChatPageInner() {
             ownerId &&
             notificationPolicy.allowed
           ) {
+            const notificationTier = eventNotificationTier(ev);
             const body = notificationPolicy.preview
               ? notificationBody(ev)
               : "New message";
@@ -3206,20 +3313,26 @@ function ChatPageInner() {
               avatarUrl: display.avatarUrl,
               avatarSeed: display.avatarSeed,
             });
-            showBrowserNotification(title, {
-              body,
-              tag: ev.event_id,
-              roomId: f.room_id,
-              silent: !notificationPolicy.sound,
-            });
+            if (notificationTier !== "in_app") {
+              showBrowserNotification(title, {
+                body,
+                tag: ev.event_id,
+                roomId: f.room_id,
+                silent: !notificationPolicy.sound,
+                requireInteraction: notificationTier === "prominent_push",
+              });
+            }
             if (present) {
-              toast.message(title, {
+              const options = {
+                id: ev.event_id,
                 description: body,
                 action: {
                   label: "open",
                   onClick: () => navigate(`/chat?room=${encodeURIComponent(f.room_id)}`),
                 },
-              });
+              };
+              if (notificationTier === "prominent_push") toast.error(title, options);
+              else toast.message(title, options);
             }
           }
           if (countableIncoming) {
@@ -3249,6 +3362,18 @@ function ChatPageInner() {
                 },
               };
             }));
+          }
+          if (eventReplacesManagerActivity(ev)) {
+            settleCachedManagerActivity(f.room_id, {
+              reason: "final_message",
+              progress_group_id:
+                typeof ev.content.progress_group_id === "string"
+                  ? ev.content.progress_group_id
+                  : null,
+              occurred_at: new Date().toISOString(),
+              final_message_event_id: ev.event_id,
+            });
+            reconcileRoomManagerActivity(f.room_id);
           }
         }
       } else if (!seenLiveEventIdentitiesRef.current.has(signalKey)) {
@@ -3415,6 +3540,16 @@ function ChatPageInner() {
       if (f.kind === "chat.preferences") {
         window.dispatchEvent(new CustomEvent("silicon:chat-preferences", { detail: f.data }));
       }
+      if (f.kind === "extend.request") {
+        const requestId =
+          typeof f.data.request_id === "string" ? f.data.request_id : "";
+        const parsed = parseToolSetupAccountState(f.data, requestId);
+        if (parsed) {
+          window.dispatchEvent(
+            new CustomEvent(TOOL_SETUP_STATE_EVENT, { detail: parsed }),
+          );
+        }
+      }
       if (
         f.kind === "moderation.block" ||
         f.kind === "room.notifications" ||
@@ -3436,15 +3571,6 @@ function ChatPageInner() {
     // reopened or refreshed mid-task can restore its progress line — the room
     // view is unmounted while closed and never sees these frames.
     const progressRoom = "room_id" in f ? f.room_id : null;
-    // Mirror the chat's progress gating: a run's status is only shown while the
-    // silicon hasn't answered yet. Once the room's last real message is from a
-    // silicon, the chat hides the progress line — so the sidebar must too, or a
-    // stray trailing frame would leave a "working…" preview with nothing behind
-    // it in the chat.
-    const runAnswered =
-      !!progressRoom &&
-      roomsRef.current.find((r) => r.room_id === progressRoom)?.last_event?.sender_kind ===
-        "silicon";
     if (f.type === "progress" && progressRoom) {
       const activityKind = f.kind;
       if (
@@ -3468,33 +3594,43 @@ function ChatPageInner() {
           };
         });
       }
-      if (f.state === "done" || runAnswered) {
-        markRoomWorking(progressRoom, false);
-        clearRoomProgress(progressRoom);
-      } else if (f.state && f.progress_group_id) {
-        markRoomWorking(progressRoom, true, f.note || "");
-        setRoomProgress(progressRoom, {
-          roomId: progressRoom,
-          groupId: f.progress_group_id,
-          state: f.state as ProgressState,
-          note: f.note || "",
-          updatedAt: Date.now(),
-          source: "server",
-          pct: typeof f.progress_pct === "number" ? f.progress_pct : null,
-          handle: f.member_handle ?? null,
-          anchorEventId: f.run_anchor_event_id ?? null,
+      if (f.state && f.progress_group_id) {
+        const occurredAt = new Date().toISOString();
+        recordManagerActivity(f, {
+          room_id: progressRoom,
+          occurred_at: occurredAt,
         });
+        const selectedGroup = reconcileRoomManagerActivity(progressRoom);
+        if (selectedGroup?.progress_group_id === f.progress_group_id) {
+          setRoomProgress(progressRoom, {
+            roomId: progressRoom,
+            groupId: f.progress_group_id,
+            state: f.state as ProgressState,
+            note: f.note || "",
+            updatedAt: Date.now(),
+            source: "server",
+            pct: typeof f.progress_pct === "number" ? f.progress_pct : null,
+            handle: f.member_handle ?? null,
+            anchorEventId: f.run_anchor_event_id ?? null,
+          });
+        }
       }
     } else if (f.type === "event" && f.event.type === "m.progress" && progressRoom) {
       const state = String(f.event.content.state || "thinking");
-      if (state === "done" || runAnswered) {
-        markRoomWorking(progressRoom, false);
-        clearRoomProgress(progressRoom);
-      } else {
-        markRoomWorking(progressRoom, true, String(f.event.content.note || ""));
+      const groupId = String(f.event.content.progress_group_id || f.event.event_id);
+      recordManagerActivity(
+        { ...f.event.content, room_id: progressRoom, event_id: f.event.event_id },
+        {
+          room_id: progressRoom,
+          occurred_at: f.event.created_at,
+          frame_id: f.event.event_id,
+        },
+      );
+      const selectedGroup = reconcileRoomManagerActivity(progressRoom);
+      if (selectedGroup?.progress_group_id === groupId) {
         setRoomProgress(progressRoom, {
           roomId: progressRoom,
-          groupId: String(f.event.content.progress_group_id || f.event.event_id),
+          groupId,
           state: state as ProgressState,
           note: String(f.event.content.note || ""),
           updatedAt: Date.now(),
@@ -3509,10 +3645,25 @@ function ChatPageInner() {
             : null,
         });
       }
-    } else if (f.type === "event" && progressRoom && f.event.sender_kind === "silicon") {
-      // a real silicon message means it's done working in that room
-      markRoomWorking(progressRoom, false);
-      clearRoomProgress(progressRoom);
+    } else if (
+      f.type === "event" &&
+      progressRoom &&
+      activityReplacementEvent !== null &&
+      eventReplacesManagerActivity(activityReplacementEvent)
+    ) {
+      // A final conversational response replaces only the newest manager
+      // activity run. Durable task/update cards may arrive while work continues.
+      settleCachedManagerActivity(progressRoom, {
+        reason: "final_message",
+        progress_group_id:
+          typeof f.event.content.progress_group_id === "string"
+            ? f.event.content.progress_group_id
+            : null,
+        occurred_at:
+          f.event.is_final === false ? new Date().toISOString() : f.event.created_at,
+        final_message_event_id: f.event.event_id,
+      });
+      reconcileRoomManagerActivity(progressRoom);
     }
     };
   });
@@ -3583,8 +3734,8 @@ function ChatPageInner() {
     return list;
   }, [rooms, filters, sidebarQuery, roomTeams, showArchivedRooms]);
 
-  const archivedRoomCount = React.useMemo(
-    () => rooms.filter((room) => room.list_preferences?.archived === true).length,
+  const archivedRoomEntry = React.useMemo(
+    () => projectArchivedRoomListEntry(rooms),
     [rooms],
   );
   const updateRoomListPreference = React.useCallback(async (
@@ -3945,7 +4096,8 @@ function ChatPageInner() {
           groupSections={groupSections}
           ungroupedRooms={ungroupedRooms}
           groupControls={groupControls}
-          archivedCount={archivedRoomCount}
+          archivedCount={archivedRoomEntry.count}
+          archivedLatestRoom={archivedRoomEntry.latest}
           showArchived={showArchivedRooms}
           onShowArchivedChange={setShowArchivedRooms}
           onListPreferenceChange={updateRoomListPreference}
@@ -4021,6 +4173,25 @@ function ChatPageInner() {
         }}
         onConfirm={confirmGroupPrompt}
       />
+
+      {callbackSetupRequestId && (
+        <ToolSetupDialog
+          open={callbackSetupOpen}
+          onOpenChange={(nextOpen) => {
+            if (nextOpen) {
+              setDismissedSetupRequestId("");
+              return;
+            }
+            setDismissedSetupRequestId(callbackSetupRequestId);
+            const url = new URL(window.location.href);
+            url.searchParams.delete("extend_request");
+            const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+            window.history.replaceState(null, "", nextUrl);
+            lastSafeChatUrlRef.current = nextUrl;
+          }}
+          requestId={callbackSetupRequestId}
+        />
+      )}
     </>
   );
 }

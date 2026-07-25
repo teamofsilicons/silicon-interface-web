@@ -14,6 +14,7 @@ import { useResendCooldown } from "@/lib/use-resend";
 import {
   findCountry,
   guessCountryIso2,
+  normalizePhoneInput,
   normalizePhonePaste,
   parseE164,
   type Country,
@@ -60,6 +61,7 @@ function RegisterPageInner() {
   const search = useSearchParams();
   const initialEmail = search.get("email") ?? "";
   const initialPhone = parseE164(search.get("phone") ?? "");
+  const hasInitialPhone = Boolean(initialPhone);
   const noticeNew = search.get("notice") === "new";
 
   // Resolve the HttpOnly refresh cookie before exposing account creation. This
@@ -91,6 +93,7 @@ function RegisterPageInner() {
     () => initialPhone?.country ?? findCountry(guessCountryIso2()) ?? findCountry("US")!,
   );
   const [number, setNumber] = React.useState(() => initialPhone?.number ?? "");
+  const phoneSelectionTouchedRef = React.useRef(Boolean(initialPhone));
   const [phoneVerified, setPhoneVerified] = React.useState(false);
   const [phoneDialog, setPhoneDialog] = React.useState(false);
   const phoneResend = useResendCooldown({ persistKey: "silicon-interface:resend:register-phone" });
@@ -100,6 +103,20 @@ function RegisterPageInner() {
   const [clock, setClock] = React.useState(() => Date.now());
 
   const phoneE164 = number ? `+${country.dial}${number.replace(/\D/g, "")}` : "";
+
+  React.useEffect(() => {
+    if (hasInitialPhone) return;
+    const controller = new AbortController();
+    void fetch("/api/location", { cache: "no-store", signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: { country?: string | null } | null) => {
+        if (phoneSelectionTouchedRef.current) return;
+        const detected = payload?.country ? findCountry(payload.country) : undefined;
+        if (detected) setCountry(detected);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [hasInitialPhone]);
   const providerWaitSeconds = Math.max(
     0,
     Math.ceil((providerRetryAt - clock) / 1000),
@@ -371,20 +388,32 @@ function RegisterPageInner() {
           <div className="space-y-4">
             <Label htmlFor="phone">phone number</Label>
             <div className="flex gap-2">
-              <CountryCodeSelect value={country.iso2} onChange={setCountry} />
+              <CountryCodeSelect
+                value={country.iso2}
+                onChange={(next) => {
+                  phoneSelectionTouchedRef.current = true;
+                  setCountry(next);
+                }}
+              />
               <Input
                 id="phone"
                 autoFocus
                 inputMode="tel"
                 placeholder="555 123 4567"
                 value={number}
-                onChange={(e) => setNumber(e.target.value)}
+                onChange={(e) => {
+                  phoneSelectionTouchedRef.current = true;
+                  const normalized = normalizePhoneInput(e.target.value, country);
+                  setCountry(normalized.country);
+                  setNumber(normalized.number);
+                }}
                 onPaste={(e) => {
                   // Normalize pasted E.164/international input so we don't
                   // double the country code or keep a national trunk "0".
                   const text = e.clipboardData.getData("text");
                   if (!text.trim()) return;
                   e.preventDefault();
+                  phoneSelectionTouchedRef.current = true;
                   const { country: c, number: n } = normalizePhonePaste(text, country);
                   setCountry(c);
                   setNumber(n);

@@ -24,14 +24,12 @@ export function selectionTouchesTimeline(
 }
 
 export function shouldLoadOlderNearTimelineTop(input: {
-  selectionActive: boolean;
   scrollTop: number;
   hasMore: boolean;
   loadingOlder: boolean;
   threshold?: number;
 }): boolean {
   return (
-    !input.selectionActive &&
     input.scrollTop <= (input.threshold ?? 160) &&
     input.hasMore &&
     !input.loadingOlder

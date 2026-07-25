@@ -104,6 +104,9 @@ export interface OutboxEntry {
     eventContent?: Record<string, unknown>;
     completionMeta?: Record<string, unknown>;
     transcribe?: boolean;
+    /** Stable Glass media identity returned after object storage completion.
+     * Unlike a presigned S3 URL, this never expires and is safe to journal. */
+    uploadedMediaId?: string;
     phase?: "acquiring" | "staged";
     acquisition?: {
       provider: "giphy";
@@ -316,7 +319,18 @@ function isAuthorizedCorrectionTransition(
   if (correction.action === "restart_upload") {
     const withoutUploadIdentity = (entry: OutboxEntry): OutboxEntry => ({
       ...entry,
-      media: entry.media ? { ...entry.media, uploadClientId: "" } : undefined,
+      content: entry.content
+        ? Object.fromEntries(
+            Object.entries(entry.content).filter(([key]) => key !== "media_id"),
+          )
+        : undefined,
+      media: entry.media
+        ? {
+            ...entry.media,
+            uploadClientId: "",
+            uploadedMediaId: undefined,
+          }
+        : undefined,
     });
     return previous.operation === "media" &&
       next.operation === "media" &&
@@ -399,6 +413,8 @@ function parseEntry(value: unknown): OutboxEntry | null {
         typeof entry.media.sourceClientId !== "string") ||
       (entry.media.uploadClientId != null &&
         typeof entry.media.uploadClientId !== "string") ||
+      (entry.media.uploadedMediaId != null &&
+        typeof entry.media.uploadedMediaId !== "string") ||
       !["image", "file", "voice"].includes(entry.media.kind) ||
       typeof entry.media.filename !== "string" ||
       typeof entry.media.mime !== "string" ||
@@ -1071,11 +1087,27 @@ export async function enqueueOutbox(ownerId: string, entry: OutboxEntry): Promis
   }
 }
 
-/** Return the trace root from the durable authority. Missing legacy metadata is
- * upgraded and committed before the caller may issue its network request. */
+/** Return the trace root for one durable intent without reconciling unrelated
+ * outbox rows. Tracing is optional and must never delay message transport. */
 export async function outboxTraceparent(ownerId: string, clientId: string): Promise<string> {
-  const entry = (await listOutbox(ownerId)).find((candidate) => candidate.clientId === clientId);
-  return validTraceparent(entry?.traceparent);
+  // Every successful enqueue writes the per-message mirror before returning.
+  // Read that exact row first instead of running listOutbox(), whose job is to
+  // reconcile every pending row and acknowledgement across both durability
+  // layers. A send must never wait behind unrelated cross-tab reconciliation
+  // merely to recover optional tracing metadata.
+  const mirrored = validTraceparent(readMirrorIntent(ownerId, clientId)?.traceparent);
+  if (mirrored) return mirrored;
+
+  try {
+    const db = await openDb();
+    const transaction = db.transaction(STORE, "readonly");
+    const row = await requestResult(
+      transaction.objectStore(STORE).get(`${ownerId}:${clientId}`),
+    ) as StoredOutboxRow | undefined;
+    return validTraceparent(row?.entry?.traceparent);
+  } catch {
+    return "";
+  }
 }
 
 /** Record authoritative server acceptance. Local cleanup is deliberately

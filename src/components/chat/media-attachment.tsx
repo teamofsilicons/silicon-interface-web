@@ -12,7 +12,12 @@ import {
 } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
-import { getCachedMedia, setCachedMedia } from "@/lib/media-cache";
+import {
+  getCachedMedia,
+  getLocalMediaPreview,
+  refreshMediaDetail,
+  subscribeMediaDetail,
+} from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { usePdfThumbnail } from "@/lib/pdf-thumb";
 import { isTextLike, useTextSnippetState } from "@/lib/text-preview";
@@ -40,6 +45,7 @@ export function MediaAttachment({
   localUrl,
   localDurationMs,
   localPeaks,
+  initialStatus,
   width,
   height,
   replyToEventId,
@@ -47,6 +53,7 @@ export function MediaAttachment({
   eventId,
   onAttachAnnotations,
   onOpenAnnotation,
+  presentation = "timeline",
 }: {
   mediaId: string;
   mime?: string;
@@ -67,19 +74,28 @@ export function MediaAttachment({
   localUrl?: string | null;
   localDurationMs?: number | null;
   localPeaks?: number[] | null;
+  /** Event-time scan state. Media detail polling remains authoritative and
+   * advances pending attachments without reposting the chat event. */
+  initialStatus?: MediaObject["status"];
   replyToEventId?: string;
   /** Room and source identifiers enable annotation for image/PDF previews. */
   roomId?: string;
   eventId?: string;
   onAttachAnnotations?: (draft: AnnotationDraft) => void;
   onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
+  /** Profile shared-content layouts use the same loader/preview behavior with
+   * container-sized cards instead of timeline bubble caps. */
+  presentation?: "timeline" | "profile-media" | "profile-file" | "profile-voice";
 }) {
   // Seed from the session cache so a re-mounted (scrolled-back-to) attachment
   // paints instantly with the right dimensions — no spinner, no aspect snap.
   const seeded = localUrl ? null : getCachedMedia(mediaId);
-  const [url, setUrl] = React.useState<string | null>(localUrl ?? seeded?.download_url ?? null);
+  const retainedLocalUrl = localUrl ?? getLocalMediaPreview(mediaId);
+  const [url, setUrl] = React.useState<string | null>(
+    retainedLocalUrl ?? seeded?.download_url ?? null,
+  );
   const [media, setMedia] = React.useState<MediaObject | null>(
-    localUrl
+    retainedLocalUrl
       ? ({
           media_id: mediaId || "local",
           uploader_kind: "carbon",
@@ -101,9 +117,12 @@ export function MediaAttachment({
   );
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [assetLoaded, setAssetLoaded] = React.useState(false);
   // A late metadata refresh is allowed to improve a rendered preview, never
   // to replace one that already worked with a transient "unavailable" card.
-  const hasSuccessfulPreviewRef = React.useRef(Boolean(localUrl ?? seeded?.download_url));
+  const hasSuccessfulPreviewRef = React.useRef(
+    Boolean(retainedLocalUrl ?? seeded?.download_url),
+  );
 
   // Mini first-page preview for PDF attachments. Declared at the top (before the
   // status/loading early returns) to keep the Hook order stable.
@@ -120,24 +139,27 @@ export function MediaAttachment({
     textLikeAttachment,
   );
 
-  // §6.2 — Pending media (e.g. an in-flight TTS render) reports `status:
-  // "pending"` with a null `download_url`. Rather than show an inert
-  // placeholder forever, we re-fetch on a bounded interval until the server
-  // flips it to "ready" (or a terminal "infected"/"failed"). The attempt cap
-  // stops us hammering the API forever if a job is stuck server-side.
-  const POLL_INTERVAL_MS = 4000;
-  const MAX_POLLS = 30; // ~2 minutes of polling, then we give up gracefully.
   const [pollExhausted, setPollExhausted] = React.useState(false);
 
   const retriedRef = React.useRef(false);
   React.useEffect(() => {
     let alive = true;
-    if (localUrl) {
+    queueMicrotask(() => {
+      if (alive) setAssetLoaded(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [url]);
+  React.useEffect(() => {
+    let alive = true;
+    const immediateUrl = localUrl ?? getLocalMediaPreview(mediaId);
+    if (immediateUrl) {
       queueMicrotask(() => {
         if (!alive) return;
         setFailed(false);
         setPollExhausted(false);
-        setUrl(localUrl);
+        setUrl(immediateUrl);
         setMedia(
           {
             media_id: mediaId || "local",
@@ -158,11 +180,12 @@ export function MediaAttachment({
           } as MediaObject,
         );
       });
+    }
+    if (!mediaId) {
       return () => {
         alive = false;
       };
     }
-    if (!mediaId) return;
     retriedRef.current = false;
     queueMicrotask(() => {
       if (!alive) {
@@ -171,53 +194,28 @@ export function MediaAttachment({
       setFailed(false);
       setPollExhausted(false);
     });
-    let attempts = 0;
-    let errors = 0;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const poll = async () => {
-      try {
-        const r = await api.mediaDetail(mediaId);
-        // Warm the cache BEFORE the alive check: when scrolling fast, Virtuoso
-        // unmounts the row before this resolves. If we bailed first, the dims
-        // were never cached, so the next scroll re-fetched and the bubble
-        // re-snapped to its real aspect — the "keeps resizing" jank. Caching
-        // here means the next mount seeds dims synchronously and never resizes.
-        setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
+    const unsubscribe = subscribeMediaDetail(
+      mediaId,
+      () => api.mediaDetail(mediaId),
+      (state) => {
         if (!alive) return;
-        errors = 0;
-        setMedia(r.media);
-        setUrl(r.download_url);
-        if (r.download_url) hasSuccessfulPreviewRef.current = true;
-        // Keep polling only while the object is still being produced and we
-        // don't yet have a usable URL. Terminal states (ready/infected/failed)
-        // — or any state that already yielded a URL — stop the loop.
-        const stillPending = r.media.status === "pending" && !r.download_url;
-        if (stillPending) {
-          attempts += 1;
-          if (attempts >= MAX_POLLS) {
-            setPollExhausted(true);
-            return;
-          }
-          timer = setTimeout(poll, POLL_INTERVAL_MS);
+        const value = state.value;
+        if (value) {
+          setMedia(value.media);
+          // A pending scan deliberately has no remote capability yet. Never
+          // erase bytes this sender already has locally; swap to the durable
+          // object-store URL only when Glass publishes the clean verdict.
+          if (value.download_url) setUrl(value.download_url);
+          else if (!immediateUrl) setUrl(null);
+          if (value.download_url) hasSuccessfulPreviewRef.current = true;
         }
-      } catch {
-        if (!alive) return;
-        // One dropped request must not brand the attachment "unavailable"
-        // forever — a timeline mounting dozens of bubbles makes transient
-        // fetch failures routine. Back off and retry before giving up.
-        errors += 1;
-        if (errors < 4) {
-          timer = setTimeout(poll, 1000 * errors);
-          return;
-        }
-        if (!hasSuccessfulPreviewRef.current) setFailed(true);
-      }
-    };
-    void poll();
+        setPollExhausted(state.exhausted);
+        if (!hasSuccessfulPreviewRef.current) setFailed(state.failed);
+      },
+    );
     return () => {
       alive = false;
-      if (timer) clearTimeout(timer);
+      unsubscribe();
     };
   }, [mediaId, localUrl, localDurationMs, localPeaks, mime]);
 
@@ -227,9 +225,11 @@ export function MediaAttachment({
     if (localUrl || !mediaId) return;
     if (retriedRef.current) return;
     retriedRef.current = true;
-    api
-      .mediaDetail(mediaId)
-      .then((r) => setUrl(r.download_url))
+    refreshMediaDetail(mediaId, () => api.mediaDetail(mediaId))
+      .then((r) => {
+        if (r?.download_url) setUrl(r.download_url);
+        else setFailed(true);
+      })
       .catch(() => undefined);
   }, [mediaId, localUrl]);
 
@@ -278,7 +278,9 @@ export function MediaAttachment({
   // object comes back with a null `download_url`; without these guards an
   // image would render `src={null}` and audio would have no source while the
   // placeholder spun forever.
-  if (media?.status === "infected") {
+  const effectiveStatus = media?.status ?? initialStatus;
+
+  if (effectiveStatus === "infected") {
     return (
       <div className="inline-flex items-center gap-2 border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
         <ShieldWarning className="h-4 w-4 shrink-0" weight="fill" />
@@ -286,7 +288,7 @@ export function MediaAttachment({
       </div>
     );
   }
-  if (media?.status === "failed") {
+  if (effectiveStatus === "failed") {
     return (
       <div className="inline-flex items-center gap-2 border border-destructive/40 bg-card px-3 py-2 text-xs text-destructive">
         <WarningCircle className="h-4 w-4 shrink-0" weight="fill" />
@@ -301,7 +303,7 @@ export function MediaAttachment({
     // over the waveform so the user knows it's working, not stuck; the poll in
     // the fetch effect refreshes us once the server flips it to "ready".
     const isPendingTts =
-      media?.status === "pending" &&
+      effectiveStatus === "pending" &&
       (media?.kind === "tts_output" || (mime || "").toLowerCase().startsWith("audio/"));
     if (isPendingTts) {
       return (
@@ -342,12 +344,18 @@ export function MediaAttachment({
     // bars + timer exist before bytes arrive.
     if ((mime || "").toLowerCase().startsWith("audio/")) {
       return (
-        <SiliconAudio
-          url={null}
-          peaks={media?.peaks ?? null}
-          durationMs={media?.duration_ms ?? null}
-          className="w-full max-w-[20rem]"
-        />
+        <div className="relative w-full" aria-busy="true">
+          <SiliconAudio
+            url={null}
+            peaks={media?.peaks ?? null}
+            durationMs={media?.duration_ms ?? null}
+            className={cn(
+              "w-full opacity-45",
+              presentation === "profile-voice" ? "max-w-none" : "max-w-[20rem]",
+            )}
+          />
+          <CircleNotch className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin" />
+        </div>
       );
     }
     // A file/pdf/zip whose URL hasn't resolved yet: render the SAME fixed-size
@@ -358,6 +366,8 @@ export function MediaAttachment({
       <AttachmentCard
         glyph={fileGlyph(filenameProp || caption || "", m)}
         filename={filenameProp?.trim() || caption?.trim() || "file"}
+        loading
+        className={presentation === "profile-file" ? "w-full shadow-none" : undefined}
         textPreviewFormat={
           languageForFile(filenameProp || caption, m)?.id === "csv" ? "csv" : "plain"
         }
@@ -389,7 +399,10 @@ export function MediaAttachment({
               if (e.key === "Enter" || e.key === " ") setPreviewOpen(true);
             }}
             aria-label="preview image"
-            className="group relative w-72 max-w-full cursor-pointer overflow-hidden bg-card"
+            className={cn(
+              "group relative max-w-full cursor-pointer overflow-hidden bg-card",
+              presentation === "profile-media" ? "w-full" : "w-72",
+            )}
             style={{
               aspectRatio: imgAspect,
               contain: "layout paint",
@@ -407,10 +420,23 @@ export function MediaAttachment({
                 loading="lazy"
                 decoding="async"
                 fetchPriority={isGif ? "low" : "auto"}
-                onError={refreshUrl}
+                onLoad={() => setAssetLoaded(true)}
+                onError={() => {
+                  setAssetLoaded(false);
+                  refreshUrl();
+                }}
                 className="sdr-media absolute inset-0 h-full w-full select-none object-contain transition-opacity hover:opacity-90"
               />
             )}
+            {!assetLoaded ? (
+              <div
+                className="pointer-events-none absolute inset-0 grid place-items-center bg-background/55"
+                role="status"
+                aria-label={isGif ? "loading GIF" : "loading attachment"}
+              >
+                <CircleNotch className="h-5 w-5 animate-spin" />
+              </div>
+            ) : null}
             {!isGif && (
               <DownloadOverlay onClick={() => downloadAsset(url, filename, { mediaId })} />
             )}
@@ -443,7 +469,10 @@ export function MediaAttachment({
     return (
       <>
         <div
-          className="group relative w-72 max-w-full overflow-hidden bg-card"
+          className={cn(
+            "group relative max-w-full overflow-hidden bg-card",
+            presentation === "profile-media" ? "w-full" : "w-72",
+          )}
           style={{ aspectRatio: vidAspect }}
         >
           <video
@@ -453,9 +482,22 @@ export function MediaAttachment({
             preload="metadata"
             tabIndex={-1}
             draggable={false}
-            onError={refreshUrl}
+            onLoadedData={() => setAssetLoaded(true)}
+            onError={() => {
+              setAssetLoaded(false);
+              refreshUrl();
+            }}
             className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain"
           />
+          {!assetLoaded ? (
+            <div
+              className="pointer-events-none absolute inset-0 grid place-items-center bg-background/55"
+              role="status"
+              aria-label="loading attachment"
+            >
+              <CircleNotch className="h-5 w-5 animate-spin" />
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={() => setPreviewOpen(true)}
@@ -503,7 +545,10 @@ export function MediaAttachment({
         url={url}
         peaks={media?.peaks ?? null}
         durationMs={media?.duration_ms ?? null}
-        className="w-full max-w-[20rem]"
+        className={cn(
+          "w-full",
+          presentation === "profile-voice" ? "max-w-none" : "max-w-[20rem]",
+        )}
       />
     );
   }
@@ -524,6 +569,7 @@ export function MediaAttachment({
         textPreviewFormat={attachmentTextPreviewFormat(filename, m)}
         textPreviewLoading={textPeek.loading}
         sizeLabel={sizeLabel}
+        className={presentation === "profile-file" ? "w-full shadow-none" : undefined}
         onClick={() => {
           if (canPreview) setPreviewOpen(true);
           else if (url) downloadAsset(url, filename, { mediaId });

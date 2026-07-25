@@ -25,6 +25,7 @@ export function AttachmentCard({
   textPreview,
   textPreviewFormat = "plain",
   textPreviewLoading = false,
+  loading = false,
   sizeLabel,
   tilt,
   onClick,
@@ -41,6 +42,8 @@ export function AttachmentCard({
   textPreviewFormat?: "plain" | "markdown" | "csv";
   /** Keeps CSV cards at their final geometry while the content head loads. */
   textPreviewLoading?: boolean;
+  /** Shows transport/detail loading without changing the card geometry. */
+  loading?: boolean;
   sizeLabel?: string | null;
   /** Degrees of rotation (pins only). Omit for a flat standalone card. */
   tilt?: number;
@@ -106,6 +109,15 @@ export function AttachmentCard({
         ) : (
           <Glyph className="h-9 w-9 transition-transform group-hover:scale-110" weight="thin" />
         )}
+        {loading ? (
+          <div
+            className="absolute inset-0 grid place-items-center bg-background/65"
+            role="status"
+            aria-label="loading attachment"
+          >
+            <CircleNotch className="size-5 animate-spin" />
+          </div>
+        ) : null}
       </div>
       {/* Footer: small type-glyph + middle-truncated filename (+ optional size). */}
       <div className="flex items-center gap-1 border-t px-2 py-1.5">

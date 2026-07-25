@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { roomDisplay } from "@/lib/peers";
+import { maintenanceQueueAcknowledgement } from "@/lib/silicon-maintenance";
 import type { Event, Room } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -115,6 +116,11 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
       const okRooms = results.length - failures.length;
       const msgN = items.length;
       const roomN = targets.length;
+      const maintenanceAck = maintenanceQueueAcknowledgement(
+        results.flatMap((result) =>
+          result.status === "fulfilled" ? result.value : [],
+        ),
+      );
 
       if (failures.length === 0) {
         // Full success. Preserve the terse single-message wording; report both
@@ -142,6 +148,16 @@ export function ForwardDialog({ open, onOpenChange, event, events, rooms, source
           `couldn't forward to ${failures.length} ${failures.length === 1 ? "chat" : "chats"} - ${detail}`,
         );
         // On partial/total failure keep the picker open so the user can retry.
+      }
+      if (maintenanceAck) {
+        const names = maintenanceAck.recipientNames;
+        toast.info("Forwarded message safely queued", {
+          id: `forward-maintenance-queued:${sourceRoomId}:${targets.join(",")}`,
+          description:
+            names.length === 1
+              ? `${names[0]} is updating. ${maintenanceAck.message}`
+              : maintenanceAck.message,
+        });
       }
     } finally {
       setSending(false);

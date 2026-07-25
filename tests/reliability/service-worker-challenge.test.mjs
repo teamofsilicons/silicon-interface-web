@@ -284,16 +284,43 @@ test("only a new unread canonical message can make push notification sound", asy
     stream_writer: "writer-a",
     stream_position: 6,
     sound: true,
+    notification_tier: "prominent_push",
   };
   await push(fresh);
   assert.equal(shown.length, 1);
   assert.equal(shown[0].silent, false);
+  assert.equal(shown[0].requireInteraction, true);
   await push(fresh);
   assert.equal(shown.length, 1, "a duplicate push must not display or sound again");
 
-  await push({ owner_id: "owner-1", title: "Announcement", sound: true });
+  await push({
+    owner_id: "owner-1",
+    room_id: "room-1",
+    notification_id: "event-explicit-prominent",
+    tag: "event-explicit-prominent",
+    stream_writer: "writer-a",
+    stream_position: 7,
+    requireInteraction: true,
+  });
   assert.equal(shown.length, 2);
-  assert.equal(shown[1].silent, true, "non-message notifications are always silent");
+  assert.equal(shown[1].requireInteraction, true);
+
+  await push({
+    owner_id: "owner-1",
+    room_id: "room-1",
+    notification_id: "event-normal",
+    tag: "event-normal",
+    stream_writer: "writer-a",
+    stream_position: 8,
+    require_interaction: "true",
+  });
+  assert.equal(shown.length, 3);
+  assert.equal(shown[2].requireInteraction, false, "truthy strings cannot make a push sticky");
+
+  await push({ owner_id: "owner-1", title: "Announcement", sound: true });
+  assert.equal(shown.length, 4);
+  assert.equal(shown[3].silent, true, "non-message notifications are always silent");
+  assert.equal(shown[3].requireInteraction, false, "non-message pushes cannot become sticky");
   assert.ok(acknowledgements.some((row) => row.reason === "already_read"));
   assert.ok(acknowledgements.some((row) => row.reason === "duplicate"));
   await deleteDatabase("silicon-interface-notification-state");

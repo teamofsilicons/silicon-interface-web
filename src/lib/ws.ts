@@ -23,6 +23,13 @@ import {
   type HeartbeatPolicy,
 } from "./liveness-policy";
 import { probeApiConnectivity } from "./connectivity-classifier";
+import { socketActionForAuthChange } from "./socket-auth-change";
+import type { ChatConnectionState } from "./connection-status";
+import {
+  applicationStateForConnectivity,
+  socketBarrierRetryDelayMs,
+  waitForSocketBarrierRetry,
+} from "./socket-barrier-retry";
 
 interface UseWsOptions {
   onFrame?: (f: WsFrame) => void;
@@ -38,14 +45,10 @@ interface UseWsReturn {
   lastFrame: WsFrame | null;
   send: (frame: object) => void;
   reconnect: () => void;
-  state:
-    | "offline"
-    | "captive"
-    | "degraded"
-    | "connecting"
-    | "authenticating"
-    | "syncing"
-    | "online";
+  state: ChatConnectionState;
+  /** Independent application-wide reachability. A WebSocket repair alone is
+   * not a global outage while the HTTPS sync path remains healthy. */
+  applicationState: ChatConnectionState;
 }
 
 // Heartbeat keeps idle connections alive (proxies/load-balancers drop silent
@@ -79,6 +82,8 @@ function mintTicket(): Promise<string | null> {
 export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptions = {}): UseWsReturn {
   const [ready, setReady] = React.useState(false);
   const [state, setState] = React.useState<UseWsReturn["state"]>("offline");
+  const [applicationState, setApplicationState] =
+    React.useState<ChatConnectionState>("online");
   const [lastFrame, setLastFrame] = React.useState<WsFrame | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
   const onFrameRef = React.useRef(onFrame);
@@ -129,6 +134,7 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
       setReady(false);
       setState("offline");
+      setApplicationState("offline");
       return;
     }
     // Already have a live/connecting socket — don't stack a second one.
@@ -186,6 +192,7 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
         ws.addEventListener("open", () => {
           setReady(false);
           setState("authenticating");
+          setApplicationState("online");
           onlineRef.current = false;
           // Buffer anything arriving after TCP open until hello's authoritative
           // event/account barriers have both been drained.
@@ -199,11 +206,13 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
           setReady(false);
           if (navigator.onLine === false) {
             setState("offline");
+            setApplicationState("offline");
           } else {
             setState("degraded");
             void probeApiConnectivity().then((classification) => {
               if (wsRef.current !== null || onlineRef.current) return;
               setState(classification === "reachable" ? "degraded" : classification);
+              setApplicationState(applicationStateForConnectivity(classification));
             });
           }
           onlineRef.current = false;
@@ -268,11 +277,43 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
               barrierAbortRef.current?.abort();
               const barrierController = new AbortController();
               barrierAbortRef.current = barrierController;
-              void Promise.resolve(onBarrierRef.current?.(f, {
-                generation: barrierSeq,
-                signal: barrierController.signal,
-              }))
-                .then(() => {
+              const finishBarrier = async () => {
+                let retryAttempt = 0;
+                while (true) {
+                  try {
+                    await Promise.resolve(onBarrierRef.current?.(f, {
+                      generation: barrierSeq,
+                      signal: barrierController.signal,
+                    }));
+                  } catch {
+                    if (
+                      barrierController.signal.aborted ||
+                      barrierSeq !== connectSeqRef.current ||
+                      wsRef.current !== ws
+                    ) return;
+                    const classification = await probeApiConnectivity();
+                    if (
+                      barrierController.signal.aborted ||
+                      barrierSeq !== connectSeqRef.current ||
+                      wsRef.current !== ws
+                    ) return;
+                    setApplicationState(applicationStateForConnectivity(classification));
+                    // Keep the accepted transport and its ordered buffer. A
+                    // transient auth/HTTP/storage failure can be repaired
+                    // idempotently against the same hello barrier without a
+                    // disconnect/reconnect loop that delays receipt frames.
+                    setState("syncing");
+                    try {
+                      await waitForSocketBarrierRetry(
+                        socketBarrierRetryDelayMs(retryAttempt),
+                        barrierController.signal,
+                      );
+                    } catch {
+                      return;
+                    }
+                    retryAttempt += 1;
+                    continue;
+                  }
                   if (
                     barrierController.signal.aborted ||
                     barrierSeq !== connectSeqRef.current ||
@@ -287,6 +328,7 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
                   }
                   setReady(true);
                   setState("online");
+                  setApplicationState("online");
                   const foreground =
                     document.visibilityState === "visible" && document.hasFocus();
                   foregroundRef.current = foreground;
@@ -298,12 +340,10 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
                   } catch {
                     /* chat remains authoritative; lease expires safely */
                   }
-                })
-                .catch(() => {
-                  if (!barrierController.signal.aborted && wsRef.current === ws) {
-                    ws.close(CLIENT_SYNC_REPAIR_CLOSE_CODE, "sync failed");
-                  }
-                });
+                  return;
+                }
+              };
+              void finishBarrier();
               return;
             }
             if (!onlineRef.current) {
@@ -326,15 +366,9 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
       }
     };
 
-    // Silicon-key connections keep their existing query auth.
-    if (siliconKey) {
-      open(wsUrl({ silicon_key: siliconKey }));
-      return;
-    }
-
-    // Carbon (JWT) connections: mint a FRESH single-use ticket per attempt and
-    // connect with `?ticket=`. A mint failure retries via backoff — the JWT is
-    // never placed in the URL.
+    // Every principal mints a FRESH single-use ticket per attempt. Permanent
+    // Carbon and Silicon credentials stay in HTTPS headers and never enter a
+    // WebSocket URL, where proxies and access logs would retain them.
     void mintTicket().then((ticket) => {
       // A teardown (unmount / token change / manual reconnect) or a newer
       // connect attempt happened while we were minting — abort this one.
@@ -358,6 +392,7 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
         if (seq !== connectSeqRef.current || intentionalRef.current) return;
         if (classification !== "reachable") setState(classification);
         else setState("degraded");
+        setApplicationState(applicationStateForConnectivity(classification));
       });
       scheduleReconnect();
     });
@@ -379,9 +414,21 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
     };
   }, [enabled, connect, clearTimers]);
 
-  // Reconnect when the auth token changes.
+  // An established socket belongs to a principal, not to a particular short-
+  // lived HTTP access token. Only an actual session/key replacement tears it
+  // down; routine refreshes and profile edits leave realtime delivery intact.
   React.useEffect(() => {
-    return authStore.subscribe(() => {
+    return authStore.subscribe((change) => {
+      const action = socketActionForAuthChange({
+        change,
+        socketPresent: wsRef.current !== null,
+        hasAuthority: Boolean(authStore.getAccess() || authStore.getSiliconKey()),
+      });
+      if (action === "ignore") return;
+      if (action === "connect") {
+        connect();
+        return;
+      }
       intentionalRef.current = true;
       barrierAbortRef.current?.abort();
       barrierAbortRef.current = null;
@@ -390,9 +437,10 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
       wsRef.current = null;
       setReady(false);
       setState("offline");
+      setApplicationState("online");
       onlineRef.current = false;
       attemptsRef.current = 0;
-      setTimeout(() => connect(), 50);
+      if (action === "restart") setTimeout(() => connect(), 50);
     });
   }, [connect, clearTimers]);
 
@@ -423,10 +471,12 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
     const onOffline = () => {
       setReady(false);
       setState("offline");
+      setApplicationState("offline");
       wsRef.current?.close(1001, "network unavailable");
     };
     const classifyWake = () => {
       void probeApiConnectivity().then((classification) => {
+        setApplicationState(applicationStateForConnectivity(classification));
         if (classification === "reachable") wake();
         else {
           setReady(false);
@@ -590,5 +640,5 @@ export function useChatSocket({ onFrame, onBarrier, enabled = true }: UseWsOptio
     setTimeout(() => connect(), 50);
   }, [connect, clearTimers]);
 
-  return { ready, lastFrame, send, reconnect, state };
+  return { ready, lastFrame, send, reconnect, state, applicationState };
 }

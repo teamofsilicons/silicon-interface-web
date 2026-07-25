@@ -57,6 +57,30 @@ test("media source survives reopen until the event outbox owns it", async () => 
   assert.deepEqual(await store.listRoomMediaUploads("carbon:alice", "room-1"), []);
 });
 
+test("a matching uploaded file gets a cleanup row without storing its bytes again", async () => {
+  await deleteDatabase("silicon-interface-media-outbox");
+  installBrowser();
+  const store = await import("../../src/lib/media-upload-store.ts");
+  const row = await store.stageReusedMediaUpload({
+    ownerId: "carbon:reuse-owner",
+    roomId: "reuse-room",
+    clientId: "reuse-client",
+    outboxClientId: "reuse-client",
+    name: "again.pdf",
+    mime: "application/pdf",
+    kind: "file",
+    size: 42,
+    mediaId: "stable-media-id",
+  });
+  assert.equal(row.state, "completed");
+  assert.equal(row.mediaId, "stable-media-id");
+  assert.equal(row.blob, null);
+  assert.equal(
+    (await store.readMediaUpload("carbon:reuse-owner", "reuse-client")).mediaId,
+    "stable-media-id",
+  );
+});
+
 test("media sources are account scoped and logout cleanup is selective", async () => {
   const store = await import("../../src/lib/media-upload-store.ts");
   const blob = new Blob(["x"]);

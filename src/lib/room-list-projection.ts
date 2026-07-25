@@ -8,6 +8,46 @@ export function roomVisibleInArchiveView(
   return searchActive || Boolean(room.list_preferences?.archived) === showArchived;
 }
 
+/** The full "start a chat" empty state replaces the entire list chrome. Keep
+ * the list chrome mounted while browsing archives—even after the final room is
+ * unarchived—so its Back to conversations control can never disappear. */
+export function useStandaloneRoomListEmptyState(
+  loading: boolean,
+  topLevelEmpty: boolean,
+  archivedCount: number,
+  showArchived: boolean,
+): boolean {
+  return !loading && topLevelEmpty && archivedCount === 0 && !showArchived;
+}
+
+/** Aggregate the archive entry from the complete room projection. Its preview
+ * follows the newest activity—not pin state—because the archive row represents
+ * the latest archived conversation as a whole. */
+export function projectArchivedRoomListEntry(rooms: Room[]): {
+  count: number;
+  latest: Room | null;
+} {
+  let count = 0;
+  let latest: Room | null = null;
+  for (const room of rooms) {
+    if (!room.list_preferences?.archived) continue;
+    count += 1;
+    if (
+      latest === null ||
+      room.list_projection.activity_stream_position >
+        latest.list_projection.activity_stream_position ||
+      (
+        room.list_projection.activity_stream_position ===
+          latest.list_projection.activity_stream_position &&
+        room.room_id.localeCompare(latest.room_id) > 0
+      )
+    ) {
+      latest = room;
+    }
+  }
+  return { count, latest };
+}
+
 export function compareRoomListRows(a: Room, b: Room): number {
   const pinned = Number(Boolean(b.list_preferences?.pinned)) -
     Number(Boolean(a.list_preferences?.pinned));

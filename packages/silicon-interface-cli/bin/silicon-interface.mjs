@@ -17,7 +17,7 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 const CHAT_PROTOCOL = 1;
 const PING_INTERVAL_MS = 25_000;
 const PING_TIMEOUT_MS = 62_500;
@@ -25,6 +25,7 @@ const MAX_RECONNECT_MS = 15_000;
 const MAX_BUFFERED_FRAMES = 1_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const REQUEST_MAX_RETRIES = 4;
+const AUTH_REJECTION_COOLDOWN_MS = 5 * 60_000;
 const MEDIA_SEND_MAX_RETRIES = 60;
 const MEDIA_SEND_RETRY_TIMEOUT_MS = 60_000;
 const MEDIA_SEND_DEFAULT_RETRY_MS = 1_000;
@@ -112,6 +113,41 @@ function inboxPath() {
 
 function operationsPath() {
   return path.join(stateDir(), "operations.json");
+}
+
+function authRejectionPath() {
+  return path.join(stateDir(), "auth-rejection.json");
+}
+
+function siliconAuthIdentity(ctx) {
+  if (!ctx.config.siliconKey) return "";
+  return sha256Text(`${ctx.config.apiBase}\0${ctx.config.siliconKey}`);
+}
+
+function siliconAuthRejectionDelay(ctx, now = Date.now()) {
+  const identity = siliconAuthIdentity(ctx);
+  if (!identity) return 0;
+  const state = readJsonFile(authRejectionPath());
+  if (!state || state.identity !== identity) return 0;
+  return Math.max(0, Number(state.retryAt || 0) - now);
+}
+
+function rememberSiliconAuthRejection(ctx, now = Date.now()) {
+  const identity = siliconAuthIdentity(ctx);
+  if (!identity) return;
+  atomicWriteJson(authRejectionPath(), {
+    version: 1,
+    identity,
+    rejectedAt: now,
+    retryAt: now + AUTH_REJECTION_COOLDOWN_MS,
+  });
+}
+
+function clearSiliconAuthRejection(ctx) {
+  const identity = siliconAuthIdentity(ctx);
+  const state = readJsonFile(authRejectionPath());
+  if (!identity || !state || state.identity !== identity) return;
+  fs.rmSync(authRejectionPath(), { force: true });
 }
 
 function pidPath(root = interfaceRoot()) {
@@ -1087,6 +1123,20 @@ async function requestWithOptions(
     responseType = "auto",
   } = {},
 ) {
+  const rejectedForMs = auth && ctx.config.siliconKey
+    ? siliconAuthRejectionDelay(ctx)
+    : 0;
+  if (rejectedForMs > 0) {
+    throw new ApiError(
+      401,
+      {
+        code: "silicon_key_rejected",
+        retry_after_seconds: Math.ceil(rejectedForMs / 1000),
+      },
+      "Silicon credentials were rejected; waiting for a key change or the bounded probe.",
+      rejectedForMs,
+    );
+  }
   const normalizedMethod = String(method || "GET").toUpperCase();
   const safeMethod = ["GET", "HEAD", "OPTIONS", "DELETE"].includes(normalizedMethod);
   const maxRetries = Math.max(
@@ -1131,6 +1181,10 @@ async function requestWithOptions(
     try {
       const response = await fetch(joinUrl(ctx.config.apiBase, pathName), init);
       validateProtocolResponse(response);
+      if (auth && ctx.config.siliconKey) {
+        if (response.status === 401) rememberSiliconAuthRejection(ctx);
+        else if (response.ok) clearSiliconAuthRejection(ctx);
+      }
       const contentType = response.headers.get("content-type") || "";
       if (response.ok && responseType === "buffer") {
         return Buffer.from(await response.arrayBuffer());
@@ -1528,6 +1582,119 @@ const api = {
     ),
   progress: (ctx, roomId, payload) =>
     request(ctx, "POST", `/api/v1/rooms/${encodeURIComponent(roomId)}/progress`, payload),
+  workTasks: (ctx, params = {}) => {
+    const qs = new URLSearchParams();
+    if (params.roomId) qs.set("room_id", params.roomId);
+    if (params.state) qs.set("state", params.state);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    return request(ctx, "GET", `/api/v1/work/tasks${qs.size ? `?${qs}` : ""}`);
+  },
+  createWorkTask: (ctx, payload) =>
+    requestWithOptions(ctx, "POST", "/api/v1/work/tasks", payload, {
+      idempotent: Boolean(payload?.client_id),
+    }),
+  workTask: (ctx, taskId) =>
+    request(ctx, "GET", `/api/v1/work/tasks/${encodeURIComponent(taskId)}`),
+  patchWorkTask: (ctx, taskId, payload) =>
+    request(
+      ctx,
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}`,
+      payload,
+    ),
+  addWorkTodo: (ctx, taskId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/todos`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  patchWorkTodo: (ctx, taskId, todoId, payload) =>
+    request(
+      ctx,
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/todos/${encodeURIComponent(todoId)}`,
+      payload,
+    ),
+  addWorkMilestone: (ctx, taskId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/milestones`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  createWorkBlocker: (ctx, taskId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/blockers`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  resolveWorkBlocker: (ctx, taskId, blockerId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/blockers/${encodeURIComponent(blockerId)}/resolve`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  createWorkWorkerGroup: (ctx, taskId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/worker-groups`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  patchWorkWorkerGroup: (ctx, taskId, groupId, payload) =>
+    request(
+      ctx,
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/worker-groups/${encodeURIComponent(groupId)}`,
+      payload,
+    ),
+  createWorkWorker: (ctx, taskId, groupId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/worker-groups/${encodeURIComponent(groupId)}/invocations`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  patchWorkWorker: (ctx, taskId, groupId, invocationId, payload) =>
+    request(
+      ctx,
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/worker-groups/${encodeURIComponent(groupId)}/invocations/${encodeURIComponent(invocationId)}`,
+      payload,
+    ),
+  createWorkCall: (ctx, taskId, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/calls`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
+  patchWorkCall: (ctx, taskId, callId, payload) =>
+    request(
+      ctx,
+      "PATCH",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/calls/${encodeURIComponent(callId)}`,
+      payload,
+    ),
+  transitionWorkTask: (ctx, taskId, transition, payload) =>
+    requestWithOptions(
+      ctx,
+      "POST",
+      `/api/v1/work/tasks/${encodeURIComponent(taskId)}/${transition}`,
+      payload,
+      { idempotent: Boolean(payload?.client_id) },
+    ),
   takeBack: (ctx, eventId, reason, force) =>
     request(ctx, "POST", `/api/v1/events/${encodeURIComponent(eventId)}/take_back`, {
       reason,
@@ -1738,6 +1905,7 @@ Rooms and messages:
   messages sync [--limit 200] [--reset] [--spool]
                           Reconcile event and account streams with durable cursors.
   messages send <room> <text...> [--reply-to event_id] [--client-id id]
+                          [--group run_id] [--work-continues]
   messages send-event <room> --data JSON
                           Send any Glass event type/content with idempotency.
   messages edit <event> <text...> --base-version n
@@ -1774,7 +1942,22 @@ Drafts, held sends, and attachments:
   activity <room> <typing|uploading|recording> <on|off>
   typing <room> <on|off> Exact Glass typing-state endpoint.
   read <room> <event_id>
-  progress <room> <state> [note...] [--group id] [--pct n]
+  progress <room> <state> [note...] --group id [--task id]
+                          [--frame id --revision n --at ISO --pct n]
+  work task create --data JSON
+  work task list [room] [--state state --cursor token --limit n]
+  work task show <task-id> | work task patch <task-id> --data JSON
+  work todo add <task-id> --data JSON
+  work todo patch <task-id> <todo-id> --data JSON
+  work milestone update <task-id> --data JSON
+  work blocker create <task-id> --data JSON
+  work blocker resolve <task-id> <blocker-id> [--data JSON]
+  work worker-group create|patch <task-id> [group-id] --data JSON
+  work worker create|patch <task-id> <group-id> [invocation-id] --data JSON
+  work call create|patch <task-id> [call-id] --data JSON
+  work complete|fail|cancel <task-id> [--data JSON]
+                          Durable tasks and append-only work updates. All mutation
+                          commands also accept --data-file file or --data -.
   delta <event_id> <text...> [--seq n]
   final <event_id>
   take-back <event_id> [--reason text] [--force]
@@ -2715,7 +2898,7 @@ async function sendEventReliable(ctx, roomId, payload, { clientId, signature } =
 }
 
 async function sendMessage(ctx, args) {
-  const { options, positionals } = parseOptions(args);
+  const { options, positionals } = parseOptions(args, ["workContinues"]);
   const roomId = roomArg(ctx, positionals[0]);
   const body = positionals.slice(1).join(" ").trim();
   if (!body) throw new UsageError("Missing message text.");
@@ -2723,6 +2906,15 @@ async function sendMessage(ctx, args) {
     type: options.type || "m.text",
     content: { body },
   };
+  if (options.workContinues != null) {
+    payload.content.work_continues = asBool(options.workContinues);
+  }
+  if (options.group != null) {
+    if (typeof options.group !== "string" || !options.group.trim()) {
+      throw new UsageError("--group needs a non-empty manager activity run id.");
+    }
+    payload.content.progress_group_id = options.group.trim();
+  }
   if (options.replyTo) payload.reply_to_event_id = options.replyTo;
   if (options.final != null) payload.is_final = asBool(options.final);
   const event = await sendEventReliable(ctx, roomId, payload, {
@@ -2733,6 +2925,8 @@ async function sendMessage(ctx, args) {
       body,
       replyTo: payload.reply_to_event_id || "",
       final: payload.is_final ?? true,
+      progressGroupId: payload.content.progress_group_id || "",
+      workContinues: payload.content.work_continues === true,
     },
   });
   printResult(ctx, event, (value) => console.log(eventLine(value)));
@@ -2803,13 +2997,9 @@ async function openSocket(
     throw new UsageError("This Node runtime has no global WebSocket. Use Node 22+ or run REST commands.");
   }
   const qs = new URLSearchParams();
-  if (ctx.config.siliconKey) {
-    qs.set("silicon_key", ctx.config.siliconKey);
-  } else {
-    const ticket = await api.wsTicket(ctx);
-    if (!ticket?.ticket) throw new ProtocolError("Glass returned no WebSocket ticket.");
-    qs.set("ticket", ticket.ticket);
-  }
+  const ticket = await api.wsTicket(ctx);
+  if (!ticket?.ticket) throw new ProtocolError("Glass returned no WebSocket ticket.");
+  qs.set("ticket", ticket.ticket);
   const socket = new SocketCtor(`${ctx.config.wsBase}/ws/v1/?${qs}`);
   let released = !holdFrames;
   let buffered = [];
@@ -4023,15 +4213,530 @@ async function cmdProgress(ctx, args) {
   requireAuth(ctx);
   const { options, positionals } = parseOptions(args);
   const [roomToken, state, ...noteParts] = positionals;
-  if (!state) throw new UsageError("Usage: progress <room> <state> [note...]");
+  if (!state) throw new UsageError("Usage: progress <room> <state> [note...] --group <run-id>");
+  if (typeof options.group !== "string" || !options.group.trim()) {
+    throw new UsageError(
+      "progress requires --group <run-id>; reuse the same stable id for every frame in one manager run.",
+    );
+  }
   const payload = { state };
   const note = options.note || noteParts.join(" ");
   if (note) payload.note = note;
-  if (options.group) payload.progress_group_id = options.group;
-  if (options.pct) payload.progress_pct = Number(options.pct);
+  payload.progress_group_id = options.group.trim();
+  if (options.task) payload.task_id = String(options.task);
+  if (options.frame) payload.frame_id = String(options.frame);
+  if (options.revision != null) {
+    payload.revision = integerValue(options.revision, "--revision", { min: 0 });
+  }
+  if (options.at) {
+    const occurredAt = String(options.at);
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(occurredAt) || !Number.isFinite(Date.parse(occurredAt))) {
+      throw new UsageError("--at must be an ISO timestamp.");
+    }
+    payload.occurred_at = occurredAt;
+  }
+  if (options.pct != null) {
+    const pct = Number(options.pct);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      throw new UsageError("--pct must be a number from 0 to 100.");
+    }
+    payload.progress_pct = pct;
+  }
   if (options.summary) payload.summary = options.summary;
   const result = await api.progress(ctx, roomArg(ctx, roomToken), payload);
   printResult(ctx, result, (data) => printJson(data));
+}
+
+function hasWorkEstimateInput(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    (Object.hasOwn(value, "realistic_estimate_seconds") || Object.hasOwn(value, "estimate_seconds"));
+}
+
+function normalizeWorkEstimateScope(value, label) {
+  const hasRealistic = Object.hasOwn(value, "realistic_estimate_seconds");
+  const hasCanonical = Object.hasOwn(value, "estimate_seconds");
+  if (!hasRealistic && !hasCanonical) return value;
+
+  const normalized = { ...value };
+  let canonicalEstimate;
+  if (hasCanonical) {
+    canonicalEstimate = value.estimate_seconds;
+    if (!Number.isSafeInteger(canonicalEstimate) || canonicalEstimate < 0) {
+      throw new UsageError(`${label}.estimate_seconds must be a non-negative safe integer.`);
+    }
+  }
+  if (hasRealistic) {
+    const realisticEstimate = value.realistic_estimate_seconds;
+    if (typeof realisticEstimate !== "number" || !Number.isFinite(realisticEstimate) || realisticEstimate < 0) {
+      throw new UsageError(
+        `${label}.realistic_estimate_seconds must be a non-negative finite number.`,
+      );
+    }
+    const bufferedEstimate = Math.ceil(realisticEstimate * 1.05);
+    if (!Number.isSafeInteger(bufferedEstimate)) {
+      throw new UsageError(`${label}.realistic_estimate_seconds produces an unsafe estimate.`);
+    }
+    if (hasCanonical && canonicalEstimate !== bufferedEstimate) {
+      throw new UsageError(
+        `${label}.estimate_seconds conflicts with the 5% buffered realistic estimate (${bufferedEstimate}).`,
+      );
+    }
+    normalized.estimate_seconds = bufferedEstimate;
+    delete normalized.realistic_estimate_seconds;
+  }
+  return normalized;
+}
+
+function normalizeWorkEstimatePayload(payload) {
+  const rootHasEstimate = hasWorkEstimateInput(payload);
+  const timing = payload.timing !== null && typeof payload.timing === "object" &&
+      !Array.isArray(payload.timing)
+    ? payload.timing
+    : null;
+  const timingHasEstimate = hasWorkEstimateInput(timing);
+  if (rootHasEstimate && timing) {
+    throw new UsageError(
+      "A payload with timing must place estimate fields inside timing, not at the payload root.",
+    );
+  }
+  if (rootHasEstimate) return normalizeWorkEstimateScope(payload, "work payload");
+  if (timingHasEstimate) {
+    return {
+      ...payload,
+      timing: normalizeWorkEstimateScope(timing, "work payload timing"),
+    };
+  }
+  return payload;
+}
+
+function workPayload(options, { required = true } = {}) {
+  const payload = jsonBodyOption(options, { required });
+  if (payload === undefined) return {};
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new UsageError("Work mutation --data must be a JSON object.");
+  }
+  return normalizeWorkEstimatePayload(payload);
+}
+
+function explicitWorkClientId(options, payload) {
+  const optionClientId = options.clientId;
+  const payloadClientId = payload.client_id;
+  if (
+    optionClientId !== undefined &&
+    (typeof optionClientId !== "string" || !optionClientId.trim())
+  ) {
+    throw new UsageError("--client-id must be a non-empty string.");
+  }
+  if (
+    payloadClientId !== undefined &&
+    (typeof payloadClientId !== "string" || !payloadClientId.trim())
+  ) {
+    throw new UsageError("Work mutation client_id must be a non-empty string.");
+  }
+  if (
+    typeof optionClientId === "string" &&
+    typeof payloadClientId === "string" &&
+    optionClientId.trim() !== payloadClientId.trim()
+  ) {
+    throw new UsageError("--client-id conflicts with client_id in the work mutation payload.");
+  }
+  return typeof optionClientId === "string"
+    ? optionClientId.trim()
+    : typeof payloadClientId === "string"
+      ? payloadClientId.trim()
+      : "";
+}
+
+async function durableWorkPost(ctx, kind, intent, options, payload, submit) {
+  const explicitClientId = explicitWorkClientId(options, payload);
+  const operationIntent = {
+    ...intent,
+    ...(typeof payload.room_id === "string" && payload.room_id
+      ? { roomId: payload.room_id }
+      : {}),
+    payload,
+  };
+  const operation = explicitClientId ? null : beginOperation(ctx, kind, operationIntent);
+  const clientId = explicitClientId || operation.clientId;
+  const result = await submit({ ...payload, client_id: clientId });
+  if (operation) {
+    finishOperation(operation, {
+      ...intent,
+      taskId: result?.task_id ?? intent.taskId,
+      workEventId: result?.work_event_id,
+      blockerId: result?.blocker_id,
+      groupId: result?.group_id,
+      callId: result?.call_id,
+    });
+  }
+  return result;
+}
+
+function printWorkResult(ctx, result) {
+  printResult(ctx, result, (value) => printJson(value));
+}
+
+function printWorkHelp(resource = "") {
+  const focus = resource && !["help", "-h", "--help"].includes(resource)
+    ? `\nSelected resource: ${resource}`
+    : "";
+  console.log(`Durable work updates${focus}
+
+Usage:
+  si work task create|list|show|patch|complete|fail|cancel ...
+  si work todo add|patch ...
+  si work milestone update <task-id> --data JSON
+  si work blocker create|resolve ...
+  si work worker-group create|patch ...
+  si work worker create|patch ...
+  si work call create|patch ...
+  si work complete|fail|cancel <task-id> [--data JSON]
+
+Mutation payloads accept --data JSON, --data-file <file>, or --data - for stdin.
+POST mutations receive a durable client_id automatically; --client-id <id> may
+provide one explicitly. Use --json for machine-readable responses. See the CLI
+README for the 5%-buffered realistic estimate input and canonical task, timing,
+rich-content, worker, transcript, and retained-history shapes.`);
+}
+
+async function transitionWorkTask(ctx, transition, args) {
+  const { options, positionals } = parseOptions(args);
+  const taskId = positionals[0];
+  if (!taskId || positionals.length > 1) {
+    throw new UsageError(`Usage: work ${transition} <task-id> [--data JSON|--data-file file]`);
+  }
+  const payload = workPayload(options, { required: false });
+  const result = await durableWorkPost(
+    ctx,
+    `work-${transition}`,
+    { taskId, transition },
+    options,
+    payload,
+    (durablePayload) => api.transitionWorkTask(ctx, taskId, transition, durablePayload),
+  );
+  printWorkResult(ctx, result);
+}
+
+async function cmdWorkTask(ctx, args) {
+  const [sub = "list", ...rest] = args;
+  if (sub === "list" || sub === "ls") {
+    const { options, positionals } = parseOptions(rest);
+    if (positionals.length > 1) {
+      throw new UsageError("Usage: work task list [room-id] [--state state --cursor token --limit n]");
+    }
+    const roomToken = options.room || options.roomId || positionals[0] || "";
+    const limit = options.limit == null
+      ? undefined
+      : integerValue(options.limit, "--limit", { min: 1 });
+    const result = await api.workTasks(ctx, {
+      roomId: roomToken ? roomArg(ctx, roomToken) : "",
+      state: options.state || "",
+      cursor: options.cursor || "",
+      limit,
+    });
+    const rows = Array.isArray(result) ? result : result?.tasks || [];
+    printResult(ctx, result, () => {
+      if (!rows.length) {
+        console.log("No work tasks.");
+        return;
+      }
+      printRows(rows, [
+        { label: "TASK", value: (row) => row.task_id },
+        { label: "ROOM", value: (row) => row.room_id },
+        { label: "STATE", value: (row) => row.state },
+        { label: "TITLE", value: (row) => row.title },
+        { label: "REV", value: (row) => row.revision },
+      ]);
+    });
+    return;
+  }
+  if (sub === "create" || sub === "add") {
+    const { options, positionals } = parseOptions(rest);
+    if (positionals.length) {
+      throw new UsageError("Usage: work task create --data JSON|--data-file file");
+    }
+    const payload = workPayload(options);
+    printWorkResult(
+      ctx,
+      await durableWorkPost(
+        ctx,
+        "work-task-create",
+        {},
+        options,
+        payload,
+        (durablePayload) => api.createWorkTask(ctx, durablePayload),
+      ),
+    );
+    return;
+  }
+  if (sub === "show" || sub === "get") {
+    const { positionals } = parseOptions(rest);
+    if (positionals.length !== 1) throw new UsageError("Usage: work task show <task-id>");
+    printWorkResult(ctx, await api.workTask(ctx, positionals[0]));
+    return;
+  }
+  if (sub === "patch" || sub === "update") {
+    const { options, positionals } = parseOptions(rest);
+    if (positionals.length !== 1) {
+      throw new UsageError("Usage: work task patch <task-id> --data JSON|--data-file file");
+    }
+    printWorkResult(ctx, await api.patchWorkTask(ctx, positionals[0], workPayload(options)));
+    return;
+  }
+  if (["complete", "fail", "cancel"].includes(sub)) {
+    await transitionWorkTask(ctx, sub, rest);
+    return;
+  }
+  throw new UsageError("Usage: work task create|list|show|patch|complete|fail|cancel ...");
+}
+
+async function cmdWorkTodo(ctx, args) {
+  const [sub, ...rest] = args;
+  const { options, positionals } = parseOptions(rest);
+  if (sub === "add" || sub === "create") {
+    if (positionals.length !== 1) {
+      throw new UsageError("Usage: work todo add <task-id> --data JSON|--data-file file");
+    }
+    const payload = workPayload(options);
+    printWorkResult(
+      ctx,
+      await durableWorkPost(
+        ctx,
+        "work-todo-create",
+        { taskId: positionals[0] },
+        options,
+        payload,
+        (durablePayload) => api.addWorkTodo(ctx, positionals[0], durablePayload),
+      ),
+    );
+    return;
+  }
+  if (sub === "patch" || sub === "update") {
+    if (positionals.length !== 2) {
+      throw new UsageError("Usage: work todo patch <task-id> <todo-id> --data JSON|--data-file file");
+    }
+    printWorkResult(
+      ctx,
+      await api.patchWorkTodo(ctx, positionals[0], positionals[1], workPayload(options)),
+    );
+    return;
+  }
+  throw new UsageError("Usage: work todo add|patch ...");
+}
+
+async function cmdWorkMilestone(ctx, args) {
+  const hasVerb = ["add", "create", "update"].includes(args[0]);
+  const rest = hasVerb ? args.slice(1) : args;
+  const { options, positionals } = parseOptions(rest);
+  if (positionals.length !== 1) {
+    throw new UsageError("Usage: work milestone update <task-id> --data JSON|--data-file file");
+  }
+  const payload = workPayload(options);
+  printWorkResult(
+    ctx,
+    await durableWorkPost(
+      ctx,
+      "work-milestone-create",
+      { taskId: positionals[0] },
+      options,
+      payload,
+      (durablePayload) => api.addWorkMilestone(ctx, positionals[0], durablePayload),
+    ),
+  );
+}
+
+async function cmdWorkBlocker(ctx, args) {
+  const [sub, ...rest] = args;
+  const { options, positionals } = parseOptions(rest);
+  if (sub === "create" || sub === "add") {
+    if (positionals.length !== 1) {
+      throw new UsageError("Usage: work blocker create <task-id> --data JSON|--data-file file");
+    }
+    const payload = workPayload(options);
+    printWorkResult(
+      ctx,
+      await durableWorkPost(
+        ctx,
+        "work-blocker-create",
+        { taskId: positionals[0] },
+        options,
+        payload,
+        (durablePayload) => api.createWorkBlocker(ctx, positionals[0], durablePayload),
+      ),
+    );
+    return;
+  }
+  if (sub === "resolve") {
+    if (positionals.length !== 2) {
+      throw new UsageError(
+        "Usage: work blocker resolve <task-id> <blocker-id> [--data JSON|--data-file file]",
+      );
+    }
+    const payload = workPayload(options, { required: false });
+    printWorkResult(ctx, await durableWorkPost(
+      ctx,
+      "work-blocker-resolve",
+      { taskId: positionals[0], blockerId: positionals[1] },
+      options,
+      payload,
+      (durablePayload) => api.resolveWorkBlocker(
+        ctx,
+        positionals[0],
+        positionals[1],
+        durablePayload,
+      ),
+    ));
+    return;
+  }
+  throw new UsageError("Usage: work blocker create|resolve ...");
+}
+
+async function cmdWorkWorkerGroup(ctx, args) {
+  const [sub, ...rest] = args;
+  const { options, positionals } = parseOptions(rest);
+  if (sub === "create" || sub === "add") {
+    if (positionals.length !== 1) {
+      throw new UsageError("Usage: work worker-group create <task-id> --data JSON|--data-file file");
+    }
+    const payload = workPayload(options);
+    printWorkResult(ctx, await durableWorkPost(
+      ctx,
+      "work-worker-group-create",
+      { taskId: positionals[0] },
+      options,
+      payload,
+      (durablePayload) => api.createWorkWorkerGroup(ctx, positionals[0], durablePayload),
+    ));
+    return;
+  }
+  if (sub === "patch" || sub === "update") {
+    if (positionals.length !== 2) {
+      throw new UsageError(
+        "Usage: work worker-group patch <task-id> <group-id> --data JSON|--data-file file",
+      );
+    }
+    printWorkResult(
+      ctx,
+      await api.patchWorkWorkerGroup(
+        ctx,
+        positionals[0],
+        positionals[1],
+        workPayload(options),
+      ),
+    );
+    return;
+  }
+  throw new UsageError("Usage: work worker-group create|patch ...");
+}
+
+async function cmdWorkWorker(ctx, args) {
+  const [sub, ...rest] = args;
+  const { options, positionals } = parseOptions(rest);
+  if (sub === "create" || sub === "add") {
+    if (positionals.length !== 2) {
+      throw new UsageError(
+        "Usage: work worker create <task-id> <group-id> --data JSON|--data-file file",
+      );
+    }
+    const payload = workPayload(options);
+    printWorkResult(ctx, await durableWorkPost(
+      ctx,
+      "work-worker-create",
+      { taskId: positionals[0], groupId: positionals[1] },
+      options,
+      payload,
+      (durablePayload) => api.createWorkWorker(
+        ctx,
+        positionals[0],
+        positionals[1],
+        durablePayload,
+      ),
+    ));
+    return;
+  }
+  if (sub === "patch" || sub === "update") {
+    if (positionals.length !== 3) {
+      throw new UsageError(
+        "Usage: work worker patch <task-id> <group-id> <invocation-id> --data JSON|--data-file file",
+      );
+    }
+    printWorkResult(
+      ctx,
+      await api.patchWorkWorker(
+        ctx,
+        positionals[0],
+        positionals[1],
+        positionals[2],
+        workPayload(options),
+      ),
+    );
+    return;
+  }
+  throw new UsageError("Usage: work worker create|patch ...");
+}
+
+async function cmdWorkCall(ctx, args) {
+  const [sub, ...rest] = args;
+  const { options, positionals } = parseOptions(rest);
+  if (sub === "create" || sub === "add") {
+    if (positionals.length !== 1) {
+      throw new UsageError("Usage: work call create <task-id> --data JSON|--data-file file");
+    }
+    const payload = workPayload(options);
+    printWorkResult(ctx, await durableWorkPost(
+      ctx,
+      "work-call-create",
+      { taskId: positionals[0] },
+      options,
+      payload,
+      (durablePayload) => api.createWorkCall(ctx, positionals[0], durablePayload),
+    ));
+    return;
+  }
+  if (sub === "patch" || sub === "update") {
+    if (positionals.length !== 2) {
+      throw new UsageError("Usage: work call patch <task-id> <call-id> --data JSON|--data-file file");
+    }
+    printWorkResult(
+      ctx,
+      await api.patchWorkCall(ctx, positionals[0], positionals[1], workPayload(options)),
+    );
+    return;
+  }
+  throw new UsageError("Usage: work call create|patch ...");
+}
+
+async function cmdWork(ctx, args) {
+  const [resource, ...rest] = args;
+  if (
+    !resource ||
+    resource === "help" ||
+    resource === "-h" ||
+    resource === "--help" ||
+    rest.includes("-h") ||
+    rest.includes("--help")
+  ) {
+    printWorkHelp(resource);
+    return;
+  }
+  requireAuth(ctx);
+  if (resource === "task" || resource === "tasks") return cmdWorkTask(ctx, rest);
+  if (resource === "todo" || resource === "todos") return cmdWorkTodo(ctx, rest);
+  if (resource === "milestone" || resource === "milestones") return cmdWorkMilestone(ctx, rest);
+  if (resource === "blocker" || resource === "blockers") return cmdWorkBlocker(ctx, rest);
+  if (["worker-group", "worker-groups", "group", "groups"].includes(resource)) {
+    return cmdWorkWorkerGroup(ctx, rest);
+  }
+  if (["worker", "workers", "invocation", "invocations"].includes(resource)) {
+    return cmdWorkWorker(ctx, rest);
+  }
+  if (resource === "call" || resource === "calls") return cmdWorkCall(ctx, rest);
+  if (["complete", "fail", "cancel"].includes(resource)) {
+    return transitionWorkTask(ctx, resource, rest);
+  }
+  throw new UsageError(
+    "Usage: work task|todo|milestone|blocker|worker-group|worker|call|complete|fail|cancel ...",
+  );
 }
 
 async function cmdDelta(ctx, args) {
@@ -5847,6 +6552,13 @@ async function dispatch(ctx, cmd, args) {
       return;
     case "progress":
       await cmdProgress(ctx, args);
+      return;
+    case "work":
+      await cmdWork(ctx, args);
+      return;
+    case "work-task":
+    case "work-tasks":
+      await cmdWork(ctx, ["task", ...args]);
       return;
     case "delta":
       await cmdDelta(ctx, args);

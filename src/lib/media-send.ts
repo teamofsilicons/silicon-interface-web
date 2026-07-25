@@ -45,6 +45,23 @@ export interface StageMediaSendInput {
   at?: number;
 }
 
+export interface StageUploadedMediaSendInput {
+  outboxOwnerId: string;
+  mediaOwnerId: string;
+  roomId: string;
+  clientId: string;
+  mediaId: string;
+  size: number;
+  kind: "image" | "file";
+  type: string;
+  filename: string;
+  mime: string;
+  optimisticContent: Record<string, unknown>;
+  eventContent?: Record<string, unknown>;
+  replyTo?: string;
+  at?: number;
+}
+
 interface StageDependencies {
   read: typeof readMediaUpload;
   stage: typeof stageMediaUpload;
@@ -56,6 +73,48 @@ const stageDefaults: StageDependencies = {
   stage: stageMediaUpload,
   enqueue: enqueueOutbox,
 };
+
+/** Transfer a media object that already crossed object-storage completion into
+ * the durable event outbox. The composer already owns the immutable media id,
+ * byte size, and retained recovery row, so this path deliberately performs no
+ * Blob/IndexedDB read and no second upload preparation. */
+export async function stageUploadedMediaSendIntent(
+  input: StageUploadedMediaSendInput,
+  enqueue: typeof enqueueOutbox = enqueueOutbox,
+): Promise<OutboxEntry> {
+  if (!input.outboxOwnerId || input.mediaOwnerId !== `carbon:${input.outboxOwnerId}`) {
+    throw new Error("A bound owner is required for a durable media send");
+  }
+  if (!input.mediaId || !Number.isFinite(input.size) || input.size < 0) {
+    throw new Error("uploaded media identity is incomplete");
+  }
+  const entry: OutboxEntry = {
+    roomId: input.roomId,
+    clientId: input.clientId,
+    operation: "media",
+    type: input.type,
+    body: "",
+    content: {
+      ...input.optimisticContent,
+      media_id: input.mediaId,
+    },
+    replyTo: input.replyTo,
+    at: input.at ?? Date.now(),
+    media: {
+      ownerId: input.mediaOwnerId,
+      sourceClientId: input.clientId,
+      uploadClientId: input.clientId,
+      kind: input.kind,
+      filename: input.filename,
+      mime: input.mime,
+      size: input.size,
+      eventContent: input.eventContent,
+      uploadedMediaId: input.mediaId,
+      phase: "staged",
+    },
+  };
+  return enqueue(input.outboxOwnerId, entry);
+}
 
 /** Commit bytes first, then the immutable send intent. Callers may only add an
  * optimistic bubble, close a picker, or start network work after this resolves.
@@ -94,13 +153,21 @@ export async function stageMediaSendIntent(
   }
   const size = existing?.size ?? input.blob?.size;
   if (size == null) throw new Error("durable media source is missing");
+  const uploadedMediaId = existing?.mediaId ?? (
+    typeof input.optimisticContent.media_id === "string"
+      ? input.optimisticContent.media_id
+      : null
+  );
   const entry: OutboxEntry = {
     roomId: input.roomId,
     clientId: input.clientId,
     operation: "media",
     type: input.type,
     body: "",
-    content: input.optimisticContent,
+    content: {
+      ...input.optimisticContent,
+      ...(uploadedMediaId ? { media_id: uploadedMediaId } : {}),
+    },
     replyTo: input.replyTo,
     at: input.at ?? Date.now(),
     media: {
@@ -114,6 +181,7 @@ export async function stageMediaSendIntent(
       eventContent: input.eventContent,
       completionMeta: input.completionMeta,
       transcribe: input.transcribe,
+      ...(uploadedMediaId ? { uploadedMediaId } : {}),
       phase: "staged",
     },
   };
@@ -295,6 +363,36 @@ export interface PreparedMediaPayload {
   reply_to_event_id?: string;
 }
 
+/** Build the final event directly from an upload that already crossed the
+ * object-storage completion boundary. The stable media id is journaled; short-
+ * lived S3 presigns remain a presentation concern and are never persisted. */
+export function preparedUploadedMediaPayload(
+  entry: OutboxEntry,
+): PreparedMediaPayload | null {
+  if (entry.operation !== "media" || !entry.media) return null;
+  const mediaId = entry.media.uploadedMediaId ?? (
+    typeof entry.content?.media_id === "string" ? entry.content.media_id : null
+  );
+  if (!mediaId) return null;
+  return {
+    type: entry.type ?? (
+      entry.media.kind === "image"
+        ? "m.image"
+        : entry.media.kind === "voice"
+          ? "m.voice"
+          : "m.file"
+    ),
+    content: {
+      ...(entry.media.eventContent ?? {}),
+      ...(entry.content ?? {}),
+      media_id: mediaId,
+      mime: entry.media.mime,
+      filename: entry.media.filename,
+    },
+    ...(entry.replyTo ? { reply_to_event_id: entry.replyTo } : {}),
+  };
+}
+
 interface PrepareDependencies {
   ensure: typeof ensureMediaOutboxStaged;
   read: typeof readMediaUpload;
@@ -350,6 +448,16 @@ export async function prepareMediaOutboxPayload(
     stored.size !== spec.size
   ) {
     throw new Error("durable media source does not match its outbox intent");
+  }
+  const uploadedPayload = preparedUploadedMediaPayload(entry);
+  const uploadedMediaId = uploadedPayload?.content.media_id;
+  if (
+    uploadedPayload &&
+    typeof uploadedMediaId === "string" &&
+    stored.mediaId === uploadedMediaId &&
+    (stored.state === "completed" || stored.state === "scanning" || stored.state === "cleanup")
+  ) {
+    return uploadedPayload;
   }
   const mediaId = await dependencies.upload({
     clientId: spec.uploadClientId ?? entry.clientId,
@@ -650,9 +758,15 @@ export async function restartMediaUploadGeneration(
     entry.clientId,
     "restart_upload",
     {
+      content: {
+        ...withoutAttachmentFields(entry.content),
+        filename: entry.media.filename,
+        mime: entry.media.mime,
+      },
       media: {
         ...entry.media,
         uploadClientId: `${entry.clientId}:upload:${dependencies.uploadId()}`,
+        uploadedMediaId: undefined,
       },
       state: "queued",
       nextAttemptAt: Date.now(),

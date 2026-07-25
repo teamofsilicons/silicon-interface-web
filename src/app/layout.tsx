@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
 import { Toaster } from "sonner";
 
+// Use the complete face rather than Fontsource's unicode-range shards. Modern
+// ZWJ emoji (for example Unicode 17's ballet dancer) must be shaped by one font
+// file; splitting the component code points across faces can render a fallback
+// sequence or no glyph at all.
+import "@fontsource/noto-color-emoji/emoji-400.css";
 import "@fontsource/tiktok-sans/300.css";
 import "@fontsource/tiktok-sans/400.css";
 import "@fontsource/tiktok-sans/500.css";

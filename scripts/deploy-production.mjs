@@ -159,6 +159,21 @@ function compactTimestamp(date = new Date()) {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
+const SERVICE_WORKER_RELEASE_PLACEHOLDER = "__SILICON_INTERFACE_RELEASE_ID__";
+
+export function stampServiceWorker(source, releaseId) {
+  const occurrences = source.split(SERVICE_WORKER_RELEASE_PLACEHOLDER).length - 1;
+  if (occurrences !== 1) {
+    throw new DeployError(
+      `service worker must contain exactly one release placeholder (found ${occurrences})`,
+    );
+  }
+  if (!/^interface-[A-Za-z0-9-]+$/.test(releaseId)) {
+    throw new DeployError("service worker release id is invalid");
+  }
+  return source.replace(SERVICE_WORKER_RELEASE_PLACEHOLDER, releaseId);
+}
+
 function parseJsonOutput(raw, label) {
   const trimmed = raw.trim();
   try {
@@ -652,6 +667,17 @@ async function main(argv = process.argv.slice(2)) {
     if (!embeddedManifest.equals(externalManifest)) {
       throw new DeployError("embedded source manifest does not match the external manifest");
     }
+    // Browsers only install a replacement worker when /sw.js changes byte for
+    // byte. Stamp the immutable release id into the deploy context so every
+    // promoted application bundle activates one matching worker and reloads
+    // already-open tabs exactly once. The frozen source remains unchanged;
+    // this deterministic generated artifact is recorded in release evidence.
+    const serviceWorkerPath = join(deployContext, "public", "sw.js");
+    const serviceWorker = stampServiceWorker(
+      await readFile(serviceWorkerPath, "utf8"),
+      releaseId,
+    );
+    await writeFile(serviceWorkerPath, serviceWorker, { mode: 0o644 });
     activeStep = "scanning frozen source";
     const secretScan = await scanFrozenSource(deployContext, sourceManifest);
     const gitStatus = await runCommand("git", ["status", "--porcelain=v1", "-z"], {
@@ -691,6 +717,11 @@ async function main(argv = process.argv.slice(2)) {
         frozen_source: "passed",
         secret_scan: "passed",
         secret_scan_details: secretScan,
+        service_worker_release_stamp: "passed",
+      },
+      service_worker: {
+        release_id: releaseId,
+        sha256: sha256(serviceWorker),
       },
       created_at: new Date().toISOString(),
       toolchain,

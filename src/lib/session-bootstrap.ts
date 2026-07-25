@@ -1,4 +1,8 @@
-export type WebSessionRestoreState = "restored" | "anonymous" | "unavailable";
+export type WebSessionRestoreState =
+  | "restored"
+  | "anonymous"
+  | "unavailable"
+  | "revoked";
 
 export type SessionBootDecision =
   | "enter"
@@ -8,7 +12,23 @@ export type SessionBootDecision =
   | "retry";
 
 /** Only an explicit client/auth rejection proves that browser authority ended. */
-export function classifySessionRestoreFailure(status: number | null): WebSessionRestoreState {
+export function isAuthoritativeSessionRevocation(
+  status: number | null,
+  body?: unknown,
+): boolean {
+  return status === 401 && Boolean(
+    body &&
+    typeof body === "object" &&
+    "code" in body &&
+    (body as { code?: unknown }).code === "web_session_revoked",
+  );
+}
+
+export function classifySessionRestoreFailure(
+  status: number | null,
+  body?: unknown,
+): WebSessionRestoreState {
+  if (isAuthoritativeSessionRevocation(status, body)) return "revoked";
   return status === 400 || status === 401
     ? "anonymous"
     : "unavailable";
@@ -27,6 +47,12 @@ export function sessionBootDecision(
 ): SessionBootDecision {
   if (state === "restored") return "enter";
   if (state === "unavailable") return hasKnownOwner ? "enter-and-retry" : "retry";
+  if (state === "revoked") return "login";
+  // A missing/expired browser cookie alone is not logout evidence when the
+  // browser still owns durable local state. This covers cookie eviction,
+  // browser privacy races, and temporarily inconsistent intermediaries. Only
+  // an explicit backend revocation may discard that known owner automatically.
+  if (hasKnownOwner) return "enter-and-retry";
   return anonymousConfirmations >= 2 ? "login" : "confirm-anonymous";
 }
 
@@ -34,5 +60,6 @@ export function compatibilityRestoreAllowsEntry(
   state: WebSessionRestoreState,
   hasKnownOwner: boolean,
 ): boolean {
-  return state === "restored" || (state === "unavailable" && hasKnownOwner);
+  return state === "restored" ||
+    ((state === "unavailable" || state === "anonymous") && hasKnownOwner);
 }

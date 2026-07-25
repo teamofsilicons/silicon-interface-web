@@ -14,7 +14,9 @@ export type EventType =
   | "m.take_back"
   | "m.system"
   | "m.reaction"
-  | "m.remote_browser";
+  | "m.remote_browser"
+  | "m.work_task"
+  | "m.work_event";
 
 /** One annotation's serialized shape (kept in localStorage + used to label the
  *  composer draft chip). */
@@ -51,10 +53,14 @@ export interface AnnotationDraft {
 }
 
 export type ProgressState =
+  | "reading"
   | "reading_file"
+  | "writing"
   | "writing_file"
   | "executing"
   | "searching_web"
+  | "spawning_worker"
+  | "calling"
   | "thinking"
   | "done";
 
@@ -128,6 +134,7 @@ export interface RoomPeer {
   profile_ascii_url?: string | null;
   connection_state?: "online" | "connecting" | "offline" | string;
   presence?: PresenceProjection;
+  maintenance?: SiliconMaintenanceProjection;
 }
 
 export interface PresenceProjection {
@@ -135,6 +142,36 @@ export interface PresenceProjection {
   expires_at: string;
   last_seen_at: string;
   revision: number;
+}
+
+export interface SiliconMaintenanceProjection {
+  /** The updater currently holds a live Glass lease. */
+  active: boolean;
+  /** Glass is still durably accepting messages for automatic delivery. This
+   * remains true during the bounded reconnect grace after a missed heartbeat. */
+  delivery_deferred?: boolean;
+  phase:
+    | "preparing"
+    | "draining"
+    | "checkpointing"
+    | "updating"
+    | "validating"
+    | "resuming"
+    | "deferred"
+    | "rolled_back"
+    | "failed"
+    | "status_unknown"
+    | string;
+  update_id: string;
+  target_version: string;
+  queued_count: number;
+  revision: number;
+  message: string;
+  started_at: string | null;
+  updated_at: string | null;
+  lease_expires_at: string | null;
+  silicon_id?: string;
+  name?: string;
 }
 
 /** A cron a silicon scheduled. Carbons see these read-only. */
@@ -472,6 +509,13 @@ export interface Event {
     delivered_count: number;
     read_count: number;
   } | null;
+  /** Glass accepted this event while a recipient Silicon was in a fenced
+   * update. The event is durable and will be delivered after maintenance. */
+  delivery_state?: "queued_for_maintenance" | string;
+  /** Authoritative Carbon-facing acknowledgement for a maintenance-queued send. */
+  delivery_acknowledgement?: string;
+  maintenance?: SiliconMaintenanceProjection;
+  maintenance_recipients?: SiliconMaintenanceProjection[];
   /** #25 — OG-style link preview projection, only set when body contains
    *  exactly one URL. */
   link_preview?: LinkPreview | null;
@@ -486,6 +530,9 @@ export interface Event {
     duration_ms: number | null;
     kind: "file" | "image" | "voice" | "tts_output";
     mime: string;
+    /** S3-complete attachments may be published while their bytes remain
+     * quarantined. Older Glass responses omit this during a rolling deploy. */
+    status?: "pending" | "ready" | "infected" | "failed";
   } | null;
   /** Ordered authoritative metadata for an atomically published media album.
    * Optimistic rows may omit this and render from content.items until ack. */
@@ -499,6 +546,7 @@ export interface Event {
     width: number | null;
     height: number | null;
     duration_ms: number | null;
+    status?: "pending" | "ready" | "infected" | "failed";
   }> | null;
 }
 
@@ -833,6 +881,14 @@ export type WsFrame =
   | { type: "event"; room_id: string; event: Event; traceparent?: string }
   | { type: "event.delta"; room_id: string; event_id: string; delta: string; seq: number }
   | { type: "event.final"; room_id: string; event_id: string }
+  | {
+      type: "media.status";
+      room_id: string;
+      media_id: string;
+      status: MediaObject["status"];
+      media: MediaObject;
+      download_url: string | null;
+    }
   | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
   | { type: "event.remote_browser_close"; room_id: string; event_id: string; expires_at: string }
   | { type: "draft"; draft: DraftState }
@@ -893,7 +949,12 @@ export type WsFrame =
   | {
       type: "progress";
       room_id: string;
+      /** Stable minor-status identity and revision for replay-safe history. */
+      frame_id?: string;
       progress_group_id?: string;
+      task_id?: string | null;
+      revision?: number;
+      occurred_at?: string;
       /** Carbon message this run is working on — anchors the status under it. */
       run_anchor_event_id?: string;
       state?: ProgressState;

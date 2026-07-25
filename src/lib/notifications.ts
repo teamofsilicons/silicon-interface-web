@@ -371,7 +371,17 @@ const activeBrowserNotifications = new Map<string, Notification>();
 /** Close an already displayed foreground Notification for one exact event. */
 export function closeBrowserNotification(eventId: string) {
   const notification = activeBrowserNotifications.get(eventId);
-  if (!notification) return;
-  activeBrowserNotifications.delete(eventId);
-  try { notification.close(); } catch { /* browser disposed it already */ }
+  if (notification) {
+    activeBrowserNotifications.delete(eventId);
+    try { notification.close(); } catch { /* browser disposed it already */ }
+  }
+  // Push-owned notifications are created by the service worker rather than
+  // this tab, so they are not present in activeBrowserNotifications. Close the
+  // same tagged alert when a durable blocker revision resolves it.
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+    void navigator.serviceWorker.ready.then(async (registration) => {
+      const notifications = await registration.getNotifications({ tag: eventId });
+      for (const active of notifications) active.close();
+    }).catch(() => undefined);
+  }
 }

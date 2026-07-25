@@ -11,6 +11,7 @@ import {
   parseArgs,
   reliabilityCounts,
   rollbackDecision,
+  stampServiceWorker,
   suspiciousSourcePath,
   verifyHttpSmoke,
   verifyInspect,
@@ -31,6 +32,17 @@ test("production deploy requires one explicit mode", () => {
 test("reliability evidence parses both TTY and non-TTY Node summaries", () => {
   assert.deepEqual(reliabilityCounts("ℹ pass 224\nℹ fail 0\n"), { passed: 224, failed: 0 });
   assert.deepEqual(reliabilityCounts("# pass 224\n# fail 0\n"), { passed: 224, failed: 0 });
+});
+
+test("each immutable release stamps one replacement service worker", () => {
+  const source = 'self.SILICON_RELEASE = "__SILICON_INTERFACE_RELEASE_ID__";\n';
+  const stamped = stampServiceWorker(source, "interface-20260718T164500Z-abc123def456");
+  assert.equal(stamped.includes("__SILICON_INTERFACE_RELEASE_ID__"), false);
+  assert.match(stamped, /interface-20260718T164500Z-abc123def456/);
+  assert.throws(
+    () => stampServiceWorker("self.SILICON_RELEASE = 'fixed';", "interface-valid"),
+    /exactly one release placeholder/,
+  );
 });
 
 test("deployment response parsing accepts current and nested Vercel shapes", () => {

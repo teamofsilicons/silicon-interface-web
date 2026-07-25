@@ -7,6 +7,7 @@ import type {
   StreamVectorPosition,
   SyncPageRange,
 } from "./types";
+import { parseToolSetupAccountState } from "./tool-setup";
 
 export type SyncStream = "events" | "account" | "history" | "initial";
 
@@ -41,6 +42,7 @@ export const SUPPORTED_ACCOUNT_SYNC_KINDS = new Set([
   "device",
   "chat.preferences",
   "client.operation",
+  "extend.request",
 ]);
 
 export class SyncIntegrityError extends Error {
@@ -490,6 +492,17 @@ export function validateAccountSyncPage(
         "account",
         "Account client operation is malformed.",
       );
+    }
+    if (update.kind === "extend.request") {
+      const sanitized = parseToolSetupAccountState(update.data, update.object_id);
+      invariant(
+        sanitized !== null,
+        "account",
+        "Account tool-setup request is malformed.",
+      );
+      // The validated page is subsequently committed to the durable account
+      // projection ledger. Replace the row so legacy URLs never reach storage.
+      update.data = sanitized as unknown as Record<string, unknown>;
     }
   }
   return validateSyncPageRange(

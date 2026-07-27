@@ -98,6 +98,23 @@ function blocker(id, overrides = {}) {
   });
 }
 
+function standaloneCall(overrides = {}) {
+  return eventBase("call", "event-standalone-call", {
+    task_id: null,
+    task_title: null,
+    timing: null,
+    body: "Calling Architecture Silicon",
+    call_id: "call-standalone",
+    direction: "outbound",
+    target_kind: "silicon",
+    target_id: "architecture",
+    target_name: "Architecture Silicon",
+    state: "connecting",
+    transcript: [],
+    ...overrides,
+  });
+}
+
 test("wire validators accept the complete rich task/event contract", () => {
   const parsedTask = parseWorkTaskSnapshot(task());
   assert.equal(parsedTask?.task_id, "task-fitness");
@@ -119,6 +136,21 @@ test("wire validators accept the complete rich task/event contract", () => {
     type: "m.work_event",
     event: parsed,
   });
+});
+
+test("standalone calls validate without fabricated task context or timing", () => {
+  const parsed = parseWorkPersistentEvent(standaloneCall());
+  assert.equal(parsed?.kind, "call");
+  assert.equal(parsed?.task_id, null);
+  assert.equal(parsed?.task_title, null);
+  assert.equal(parsed?.timing, null);
+
+  assert.equal(parseWorkPersistentEvent(standaloneCall({ task_id: "task-fitness" })), null);
+  assert.equal(parseWorkPersistentEvent(standaloneCall({
+    task_id: "task-fitness",
+    task_title: "Build Fitness App",
+  })), null);
+  assert.equal(parseWorkPersistentEvent(standaloneCall({ timing: timing() })), null);
 });
 
 test("wire validators reject ambiguous identities, unsafe blocks, and invalid blocker states", () => {
@@ -418,6 +450,51 @@ test("worker invocation and call transcript revisions cannot be undone by stale 
   assert.equal(call.kind, "call");
   assert.equal(call.state, "completed");
   assert.deepEqual(call.transcript.map((line) => line.body), ["Can you help?", "Here is the answer"]);
+});
+
+test("standalone call revisions persist without entering a task index", () => {
+  const started = standaloneCall();
+  const answered = standaloneCall({
+    state: "completed",
+    revision: 1,
+    updated_at: T2,
+    transcript: [{
+      transcript_id: "line-standalone-1",
+      speaker_kind: "silicon",
+      speaker_id: "architecture",
+      speaker_name: "Architecture Silicon",
+      body: "Here is the architecture",
+      blocks: [],
+      revision: 0,
+      created_at: T1,
+      updated_at: T1,
+    }],
+  });
+  const state = reduceWorkTimelineRecords([
+    { type: "m.work_event", event: started },
+    { type: "m.work_event", event: answered },
+    { type: "m.work_task", task: task() },
+  ]);
+
+  assert.deepEqual(state.event_order, ["event-standalone-call"]);
+  assert.deepEqual(state.task_event_ids, {});
+  assert.equal(state.events["event-standalone-call"].kind, "call");
+  assert.equal(state.events["event-standalone-call"].state, "completed");
+  assert.deepEqual(
+    state.events["event-standalone-call"].transcript.map((entry) => entry.body),
+    ["Here is the architecture"],
+  );
+  assert.deepEqual(workEventsForTask(state, "task-fitness"), []);
+
+  assert.throws(
+    () => mergeWorkPersistentEvent(started, {
+      ...answered,
+      task_id: "task-fitness",
+      task_title: "Build Fitness App",
+      timing: timing(),
+    }),
+    /immutable identity/,
+  );
 });
 
 test("cards for concurrent tasks remain independently addressable", () => {

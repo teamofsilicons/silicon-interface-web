@@ -62,10 +62,13 @@ export function MessageReceiptGlyph({
       />
     );
   }
+  // Phosphor's standalone Check path fills substantially more of its viewBox
+  // than either mark inside Checks. Keep the outer metadata slot unchanged,
+  // but size the artwork like one check removed from the double-check glyph.
   return (
     <Check
       weight="regular"
-      className={cn("ph ph-check", className)}
+      className={cn("ph ph-check scale-[0.71]", className)}
       aria-label={presentation.label}
     />
   );

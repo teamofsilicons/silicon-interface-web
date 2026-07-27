@@ -2097,6 +2097,103 @@ test("durable work commands preserve the complete task and work-event REST contr
   });
 });
 
+test("standalone work calls use room-scoped create and direct call patch routes", async () => {
+  await withTempDir(async (tempDir) => {
+    const calls = [];
+    const mock = await startServer(async (request, response) => {
+      const body = await requestJson(request);
+      calls.push({ method: request.method, path: request.url, body });
+      json(response, request.method === "POST" ? 201 : 200, {
+        ...body,
+        schema_version: 1,
+        work_event_id: "event-standalone-call",
+        task_id: null,
+        task_title: null,
+        timing: null,
+        room_id: body.room_id ?? "room-fleet",
+        kind: "call",
+        call_id: "call-fleet",
+      });
+    });
+    try {
+      const common = [
+        "--api", mock.baseUrl,
+        "--key", "silicon-key",
+        "--json",
+        "work", "call",
+      ];
+      const missingRoom = await runCli([
+        ...common,
+        "create",
+        "--data", JSON.stringify({
+          kind: "call",
+          call_id: "call-invalid",
+        }),
+      ], tempDir);
+      assert.equal(missingRoom.code, 2);
+      assert.match(missingRoom.stderr, /requires a non-empty room_id/);
+      assert.equal(calls.length, 0);
+
+      const createPayload = {
+        room_id: "room-fleet",
+        work_event_id: "event-standalone-call",
+        kind: "call",
+        call_id: "call-fleet",
+        direction: "outbound",
+        target_kind: "manager",
+        target_id: "architecture-manager",
+        target_name: "Architecture manager",
+        state: "connecting",
+        body: "Calling Architecture manager",
+        blocks: [],
+        transcript: [],
+      };
+      const created = await runCli([
+        ...common,
+        "create",
+        "--data", JSON.stringify(createPayload),
+      ], tempDir);
+      assert.equal(created.code, 0, created.stderr);
+
+      const patchPayload = {
+        state: "completed",
+        transcript: [{
+          transcript_id: "line-1",
+          speaker_kind: "manager",
+          speaker_id: "architecture-manager",
+          speaker_name: "Architecture manager",
+          body: "Approved",
+          blocks: [],
+          revision: 1,
+        }],
+      };
+      const patched = await runCli([
+        ...common,
+        "patch", "call-fleet",
+        "--data", JSON.stringify(patchPayload),
+      ], tempDir);
+      assert.equal(patched.code, 0, patched.stderr);
+
+      assert.match(calls[0].body.client_id, /^cli_[a-f0-9]{32}$/);
+      delete calls[0].body.client_id;
+      assert.deepEqual(calls, [
+        {
+          method: "POST",
+          path: "/api/v1/work/calls",
+          body: createPayload,
+        },
+        {
+          method: "PATCH",
+          path: "/api/v1/work/calls/call-fleet",
+          body: patchPayload,
+        },
+      ]);
+    } finally {
+      await closeServer(mock.server);
+    }
+  });
+});
+
 test("work POST mutations reuse a journaled client id and respect an explicit override", async () => {
   await withTempDir(async (tempDir) => {
     const requests = [];

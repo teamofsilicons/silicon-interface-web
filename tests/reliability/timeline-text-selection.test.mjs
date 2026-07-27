@@ -10,7 +10,7 @@ import {
   selectionTouchesTimeline,
   shouldPinOwnedTimelineTail,
   shouldLoadOlderNearTimelineTop,
-  timelineTailMessageIsVisible,
+  timelineTailIsVisible,
   touchMovesTowardTimelineHistory,
   wheelMovesTowardTimelineHistory,
 } from "../../src/lib/timeline-text-selection.ts";
@@ -89,6 +89,12 @@ test("markdown rerenders reuse component types so browser Ranges keep their node
   assert.doesNotMatch(markdownViewSource, /components=\{\{/);
 });
 
+test("markdown messages do not become nested vertical scroll containers", () => {
+  assert.match(markdownViewSource, /style=\{\{ overflowX: "clip", overflowY: "visible" \}\}/);
+  assert.doesNotMatch(markdownViewSource, /overflow-x-hidden/);
+  assert.match(markdownViewSource, /touch-pan-x overflow-x-auto overscroll-x-contain/);
+});
+
 test("bottom-follow requires the physical end, not a near-bottom reading position", () => {
   assert.equal(isTimelineAtBottom({
     scrollHeight: 1_000,
@@ -107,26 +113,29 @@ test("bottom-follow requires the physical end, not a near-bottom reading positio
   }), false);
 });
 
-test("the down arrow hides when even one pixel of the newest message is visible", () => {
-  assert.equal(timelineTailMessageIsVisible({
+test("the down arrow follows the rendered tail, including trailing work updates", () => {
+  assert.equal(timelineTailIsVisible({
     viewportTop: 100,
     viewportBottom: 600,
-    messageTop: 599,
-    messageBottom: 720,
+    tailTop: 599,
+    tailBottom: 615,
   }), true);
-  assert.equal(timelineTailMessageIsVisible({
+  assert.equal(timelineTailIsVisible({
     viewportTop: 100,
     viewportBottom: 600,
-    messageTop: 600,
-    messageBottom: 720,
+    tailTop: 600,
+    tailBottom: 616,
   }), false);
-  assert.equal(timelineTailMessageIsVisible({
+  assert.equal(timelineTailIsVisible({
     viewportTop: 100,
     viewportBottom: 600,
-    messageTop: 50,
-    messageBottom: 101,
+    tailTop: 84,
+    tailBottom: 101,
   }), true);
-  assert.match(roomViewSource, /renderedEventIdFor\(lastTimelineEventId\)/);
+  assert.match(roomViewSource, /const timelineTailRef = React\.useRef/);
+  assert.match(roomViewSource, /ref=\{timelineTailRef\} data-timeline-tail/);
+  assert.match(roomViewSource, /const renderedTimelineTailIsVisible = React\.useCallback/);
+  assert.doesNotMatch(roomViewSource, /const newestMessageIsVisible/);
 });
 
 test("arrow-acquired bottom follow survives until an explicit upward gesture", () => {
@@ -207,7 +216,7 @@ test("passive layout scrolls cannot revoke an owned bottom-follow epoch", () => 
   );
   assert.doesNotMatch(passiveScrollState, /releaseBottomStick/);
   assert.doesNotMatch(passiveScrollState, /retainBottomFollowAfterScroll/);
-  assert.match(passiveScrollState, /newestMessageIsVisible/);
+  assert.match(passiveScrollState, /renderedTimelineTailIsVisible/);
 });
 
 test("link previews reserve their exact final card height before metadata arrives", () => {

@@ -247,7 +247,7 @@ test("waiting, sent, delivered, and read use the requested Phosphor glyph classe
     "utf8",
   );
   assert.match(source, /"ph ph-clock opacity-60"/);
-  assert.match(source, /"ph ph-check"/);
+  assert.match(source, /"ph ph-check scale-\[0\.71\]"/);
   assert.match(source, /"ph ph-checks"/);
   assert.match(source, /weight="fill"/);
   assert.match(source, /"ph-fill ph-checks"/);

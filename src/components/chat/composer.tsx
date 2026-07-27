@@ -1207,7 +1207,7 @@ export function Composer({
           try {
             const detail = await api.mediaDetail(cached.mediaId);
             if (
-              !["pending", "ready"].includes(detail.media.status) ||
+              detail.media.status !== "ready" ||
               detail.media.size !== file.size ||
               detail.media.mime !== mime ||
               detail.media.kind !== kind
@@ -1278,8 +1278,8 @@ export function Composer({
           kind,
         });
         // The upload is complete and the immutable media id is now known. Keep
-        // these already-local bytes available to the timeline so pressing Send
-        // cannot regress the sender to a scan/presign loading placeholder.
+        // these already-local bytes available to the timeline while the
+        // authoritative event replaces the optimistic row.
         retainLocalMediaPreview(mediaId, file);
         updateAttachment(id, {
           status: "ready",

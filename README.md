@@ -109,6 +109,9 @@ snake-case contract.
 - Reuse `task_id`, `work_event_id`, and the outer Glass event identity for every
   revision. The renderer also canonical-deduplicates accidental fresh outer
   envelopes so one resource keeps one timeline position.
+- Calls outside a durable task remain first-class `m.work_event` cards scoped
+  directly to the room. Their `task_id`, `task_title`, and `timing` fields are
+  `null`; task-linked calls keep the existing non-null contract.
 - Every descriptive or state revision must append a retained history fact.
   Reducers merge all supplied revisions and preserve the prior human-readable
   state if a malformed revision omits its journal entry.

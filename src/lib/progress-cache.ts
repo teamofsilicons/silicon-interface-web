@@ -17,16 +17,10 @@ export interface CachedProgressEntry {
   state: ProgressState;
   note: string;
   updatedAt: number;
-  source: "local" | "server";
+  source: "server";
   pct?: number | null;
   handle?: string | null;
-  receipt?:
-    | "waiting"
-    | "partially_delivered"
-    | "delivered"
-    | "partially_read"
-    | "read";
-  /** Carbon message this run is working on — anchors the status under it. */
+  /** Carbon message that triggered this run; never used to reorder the UI. */
   anchorEventId?: string | null;
 }
 
@@ -39,6 +33,11 @@ export const PROGRESS_CACHE_TTL_MS = 120_000;
 // would lose all knowledge of what's working until the next frame arrives.
 const STORAGE_KEY = "silicon-interface:room-progress";
 
+type PersistedProgressEntry = Omit<CachedProgressEntry, "source"> & {
+  source: "local" | "server";
+  receipt?: unknown;
+};
+
 const cache = new Map<string, CachedProgressEntry>();
 
 let hydrated = false;
@@ -49,20 +48,13 @@ function ensureHydrated(): void {
   try {
     const raw = window.sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return;
-    const obj = JSON.parse(raw) as Record<
-      string,
-      Omit<CachedProgressEntry, "receipt"> & {
-        receipt?: CachedProgressEntry["receipt"] | "sent";
-      }
-    >;
+    const obj = JSON.parse(raw) as Record<string, PersistedProgressEntry>;
     for (const [roomId, entry] of Object.entries(obj)) {
-      const { receipt, ...rest } = entry;
-      const migratedReceipt: CachedProgressEntry["receipt"] =
-        receipt === "sent" ? "waiting" : receipt;
-      cache.set(roomId, {
-        ...rest,
-        ...(migratedReceipt ? { receipt: migratedReceipt } : {}),
-      });
+      // Older clients persisted local receipt activity in this cache. Only
+      // Stemcell-originated progress is allowed back into the activity row.
+      if (entry.source === "server") {
+        cache.set(roomId, { ...entry, source: "server" });
+      }
     }
   } catch {
     // corrupt / unavailable storage — start empty

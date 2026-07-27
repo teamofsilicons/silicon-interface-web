@@ -52,7 +52,7 @@ import {
   readRoomEventSnippet,
   saveRoomEventSnippet,
 } from "@/lib/room-snippet";
-import { acceptMediaDetail, evictCachedMedia } from "@/lib/media-cache";
+import { evictCachedMedia } from "@/lib/media-cache";
 import { isGifMedia } from "@/lib/media-meta";
 import { projectRedactedWindow } from "@/lib/redaction-state";
 import {
@@ -557,17 +557,15 @@ function ChatPageInner() {
   );
   const reconcileRoomManagerActivity = React.useCallback((roomId: string) => {
     const groups = visibleCachedManagerActivities(roomId);
-    const group = [...groups].reverse().find((candidate) => candidate.display === "active") ??
-      groups.at(-1);
-    const frame = group?.current ?? group?.history.at(-1);
+    const group = [...groups].reverse().find((candidate) => candidate.display === "active");
+    const frame = group?.current;
     markRoomWorking(
       roomId,
-      group?.display === "active",
+      Boolean(group),
       frame?.note ?? "",
     );
-    // The legacy cache represents one run. Retain it only while it still
-    // describes the canonical selected group; otherwise RoomView restores the
-    // room-scoped group directly without leaking a settled identity.
+    // The legacy cache represents one live run. Settled history belongs only
+    // to the manager-activity projection and must never revive room progress.
     if (!group || getRoomProgress(roomId)?.groupId !== group.progress_group_id) {
       clearRoomProgress(roomId);
     }
@@ -683,12 +681,6 @@ function ChatPageInner() {
   >());
   const finalizedBeforeEventRef = React.useRef(new Set<string>());
   const dispatchFrame = React.useCallback((f: WsFrame, opts?: { quiet?: boolean }) => {
-    if (f.type === "media.status") {
-      acceptMediaDetail(f.media_id, {
-        media: f.media,
-        download_url: f.download_url,
-      });
-    }
     if (
       (f.type === "delivery_receipt" ||
         f.type === "read_receipt" ||
@@ -3651,8 +3643,9 @@ function ChatPageInner() {
       activityReplacementEvent !== null &&
       eventReplacesManagerActivity(activityReplacementEvent)
     ) {
-      // A final conversational response replaces only the newest manager
-      // activity run. Durable task/update cards may arrive while work continues.
+      // A final conversational response replaces only the matching manager
+      // activity run so no completed shell remains beside the message.
+      // Durable task/update cards may arrive while work continues.
       settleCachedManagerActivity(progressRoom, {
         reason: "final_message",
         progress_group_id:

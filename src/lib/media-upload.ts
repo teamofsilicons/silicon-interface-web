@@ -152,16 +152,6 @@ async function sha256(blob: Blob): Promise<{ hex: string; base64: string }> {
   return { hex: digestHex(digest), base64: digestBase64(digest) };
 }
 
-export type MediaSafetyState = "scanning" | "ready" | "blocked";
-
-/** Collapse the server's finite media lifecycle into the three client safety
- * states. Unknown future values fail closed as blocked. */
-export function mediaSafetyState(status: string): MediaSafetyState {
-  if (status === "pending") return "scanning";
-  if (status === "ready") return "ready";
-  return "blocked";
-}
-
 async function markMediaTransferComplete(
   ownerId: string,
   sourceClientId: string,
@@ -173,28 +163,6 @@ async function markMediaTransferComplete(
     mediaId,
     ...(!retainSourceUntilEventAck ? { blob: null } : {}),
   });
-}
-
-export function mediaSafetyError(safety: Exclude<MediaSafetyState, "ready">): ApiError {
-  const pending = safety === "scanning";
-  const code = pending ? "media_not_ready" : "media_missing";
-  return new ApiError(
-    409,
-    {
-      failure: {
-        domain: "chat.operation",
-        code,
-        retryable: pending,
-        automatic: pending,
-        correction_actions: pending ? [] : ["replace_attachment", "discard_local"],
-        ...(pending ? { retry_after_seconds: 1 } : {}),
-      },
-    },
-    pending
-      ? "Attachment safety scanning is still finishing."
-      : "Attachment was blocked by the safety pipeline.",
-    pending ? 1_000 : null,
-  );
 }
 
 function xhrPutPart(
@@ -334,12 +302,9 @@ async function uploadMediaResumableInternal(opts: MediaUploadOptions): Promise<s
     return durable.mediaId;
   }
   if (
-    (durable.state === "completed" || durable.state === "scanning" || durable.state === "failed") &&
+    (durable.state === "completed" || durable.state === "failed") &&
     durable.mediaId
   ) {
-    // Object storage completion is enough to release the composer. If Glass is
-    // still processing the object, the durable event outbox handles its
-    // media_not_ready response without making the user restart the upload.
     await markMediaTransferComplete(
       ownerId,
       sourceClientId,

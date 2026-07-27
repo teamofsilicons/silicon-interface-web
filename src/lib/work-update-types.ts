@@ -170,31 +170,37 @@ export type WorkEventKind =
 export interface WorkEventBase {
   schema_version: typeof WORK_UPDATE_SCHEMA_VERSION;
   work_event_id: string;
-  task_id: string;
+  task_id: string | null;
   room_id: string;
-  task_title: string;
+  task_title: string | null;
   kind: WorkEventKind;
   body: string;
   blocks: WorkContentBlock[];
-  timing: WorkTimingSnapshot;
+  timing: WorkTimingSnapshot | null;
   history: WorkHistoryEntry[];
   revision: number;
   created_at: string;
   updated_at: string;
 }
 
-export interface WorkMilestoneEvent extends WorkEventBase {
+export interface WorkTaskLinkedEventBase extends WorkEventBase {
+  task_id: string;
+  task_title: string;
+  timing: WorkTimingSnapshot;
+}
+
+export interface WorkMilestoneEvent extends WorkTaskLinkedEventBase {
   kind: "milestone";
 }
 
-export interface WorkBlockerEvent extends WorkEventBase {
+export interface WorkBlockerEvent extends WorkTaskLinkedEventBase {
   kind: "blocker";
   blocker_id: string;
   state: "open" | "resolved";
   resolved_at: string | null;
 }
 
-export interface WorkTerminalEvent extends WorkEventBase {
+export interface WorkTerminalEvent extends WorkTaskLinkedEventBase {
   kind: "completion" | "failure" | "cancellation";
 }
 
@@ -210,7 +216,7 @@ export interface WorkWorkerInvocation {
   updated_at: string;
 }
 
-export interface WorkWorkerGroupEvent extends WorkEventBase {
+export interface WorkWorkerGroupEvent extends WorkTaskLinkedEventBase {
   kind: "worker_group";
   group_id: string;
   workers: WorkWorkerInvocation[];

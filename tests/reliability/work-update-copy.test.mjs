@@ -4,11 +4,12 @@ import test from "node:test";
 
 import { workCallPreviewContent } from "../../src/lib/work-call-presentation.ts";
 
-const [callCardSource, taskCardSource, statusCardSource, demoSource] = await Promise.all([
+const [callCardSource, taskCardSource, statusCardSource, demoSource, roomViewSource] = await Promise.all([
   readFile(new URL("../../src/components/chat/work-call-card.tsx", import.meta.url), "utf8"),
   readFile(new URL("../../src/components/chat/work-task-card.tsx", import.meta.url), "utf8"),
   readFile(new URL("../../src/components/chat/work-status-card.tsx", import.meta.url), "utf8"),
   readFile(new URL("../../src/components/chat/work-update-demo.tsx", import.meta.url), "utf8"),
+  readFile(new URL("../../src/components/chat/room-view.tsx", import.meta.url), "utf8"),
 ]);
 
 test("collapsed calls show the latest conversation content without a count", () => {
@@ -30,6 +31,14 @@ test("collapsed calls show the latest conversation content without a count", () 
 
   assert.match(callCardSource, /\{contentPreview\}/);
   assert.doesNotMatch(callCardSource, /\bmessages?\b/i);
+});
+
+test("standalone call cards keep their own Silicon identity without a task heading", () => {
+  assert.match(callCardSource, /\{call\.taskTitle \? \(/);
+  assert.match(
+    roomViewSource,
+    /workRecord\.type === "m\.work_task" \|\| workRecord\.event\.kind === "call"/,
+  );
 });
 
 test("work cards call task items todos in visible and accessible copy", () => {

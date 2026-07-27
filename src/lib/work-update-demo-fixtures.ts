@@ -66,6 +66,7 @@ export type FitnessDemoTimelineItem =
       kind: "message";
       event: Event;
       mine: boolean;
+      managerActivity?: ManagerActivityGroup;
     }
   | {
       id: string;
@@ -866,21 +867,27 @@ const managerFrames: readonly ManagerActivityFrame[] = [
   managerFrame("manager-paused", "done", "Paused until the brand decision arrives", at(103), 68),
   managerFrame("manager-resumed", "reading", "Applying the electric-blue direction", at(109), 71),
   managerFrame("manager-verifying", "executing", "Verifying the completed fitness experience", at(154), 94),
+  managerFrame("manager-finished", "done", "manager finished", at(166), 100),
 ];
 
 function managerGroup(stage: FitnessDemoStage): ManagerActivityGroup | null {
-  const count = [2, 4, 5, 6, 7, 8][stageIndex(stage)];
+  const count = [2, 4, 5, 6, 7, 9][stageIndex(stage)];
   const frames = managerFrames.slice(0, count);
-  if (stage === "completed") return null;
-  const current = stage === "blocked" ? null : frames.at(-1) ?? null;
+  const settled = stage === "blocked" || stage === "completed";
+  const current = settled ? null : frames.at(-1) ?? null;
   return {
     progress_group_id: "fitness-manager-run",
     room_id: FITNESS_DEMO_ROOM_ID,
     task_id: FITNESS_DEMO_TASK_ID,
     current,
     history: [...frames],
-    display: stage === "blocked" ? "history" : "active",
-    replaced_by_event_id: null,
+    display:
+      stage === "completed"
+        ? "replaced"
+        : settled
+          ? "history"
+          : "active",
+    replaced_by_event_id: stage === "completed" ? "demo-message-final" : null,
     updated_at: frames.at(-1)?.occurred_at ?? at(1),
   };
 }
@@ -1019,8 +1026,12 @@ export function buildFitnessDemoScene(
   const stage = fitnessDemoStage(stageValue);
   const index = stageIndex(stage);
   const timeline: FitnessDemoTimelineItem[] = [];
-  const pushMessage = (event: Event, mine: boolean) => {
-    timeline.push({ id: event.event_id, kind: "message", event, mine });
+  const pushMessage = (
+    event: Event,
+    mine: boolean,
+    managerActivity?: ManagerActivityGroup,
+  ) => {
+    timeline.push({ id: event.event_id, kind: "message", event, mine, managerActivity });
   };
   const pushWork = (record: WorkTimelineRecord) => {
     const id = record.type === "m.work_task"
@@ -1046,7 +1057,7 @@ export function buildFitnessDemoScene(
   ), false);
 
   const manager = managerGroup(stage);
-  if (manager) {
+  if (manager && stage !== "completed") {
     timeline.push({
       id: `manager:${manager.progress_group_id}`,
       kind: "manager",

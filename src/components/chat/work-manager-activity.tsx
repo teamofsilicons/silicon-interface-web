@@ -45,24 +45,33 @@ export interface WorkManagerActivityListProps {
   avatarSrc?: string | null;
   avatarAsciiSrc?: string | null;
   avatarFamily?: "carbon" | "silicon";
+  summaryActivityId?: string;
+  summaryActivity?: WorkManagerActivity;
 }
 
 /**
- * Transient manager activity: the collapsed row exposes only what is happening
- * now; expansion reveals the retained, safe status history (never raw reasoning).
+ * Manager activity expands while work is live and collapses into retained,
+ * safe status history when it settles (never raw reasoning).
  */
 export function WorkManagerActivityList({
   activities,
   className,
-  initiallyExpanded = false,
+  initiallyExpanded,
   avatarSeed,
   avatarSrc,
   avatarAsciiSrc,
   avatarFamily = "silicon",
+  summaryActivityId,
+  summaryActivity,
 }: WorkManagerActivityListProps) {
-  const [expanded, setExpanded] = React.useState(initiallyExpanded);
+  const [expanded, setExpanded] = React.useState(
+    initiallyExpanded ?? activities.some((entry) => entry.state === "active"),
+  );
   const historyId = React.useId();
-  const current = [...activities].reverse().find((entry) => entry.state === "active") ?? activities.at(-1);
+  const current = [...activities].reverse().find((entry) => entry.state === "active") ??
+    summaryActivity ??
+    activities.find((entry) => entry.id === summaryActivityId) ??
+    activities.at(-1);
   if (!current) return null;
 
   return (

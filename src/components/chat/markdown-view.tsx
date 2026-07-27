@@ -365,8 +365,16 @@ export const MarkdownView = React.memo(function MarkdownView({
   return (
     <div
       data-selectable-text="true"
+      style={{ overflowX: "clip", overflowY: "visible" }}
       className={cn(
-        "min-w-0 max-w-full select-text overflow-x-hidden break-words text-sm leading-relaxed text-foreground [overflow-wrap:anywhere]",
+        // Hiding only horizontal overflow makes CSS compute the
+        // otherwise-visible Y axis to `auto`. List/paragraph margin overflow
+        // can then give a long message its own tiny vertical scroll range,
+        // trapping the first part of a trackpad gesture before it jumps to the
+        // room timeline. `clip` contains wide inline content without creating a
+        // nested scroller; preformatted blocks and tables retain their explicit
+        // X scrollers.
+        "min-w-0 max-w-full select-text break-words text-sm leading-relaxed text-foreground [overflow-wrap:anywhere]",
         className,
       )}
     >

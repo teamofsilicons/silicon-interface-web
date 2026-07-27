@@ -487,9 +487,9 @@ export interface Event {
   reply_to_event_id: string;
   /** Canonical root for a non-reaction reply chain; empty on root events. */
   thread_root_event_id?: string;
-  /** The carbon message that triggered this silicon reply's run — lets the UI
-   *  group the reply (and its progress) under the message it answers. Set
-   *  server-side; empty for carbon messages and cron/proactive silicon sends. */
+  /** The Carbon message that triggered this Silicon reply's run. This is
+   *  server-side metadata, not permission to reorder the canonical timeline;
+   *  empty for Carbon messages and cron/proactive Silicon sends. */
   run_anchor_event_id?: string;
   is_final: boolean;
   created_at: string;
@@ -530,9 +530,7 @@ export interface Event {
     duration_ms: number | null;
     kind: "file" | "image" | "voice" | "tts_output";
     mime: string;
-    /** S3-complete attachments may be published while their bytes remain
-     * quarantined. Older Glass responses omit this during a rolling deploy. */
-    status?: "pending" | "ready" | "infected" | "failed";
+    status?: "pending" | "ready" | "failed";
   } | null;
   /** Ordered authoritative metadata for an atomically published media album.
    * Optimistic rows may omit this and render from content.items until ack. */
@@ -546,7 +544,7 @@ export interface Event {
     width: number | null;
     height: number | null;
     duration_ms: number | null;
-    status?: "pending" | "ready" | "infected" | "failed";
+    status?: "pending" | "ready" | "failed";
   }> | null;
 }
 
@@ -613,7 +611,7 @@ export interface MediaObject {
   mime: string;
   size: number;
   sha256: string;
-  status: "pending" | "ready" | "infected" | "failed";
+  status: "pending" | "ready" | "failed";
   kind: "file" | "image" | "voice" | "tts_output";
   transcript: string;
   transcription_status: "not_started" | "pending" | "ready" | "failed";
@@ -881,14 +879,6 @@ export type WsFrame =
   | { type: "event"; room_id: string; event: Event; traceparent?: string }
   | { type: "event.delta"; room_id: string; event_id: string; delta: string; seq: number }
   | { type: "event.final"; room_id: string; event_id: string }
-  | {
-      type: "media.status";
-      room_id: string;
-      media_id: string;
-      status: MediaObject["status"];
-      media: MediaObject;
-      download_url: string | null;
-    }
   | { type: "event.transcript"; room_id: string; event_id: string; transcript: string }
   | { type: "event.remote_browser_close"; room_id: string; event_id: string; expires_at: string }
   | { type: "draft"; draft: DraftState }
@@ -955,7 +945,7 @@ export type WsFrame =
       task_id?: string | null;
       revision?: number;
       occurred_at?: string;
-      /** Carbon message this run is working on — anchors the status under it. */
+      /** Carbon message that triggered this run; timeline order remains canonical. */
       run_anchor_event_id?: string;
       state?: ProgressState;
       note?: string;

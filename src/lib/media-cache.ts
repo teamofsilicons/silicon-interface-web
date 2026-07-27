@@ -8,7 +8,7 @@ import type { MediaObject } from "./types";
  * the main source of "the timeline jumps around while I scroll".
  *
  * We only cache fully-ready objects that already have a usable download URL, so
- * pending/processing media keep polling normally. Presigned URLs are long-lived
+ * in-progress generated media keep polling normally. Presigned URLs are long-lived
  * enough for a session; a stale one still self-heals via the on-error refetch.
  */
 export interface CachedMedia {
@@ -22,8 +22,8 @@ const cache = new Map<string, CachedMedia>();
  * Bytes selected by this tab are already safe to display back to their owner.
  * Keep a bounded local object-URL handoff by media id so replacing the
  * optimistic event with Glass's authoritative event never replaces an instant
- * preview with the malware-scan spinner. Recipients still wait for Glass's
- * clean verdict; this cache never crosses a device or account boundary.
+ * preview with a loading state. This cache never crosses a device or account
+ * boundary.
  */
 interface LocalMediaPreview {
   url: string;
@@ -274,29 +274,6 @@ export function setCachedMedia(mediaId: string | null | undefined, value: Cached
   if (!value.download_url) return;
   if (value.media?.status && value.media.status !== "ready") return;
   cache.set(mediaId, value);
-}
-
-/**
- * Apply a server-pushed scan result to every mounted copy immediately. This
- * removes the old four-second polling tail after ClamAV has already finished.
- */
-export function acceptMediaDetail(
-  mediaId: string | null | undefined,
-  value: CachedMedia,
-): void {
-  if (!mediaId) return;
-  setCachedMedia(mediaId, value);
-  const query = queries.get(mediaId);
-  if (!query) return;
-  if (query.timer !== null) clearTimeout(query.timer);
-  query.timer = null;
-  query.nextRunAt = 0;
-  query.attempts = 0;
-  query.errors = 0;
-  query.failed = false;
-  query.exhausted = false;
-  query.value = value;
-  notify(query);
 }
 
 /** A redaction revokes the session's signed capability immediately. */

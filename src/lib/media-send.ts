@@ -455,7 +455,7 @@ export async function prepareMediaOutboxPayload(
     uploadedPayload &&
     typeof uploadedMediaId === "string" &&
     stored.mediaId === uploadedMediaId &&
-    (stored.state === "completed" || stored.state === "scanning" || stored.state === "cleanup")
+    (stored.state === "completed" || stored.state === "cleanup")
   ) {
     return uploadedPayload;
   }

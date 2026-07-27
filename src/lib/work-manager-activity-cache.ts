@@ -58,7 +58,7 @@ function hydrate(): void {
         group.progress_group_id,
       );
       if (!restored) continue;
-      if (group.display === "replaced" && typeof group.replaced_by_event_id === "string") {
+      if (typeof group.replaced_by_event_id === "string") {
         next = settleManagerActivity(next, group.room_id, group.progress_group_id, {
           occurred_at:
             typeof group.updated_at === "string" ? group.updated_at : restored.updated_at,
@@ -116,7 +116,7 @@ export type CachedManagerActivitySettlement =
       final_message_event_id?: never;
     };
 
-/** Settle an explicit run, or the sole unambiguous visible run in the room. */
+/** Settle an explicit run, the sole active run, or the newest retained history. */
 export function settleCachedManagerActivity(
   roomId: string,
   options: {

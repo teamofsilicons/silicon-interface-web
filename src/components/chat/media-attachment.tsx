@@ -7,7 +7,6 @@ import {
   CircleNotch,
   DownloadSimple,
   Play,
-  ShieldWarning,
   WarningCircle,
 } from "@phosphor-icons/react/dist/ssr";
 
@@ -74,8 +73,7 @@ export function MediaAttachment({
   localUrl?: string | null;
   localDurationMs?: number | null;
   localPeaks?: number[] | null;
-  /** Event-time scan state. Media detail polling remains authoritative and
-   * advances pending attachments without reposting the chat event. */
+  /** Event-time processing state. Media detail polling remains authoritative. */
   initialStatus?: MediaObject["status"];
   replyToEventId?: string;
   /** Room and source identifiers enable annotation for image/PDF previews. */
@@ -202,9 +200,8 @@ export function MediaAttachment({
         const value = state.value;
         if (value) {
           setMedia(value.media);
-          // A pending scan deliberately has no remote capability yet. Never
-          // erase bytes this sender already has locally; swap to the durable
-          // object-store URL only when Glass publishes the clean verdict.
+          // Never erase bytes this sender already has locally while the
+          // durable object-store capability is resolving.
           if (value.download_url) setUrl(value.download_url);
           else if (!immediateUrl) setUrl(null);
           if (value.download_url) hasSuccessfulPreviewRef.current = true;
@@ -273,21 +270,10 @@ export function MediaAttachment({
 
   if (failed) return <span className="text-xs text-destructive">attachment unavailable</span>;
 
-  // §6.1 — Branch on the server's moderation/processing status *before* trying
-  // to render. An AV-flagged ("infected") or transcode-failed ("failed")
-  // object comes back with a null `download_url`; without these guards an
-  // image would render `src={null}` and audio would have no source while the
-  // placeholder spun forever.
+  // Branch on processing failure before trying to render. A failed object has
+  // no download URL, so rendering it as normal media would spin forever.
   const effectiveStatus = media?.status ?? initialStatus;
 
-  if (effectiveStatus === "infected") {
-    return (
-      <div className="inline-flex items-center gap-2 border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-        <ShieldWarning className="h-4 w-4 shrink-0" weight="fill" />
-        <span>attachment blocked - failed a safety scan</span>
-      </div>
-    );
-  }
   if (effectiveStatus === "failed") {
     return (
       <div className="inline-flex items-center gap-2 border border-destructive/40 bg-card px-3 py-2 text-xs text-destructive">

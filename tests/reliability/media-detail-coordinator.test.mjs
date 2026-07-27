@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  acceptMediaDetail,
   evictLocalMediaPreview,
   getLocalMediaPreview,
   retainLocalMediaPreview,
@@ -76,28 +75,6 @@ test("an offscreen pending response keeps its poll deadline across remounts", as
   const remount = subscribeMediaDetail(mediaId, loader, () => {});
   assert.equal(loads, 1);
   remount();
-});
-
-test("a pushed scan verdict wakes mounted pending cards immediately", async () => {
-  const mediaId = `pushed-${Date.now()}-${Math.random()}`;
-  let loads = 0;
-  let resolveReady;
-  const rendered = new Promise((resolve) => { resolveReady = resolve; });
-  const unsubscribe = subscribeMediaDetail(
-    mediaId,
-    async () => {
-      loads += 1;
-      return { media: { media_id: mediaId, status: "pending" }, download_url: null };
-    },
-    (state) => {
-      if (state.value?.download_url) resolveReady();
-    },
-  );
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  acceptMediaDetail(mediaId, ready(mediaId));
-  await rendered;
-  assert.equal(loads, 1);
-  unsubscribe();
 });
 
 test("just-uploaded bytes remain addressable by immutable media id", () => {

@@ -447,7 +447,7 @@ export function reduceWorkTimelineRecord(
   }
 
   const incoming = record.event;
-  const linkedTask = state.tasks[incoming.task_id];
+  const linkedTask = incoming.task_id ? state.tasks[incoming.task_id] : undefined;
   if (linkedTask && linkedTask.room_id !== incoming.room_id) {
     throw new Error("work task and child event room identities disagree");
   }
@@ -455,12 +455,16 @@ export function reduceWorkTimelineRecord(
     ? mergeWorkPersistentEvent(state.events[incoming.work_event_id], incoming)
     : incoming;
   const events = { ...state.events, [event.work_event_id]: event };
-  const currentTaskEvents = state.task_event_ids[event.task_id] ?? [];
-  const taskEventIds = insertByCreatedAt(currentTaskEvents, event.work_event_id, events);
-  return {
+  const next = {
     ...state,
     events,
     event_order: insertByCreatedAt(state.event_order, event.work_event_id, events),
+  };
+  if (!event.task_id) return next;
+  const currentTaskEvents = state.task_event_ids[event.task_id] ?? [];
+  const taskEventIds = insertByCreatedAt(currentTaskEvents, event.work_event_id, events);
+  return {
+    ...next,
     task_event_ids: {
       ...state.task_event_ids,
       [event.task_id]: taskEventIds,

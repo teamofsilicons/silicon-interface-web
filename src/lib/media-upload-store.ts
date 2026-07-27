@@ -18,10 +18,7 @@ export interface DurableMediaUpload {
   blob: Blob | null;
   sessionId: string | null;
   mediaId: string | null;
-  /** "scanning" means object storage has the complete immutable payload but
-   * Glass has not yet received a clean malware verdict. It is deliberately
-   * distinct from completed so restart recovery cannot skip that boundary. */
-  state: "staged" | "uploading" | "scanning" | "completed" | "failed" | "cleanup";
+  state: "staged" | "uploading" | "completed" | "failed" | "cleanup";
   createdAt: number;
   updatedAt: number;
 }
@@ -214,7 +211,18 @@ export async function readMediaUpload(ownerId: string, clientId: string): Promis
   const transaction = db.transaction(STORE, "readonly");
   const request = transaction.objectStore(STORE).get(mediaUploadKey(ownerId, clientId));
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve((request.result as DurableMediaUpload | undefined) ?? null);
+    request.onsuccess = () => {
+      const stored = request.result as
+        | (Omit<DurableMediaUpload, "state"> & { state: DurableMediaUpload["state"] | "scanning" })
+        | undefined;
+      if (!stored) {
+        resolve(null);
+      } else if (stored.state === "scanning") {
+        resolve({ ...stored, state: "completed" });
+      } else {
+        resolve(stored as DurableMediaUpload);
+      }
+    };
     request.onerror = () => reject(request.error);
   });
 }

@@ -21,7 +21,7 @@ export interface AlbumMediaItem {
   width?: number | null;
   height?: number | null;
   duration_ms?: number | null;
-  status?: "pending" | "ready" | "infected" | "failed";
+  status?: "pending" | "ready" | "failed";
 }
 
 function canonicalAlbumFilename(raw: string, index: number): string {

@@ -144,6 +144,37 @@ test("rich call transcript content participates in local search", () => {
   assert.equal(workEventPreview(call), "Received call from COS Silicon");
 });
 
+test("standalone calls keep call previews and search without a task heading", () => {
+  const call = work("call", {
+    task_id: null,
+    task_title: null,
+    timing: null,
+    call_id: "call-standalone",
+    direction: "outbound",
+    target_kind: "manager",
+    target_id: "architecture-manager",
+    target_name: "Architecture manager",
+    state: "in_progress",
+    transcript: [{
+      transcript_id: "line-standalone",
+      speaker_kind: "manager",
+      speaker_id: "local-manager",
+      speaker_name: "My manager",
+      body: "Please review the system design",
+      blocks: [],
+      revision: 1,
+      created_at: NOW,
+      updated_at: NOW,
+    }],
+  });
+  const record = parsedWorkRecord(call);
+  assert.ok(record);
+  assert.equal(record.event.kind, "call");
+  assert.equal(record.event.task_id, null);
+  assert.equal(workEventPreview(call), "Calling Architecture manager");
+  assert.match(workRecordSearchText(record), /review the system design/);
+});
+
 test("invalid work payloads fail closed", () => {
   const invalid = event("m.work_event", { kind: "blocker", body: "missing identity" });
   assert.equal(parsedWorkRecord(invalid), null);

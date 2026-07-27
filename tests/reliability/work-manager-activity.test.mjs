@@ -7,9 +7,13 @@ import {
   createManagerActivityState,
   eventReplacesManagerActivity,
   getManagerActivityGroup,
+  MANAGER_ACTIVITY_STALE_MS,
   managerActivityLabel,
   managerActivityGroupKey,
+  managerActivityReplacementEvent,
   normalizeManagerActivityFrame,
+  placeManagerActivityGroups,
+  presentedManagerActivityGroups,
   reduceManagerActivityFrame,
   resolveManagerActivityForSettlement,
   settleManagerActivity,
@@ -25,6 +29,7 @@ import {
   workTimingViewAt,
 } from "../../src/lib/work-update-time.ts";
 import { WorkManagerActivityList } from "../../src/components/chat/work-manager-activity.tsx";
+import { WorkManagerActivityHistory } from "../../src/components/chat/work-event-card.tsx";
 
 const T0 = "2026-07-23T08:00:00.000Z";
 const T1 = "2026-07-23T08:01:00.000Z";
@@ -41,7 +46,28 @@ function frame(state, note, occurred_at, overrides = {}) {
   }, { occurred_at });
 }
 
-test("manager activity renders as an expandable Silicon text row", () => {
+function replyEvent(event_id, progress_group_id, overrides = {}) {
+  const { content = {}, ...eventOverrides } = overrides;
+  return {
+    event_id,
+    room_id: "room-1",
+    sender_kind: "silicon",
+    sender_handle: "cto",
+    type: "m.text",
+    content: {
+      body: "Here is the reply.",
+      progress_group_id,
+      ...content,
+    },
+    created_at: T1,
+    edited_at: null,
+    redacted_at: null,
+    is_final: true,
+    ...eventOverrides,
+  };
+}
+
+test("active manager activity is expanded by default", () => {
   const activities = [{
     id: "activity-1",
     kind: "thinking",
@@ -58,7 +84,8 @@ test("manager activity renders as an expandable Silicon text row", () => {
   assert.match(markup, /src="\/fitness-builder\.png"/);
   assert.doesNotMatch(markup, /src="\/logo\.svg"/);
   assert.match(markup, /manager-activity-shimmer/);
-  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /aria-expanded="true"/);
+  assert.match(markup, /aria-label="Manager activity history"/);
   assert.doesNotMatch(markup, /STEPS?/);
 
   const identityFreeMarkup = renderToStaticMarkup(React.createElement(
@@ -66,6 +93,145 @@ test("manager activity renders as an expandable Silicon text row", () => {
     { activities },
   ));
   assert.doesNotMatch(identityFreeMarkup, /<img/);
+});
+
+test("settled manager activity is collapsed by default", () => {
+  const activity = frame("thinking", "Thinking", T0);
+  let state = reduceManagerActivityFrame(createManagerActivityState(), activity);
+  state = settleManagerActivity(state, "room-1", "run-1", {
+    occurred_at: T1,
+    reason: "done",
+  });
+  const markup = renderToStaticMarkup(React.createElement(
+    WorkManagerActivityHistory,
+    { group: getManagerActivityGroup(state, "room-1", "run-1") },
+  ));
+
+  assert.match(markup, /aria-expanded="false"/);
+  assert.doesNotMatch(markup, /aria-label="Manager activity history"/);
+});
+
+test("settled history uses the terminal shell as its summary without duplicating it", () => {
+  let state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("reading", "Reading requirements", T0),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "Paused until the decision arrives", T1),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", T2),
+  );
+  const markup = renderToStaticMarkup(React.createElement(
+    WorkManagerActivityHistory,
+    {
+      group: getManagerActivityGroup(state, "room-1", "run-1"),
+      initiallyExpanded: true,
+    },
+  ));
+
+  assert.match(markup, /Paused until the decision arrives/);
+  assert.equal((markup.match(/manager finished/gi) ?? []).length, 1);
+});
+
+test("a final normal message retains collapsed manager history above its reply", () => {
+  let state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("done", "manager finished", T1),
+  );
+  state = settleManagerActivity(state, "room-1", "run-1", {
+    occurred_at: T2,
+    reason: "final_message",
+    final_message_event_id: "message-final",
+  });
+
+  assert.equal(getManagerActivityGroup(state, "room-1", "run-1").display, "replaced");
+  assert.deepEqual(visibleManagerActivityGroups(state, "room-1"), []);
+  const groups = presentedManagerActivityGroups(state, "room-1");
+  const placement = placeManagerActivityGroups(
+    groups,
+    [replyEvent("message-final", "run-1")],
+  );
+  assert.deepEqual(
+    placement.attachedToEvent.get("message-final")?.map(
+      (group) => group.progress_group_id,
+    ),
+    ["run-1"],
+  );
+  assert.deepEqual(placement.trailing, []);
+});
+
+test("active manager activity moves above an associated in-progress reply", () => {
+  const state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("thinking", "Thinking", T0),
+  );
+  const placement = placeManagerActivityGroups(
+    presentedManagerActivityGroups(state, "room-1"),
+    [replyEvent("message-live", "run-1", {
+      content: { work_continues: true },
+    })],
+  );
+
+  assert.deepEqual(
+    placement.attachedToEvent.get("message-live")?.map(
+      (group) => [group.progress_group_id, group.display],
+    ),
+    [["run-1", "active"]],
+  );
+  assert.deepEqual(placement.trailing, []);
+});
+
+test("a later final reply suppresses an unmatched obsolete active group", () => {
+  const state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("thinking", "Thinking", T0),
+  );
+  const placement = placeManagerActivityGroups(
+    presentedManagerActivityGroups(state, "room-1"),
+    [replyEvent("message-final", "another-run")],
+  );
+
+  assert.equal(placement.attachedToEvent.size, 0);
+  assert.deepEqual(placement.trailing, []);
+});
+
+test("unmatched manager activity remains live when no later reply supersedes it", () => {
+  const state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("thinking", "Thinking", T2),
+  );
+  const placement = placeManagerActivityGroups(
+    presentedManagerActivityGroups(state, "room-1"),
+    [replyEvent("older-message", "another-run")],
+  );
+
+  assert.deepEqual(
+    placement.trailing.map((group) => group.progress_group_id),
+    ["run-1"],
+  );
+});
+
+test("active manager activity disappears after the missed-terminal safety bound", () => {
+  const state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("thinking", "Thinking", T0),
+  );
+
+  assert.equal(
+    presentedManagerActivityGroups(state, "room-1", {
+      asOfMs: Date.parse(T0) + MANAGER_ACTIVITY_STALE_MS - 1,
+    }).length,
+    1,
+  );
+  assert.deepEqual(
+    presentedManagerActivityGroups(state, "room-1", {
+      asOfMs: Date.parse(T0) + MANAGER_ACTIVITY_STALE_MS,
+    }),
+    [],
+  );
 });
 
 test("legacy progress states normalize to the limited manager activity vocabulary", () => {
@@ -121,7 +287,7 @@ test("activity history accumulates idempotently and stale frames do not replace 
   assert.equal(group.display, "active");
 });
 
-test("done without a final message leaves history, while a final message replaces the row", () => {
+test("done retains history only until a final message replaces the run", () => {
   const reading = frame("reading_file", "Reading docs", T0);
   const done = frame("done", "", T1);
   let state = reduceManagerActivityFrame(createManagerActivityState(), reading);
@@ -141,11 +307,196 @@ test("done without a final message leaves history, while a final message replace
     "message-final",
   );
   assert.equal(getManagerActivityGroup(state, "room-1", "run-1").history.length, 2);
-  assert.deepEqual(visibleManagerActivityGroups(state, "room-1"), []);
+  assert.equal(visibleManagerActivityGroups(state, "room-1").length, 0);
 
   state = reduceManagerActivityFrame(state, frame("writing", "Late frame", T2));
   assert.equal(getManagerActivityGroup(state, "room-1", "run-1").display, "replaced");
   assert.equal(getManagerActivityGroup(state, "room-1", "run-1").current, null);
+});
+
+test("duplicate terminal delivery leaves one deterministic done frame", () => {
+  let state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("reading", "Reading docs", T0),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", T1, {
+      frame_id: "done-first",
+      revision: 1,
+    }),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", T2, {
+      frame_id: "done-retry",
+      revision: 2,
+    }),
+  );
+
+  const group = getManagerActivityGroup(state, "room-1", "run-1");
+  assert.deepEqual(
+    group.history.map((entry) => [entry.note, entry.frame_id]),
+    [
+      ["Reading docs", frame("reading", "Reading docs", T0).frame_id],
+      ["manager finished", "done-retry"],
+    ],
+  );
+});
+
+test("a replaced run cannot duplicate the next active handoff", () => {
+  let state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("searching_web", "Searching the web", T0),
+  );
+  state = settleManagerActivity(state, "room-1", "run-1", {
+    occurred_at: T1,
+    reason: "final_message",
+    final_message_event_id: "message-final",
+  });
+  state = reduceManagerActivityFrame(state, frame("writing", "Another run", T2, {
+    progress_group_id: "run-2",
+  }));
+
+  const groups = presentedManagerActivityGroups(state, "room-1");
+  const placement = placeManagerActivityGroups(
+    groups,
+    [replyEvent("message-final", "run-1")],
+  );
+
+  assert.deepEqual(
+    placement.attachedToEvent.get("message-final")?.map(
+      (group) => group.progress_group_id,
+    ),
+    ["run-1"],
+  );
+  assert.deepEqual(
+    placement.trailing.map((group) => group.progress_group_id),
+    ["run-2"],
+  );
+});
+
+test("reconstructed unanchored runs render as one meaningful history row", () => {
+  let state = createManagerActivityState();
+  state = reduceManagerActivityFrame(
+    state,
+    frame("reading", "Reading requirements", T0),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", T1),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("calling", "Called architecture silicon", T2, {
+      progress_group_id: "run-2",
+    }),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", "2026-07-23T08:03:00.000Z", {
+      progress_group_id: "run-2",
+    }),
+  );
+
+  assert.equal(visibleManagerActivityGroups(state, "room-1").length, 2);
+  const presented = presentedManagerActivityGroups(state, "room-1");
+  assert.equal(presented.length, 1);
+  assert.equal(presented[0].display, "history");
+  assert.deepEqual(
+    presented[0].history.map((entry) => entry.note),
+    [
+      "Reading requirements",
+      "manager finished",
+      "Called architecture silicon",
+      "manager finished",
+    ],
+  );
+
+  const markup = renderToStaticMarkup(React.createElement(
+    WorkManagerActivityHistory,
+    { group: presented[0], initiallyExpanded: true },
+  ));
+  const headerMarkup = markup.slice(0, markup.indexOf("<ol"));
+  assert.match(headerMarkup, /manager finished/i);
+  assert.equal((markup.match(/manager finished/gi) ?? []).length, 1);
+  assert.equal((markup.match(/Reading requirements/g) ?? []).length, 1);
+  assert.equal((markup.match(/Called architecture silicon/g) ?? []).length, 1);
+
+  state = reduceManagerActivityFrame(
+    state,
+    frame("writing", "Preparing the next response", "2026-07-23T08:04:00.000Z", {
+      progress_group_id: "run-3",
+    }),
+  );
+  assert.deepEqual(
+    presentedManagerActivityGroups(state, "room-1").map((group) => [
+      group.display,
+      group.progress_group_id,
+    ]),
+    [
+      ["history", "manager-history:room-1"],
+      ["active", "run-3"],
+    ],
+  );
+});
+
+test("a late done frame back-links to the final reply emitted before it", () => {
+  const finalMessage = {
+    event_id: "message-final",
+    room_id: "room-1",
+    sender_kind: "silicon",
+    sender_handle: "cto",
+    type: "m.text",
+    content: {
+      body: "Here is the final answer.",
+      progress_group_id: "run-1",
+    },
+    created_at: T1,
+    edited_at: null,
+    redacted_at: null,
+    is_final: true,
+  };
+
+  // This is the actual Stemcell order: reply first, durable done frame second.
+  let state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("done", "manager finished", T2),
+  );
+  const replacement = managerActivityReplacementEvent([finalMessage], "run-1");
+  assert.equal(replacement?.event_id, "message-final");
+  state = settleManagerActivity(state, "room-1", "run-1", {
+    occurred_at: T2,
+    reason: "final_message",
+    final_message_event_id: replacement.event_id,
+  });
+
+  const placement = placeManagerActivityGroups(
+    presentedManagerActivityGroups(state, "room-1"),
+    [finalMessage],
+  );
+  assert.equal(getManagerActivityGroup(state, "room-1", "run-1").display, "replaced");
+  assert.deepEqual(
+    placement.attachedToEvent.get("message-final")?.map(
+      (group) => group.progress_group_id,
+    ),
+    ["run-1"],
+  );
+  assert.deepEqual(placement.trailing, []);
+});
+
+test("explicit dismissal also hides activity without claiming a final message", () => {
+  let state = reduceManagerActivityFrame(
+    createManagerActivityState(),
+    frame("thinking", "Thinking", T0),
+  );
+  state = settleManagerActivity(state, "room-1", "run-1", {
+    occurred_at: T1,
+    reason: "dismissed",
+  });
+
+  assert.equal(getManagerActivityGroup(state, "room-1", "run-1").display, "replaced");
+  assert.deepEqual(visibleManagerActivityGroups(state, "room-1"), []);
 });
 
 test("settling without a message preserves an expandable history row", () => {
@@ -215,6 +566,10 @@ test("the same progress group id is isolated per room", () => {
     final_message_event_id: "room-one-final",
   });
   assert.equal(getManagerActivityGroup(state, "room-1", "run-1").display, "replaced");
+  assert.equal(
+    getManagerActivityGroup(state, "room-1", "run-1").replaced_by_event_id,
+    "room-one-final",
+  );
   assert.equal(getManagerActivityGroup(state, "room-2", "run-1").display, "active");
 });
 
@@ -247,6 +602,33 @@ test("implicit settlement refuses an ambiguous room", () => {
     "run-1",
   );
   assert.equal(resolveManagerActivityForSettlement(state, "room-2", "run-1"), null);
+});
+
+test("implicit final settlement selects the newest retained history after reconstruction", () => {
+  let state = createManagerActivityState();
+  state = reduceManagerActivityFrame(
+    state,
+    frame("thinking", "First run", T0),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", T1),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("writing", "Second run", T2, { progress_group_id: "run-2" }),
+  );
+  state = reduceManagerActivityFrame(
+    state,
+    frame("done", "manager finished", "2026-07-23T08:03:00.000Z", {
+      progress_group_id: "run-2",
+    }),
+  );
+
+  assert.equal(
+    resolveManagerActivityForSettlement(state, "room-1")?.progress_group_id,
+    "run-2",
+  );
 });
 
 test("elapsed time advances only while running and checkpoints across transitions", () => {

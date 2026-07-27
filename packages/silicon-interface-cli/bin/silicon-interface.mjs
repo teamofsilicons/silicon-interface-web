@@ -1680,11 +1680,22 @@ const api = {
       payload,
       { idempotent: Boolean(payload?.client_id) },
     ),
+  createStandaloneWorkCall: (ctx, payload) =>
+    requestWithOptions(ctx, "POST", "/api/v1/work/calls", payload, {
+      idempotent: Boolean(payload?.client_id),
+    }),
   patchWorkCall: (ctx, taskId, callId, payload) =>
     request(
       ctx,
       "PATCH",
       `/api/v1/work/tasks/${encodeURIComponent(taskId)}/calls/${encodeURIComponent(callId)}`,
+      payload,
+    ),
+  patchStandaloneWorkCall: (ctx, callId, payload) =>
+    request(
+      ctx,
+      "PATCH",
+      `/api/v1/work/calls/${encodeURIComponent(callId)}`,
       payload,
     ),
   transitionWorkTask: (ctx, taskId, transition, payload) =>
@@ -1954,7 +1965,10 @@ Drafts, held sends, and attachments:
   work blocker resolve <task-id> <blocker-id> [--data JSON]
   work worker-group create|patch <task-id> [group-id] --data JSON
   work worker create|patch <task-id> <group-id> [invocation-id] --data JSON
-  work call create|patch <task-id> [call-id] --data JSON
+  work call create [<task-id>] --data JSON
+  work call patch [<task-id>] <call-id> --data JSON
+                          Omit task-id for a standalone call; create data must
+                          then include room_id.
   work complete|fail|cancel <task-id> [--data JSON]
                           Durable tasks and append-only work updates. All mutation
                           commands also accept --data-file file or --data -.
@@ -4394,9 +4408,12 @@ Usage:
 
 Mutation payloads accept --data JSON, --data-file <file>, or --data - for stdin.
 POST mutations receive a durable client_id automatically; --client-id <id> may
-provide one explicitly. Use --json for machine-readable responses. See the CLI
-README for the 5%-buffered realistic estimate input and canonical task, timing,
-rich-content, worker, transcript, and retained-history shapes.`);
+provide one explicitly. Calls outside a durable task use
+\`work call create --data '{"room_id":"..."}'\` and
+\`work call patch <call-id> --data JSON\`. Use --json for machine-readable
+responses. See the CLI README for the 5%-buffered realistic estimate input and
+canonical task, timing, rich-content, worker, transcript, and retained-history
+shapes.`);
 }
 
 async function transitionWorkTask(ctx, transition, args) {
@@ -4679,10 +4696,28 @@ async function cmdWorkCall(ctx, args) {
   const [sub, ...rest] = args;
   const { options, positionals } = parseOptions(rest);
   if (sub === "create" || sub === "add") {
-    if (positionals.length !== 1) {
-      throw new UsageError("Usage: work call create <task-id> --data JSON|--data-file file");
+    if (positionals.length > 1) {
+      throw new UsageError(
+        "Usage: work call create [<task-id>] --data JSON|--data-file file; standalone calls require room_id in --data.",
+      );
     }
     const payload = workPayload(options);
+    if (positionals.length === 0) {
+      if (typeof payload.room_id !== "string" || !payload.room_id.trim()) {
+        throw new UsageError(
+          "Standalone work call creation requires a non-empty room_id in --data.",
+        );
+      }
+      printWorkResult(ctx, await durableWorkPost(
+        ctx,
+        "work-standalone-call-create",
+        { roomId: payload.room_id },
+        options,
+        payload,
+        (durablePayload) => api.createStandaloneWorkCall(ctx, durablePayload),
+      ));
+      return;
+    }
     printWorkResult(ctx, await durableWorkPost(
       ctx,
       "work-call-create",
@@ -4694,12 +4729,22 @@ async function cmdWorkCall(ctx, args) {
     return;
   }
   if (sub === "patch" || sub === "update") {
-    if (positionals.length !== 2) {
-      throw new UsageError("Usage: work call patch <task-id> <call-id> --data JSON|--data-file file");
+    if (positionals.length !== 1 && positionals.length !== 2) {
+      throw new UsageError(
+        "Usage: work call patch [<task-id>] <call-id> --data JSON|--data-file file",
+      );
+    }
+    const payload = workPayload(options);
+    if (positionals.length === 1) {
+      printWorkResult(
+        ctx,
+        await api.patchStandaloneWorkCall(ctx, positionals[0], payload),
+      );
+      return;
     }
     printWorkResult(
       ctx,
-      await api.patchWorkCall(ctx, positionals[0], positionals[1], workPayload(options)),
+      await api.patchWorkCall(ctx, positionals[0], positionals[1], payload),
     );
     return;
   }
@@ -5556,7 +5601,7 @@ async function waitForVoiceMedia(ctx, mediaId, mode, options = {}) {
     if (!media || media.media_id !== mediaId) {
       throw new ProtocolError(`Glass returned malformed media state for ${mediaId}.`);
     }
-    if (media.status === "failed" || media.status === "infected") {
+    if (media.status === "failed") {
       const reason = media.synthesis_error_code || media.status;
       throw new ProtocolError(`Media ${mediaId} failed: ${reason}.`);
     }

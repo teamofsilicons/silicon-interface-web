@@ -925,10 +925,18 @@ export const api = {
       `/api/v1/work/tasks/${encodeURIComponent(task_id)}/calls`,
       payload,
     ),
+  createStandaloneWorkCall: (payload: WorkMutationPayload) =>
+    call<WorkCallEvent>("POST", "/api/v1/work/calls", payload),
   patchWorkCall: (task_id: string, call_id: string, payload: WorkMutationPayload) =>
     call<WorkCallEvent>(
       "PATCH",
       `/api/v1/work/tasks/${encodeURIComponent(task_id)}/calls/${encodeURIComponent(call_id)}`,
+      payload,
+    ),
+  patchStandaloneWorkCall: (call_id: string, payload: WorkMutationPayload) =>
+    call<WorkCallEvent>(
+      "PATCH",
+      `/api/v1/work/calls/${encodeURIComponent(call_id)}`,
       payload,
     ),
   transitionWorkTask: (
@@ -1248,9 +1256,7 @@ export const api = {
     return blob.text();
   },
   /**
-   * Confirm an S3 upload completed. Flips MediaObject.status from "pending"
-   * to "ready" so subsequent /media/<id> returns a download_url instead of
-   * the loading placeholder. Idempotent.
+   * Confirm an S3 upload completed and publish it. Idempotent.
    *
    * Optional metadata (image width/height, audio duration + waveform peaks)
    * is backfilled into the MediaObject so subsequent renders can reserve

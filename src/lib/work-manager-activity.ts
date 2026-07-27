@@ -16,6 +16,9 @@ const MANAGER_ACTIVITY_REPLACING_EVENT_TYPES = new Set([
   "m.remote_browser",
 ]);
 
+/** A missed terminal frame must not leave transient manager work live forever. */
+export const MANAGER_ACTIVITY_STALE_MS = 100_000;
+
 /** Only a committed conversational Silicon event ends transient activity.
  * Durable cards can interleave freely, and a normal event can opt into the
  * same behavior with `content.work_continues: true`. */
@@ -26,6 +29,37 @@ export function eventReplacesManagerActivity(
     MANAGER_ACTIVITY_REPLACING_EVENT_TYPES.has(event.type) &&
     event.is_final !== false &&
     event.content.work_continues !== true;
+}
+
+/**
+ * Find the committed reply that belongs to a manager run.
+ *
+ * Stemcell deliberately sends its final reply before its durable `done`
+ * progress frame. A client that missed the transient activity therefore sees
+ * the reply first and can only join the two when the later frame arrives.
+ */
+export function managerActivityReplacementEvent(
+  events: readonly Pick<
+    Event,
+    "event_id" | "sender_kind" | "type" | "content" | "is_final"
+  >[],
+  progressGroupId: string,
+): Pick<
+  Event,
+  "event_id" | "sender_kind" | "type" | "content" | "is_final"
+> | null {
+  const groupId = identifier(progressGroupId);
+  if (!groupId) return null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (
+      event.content.progress_group_id === groupId &&
+      eventReplacesManagerActivity(event)
+    ) {
+      return event;
+    }
+  }
+  return null;
 }
 
 interface ActivityFrameDefaults {
@@ -199,10 +233,36 @@ function mergeActivityHistory(
   history: readonly ManagerActivityFrame[],
   frame: ManagerActivityFrame,
 ): ManagerActivityFrame[] {
-  const entries = new Map(history.map((entry) => [frameKey(entry), entry]));
-  const key = frameKey(frame);
+  const retained = frame.kind === "done"
+    ? history.filter((entry) =>
+        entry.kind !== "done" ||
+        entry.note !== frame.note ||
+        entry.task_id !== frame.task_id
+      )
+    : history;
+  const duplicateDone = frame.kind === "done"
+    ? history.filter((entry) =>
+        entry.kind === "done" &&
+        entry.note === frame.note &&
+        entry.task_id === frame.task_id
+      )
+    : [];
+  const terminalFrame = duplicateDone.reduce(
+    (latest, candidate) => {
+      const order = compareFrames(candidate, latest);
+      return order > 0 ||
+          (order === 0 && JSON.stringify(candidate) > JSON.stringify(latest))
+        ? candidate
+        : latest;
+    },
+    frame,
+  );
+  const entries = new Map(retained.map((entry) => [frameKey(entry), entry]));
+  const key = frameKey(terminalFrame);
   const current = entries.get(key);
-  if (!current || JSON.stringify(frame) > JSON.stringify(current)) entries.set(key, frame);
+  if (!current || JSON.stringify(terminalFrame) > JSON.stringify(current)) {
+    entries.set(key, terminalFrame);
+  }
   return [...entries.values()].sort(compareFrames);
 }
 
@@ -220,7 +280,7 @@ export function reduceManagerActivityFrame(
   ) >= 0;
   let current = existing?.current ?? null;
   let display = existing?.display ?? "active";
-  if (isNewest && display !== "replaced") {
+  if (isNewest && display !== "replaced" && !existing?.replaced_by_event_id) {
     current = frame.kind === "done" ? null : frame;
     display = frame.kind === "done" ? "history" : "active";
   }
@@ -251,7 +311,7 @@ export type SettleManagerActivityOptions =
     }
   | {
       occurred_at: string;
-      /** Only a committed final message may replace the transient row. */
+      /** A committed final message replaces the transient activity row. */
       reason: "final_message";
       final_message_event_id: string;
     }
@@ -262,8 +322,8 @@ export type SettleManagerActivityOptions =
     };
 
 /**
- * Clear the current line after a run. With a final normal message the row is
- * replaced; without one the collapsed history remains renderable.
+ * Clear the current line after a run. A bare done signal retains collapsed
+ * history; a committed final message replaces the transient row.
  */
 export function settleManagerActivity(
   state: ManagerActivityState,
@@ -284,15 +344,26 @@ export function settleManagerActivity(
     ? identifier(options.final_message_event_id)
     : null;
   if (options.reason === "final_message" && !finalEventId) return state;
-  if (existing.display === "replaced" && options.reason === "done") return state;
+  if (
+    (existing.display === "replaced" || existing.replaced_by_event_id) &&
+    options.reason === "done"
+  ) return state;
   return {
     groups: {
       ...state.groups,
       [groupKey]: {
         ...existing,
         current: null,
-        display: options.reason === "done" ? "history" : "replaced",
-        replaced_by_event_id: finalEventId,
+        display:
+          options.reason === "done"
+            ? "history"
+            : "replaced",
+        replaced_by_event_id:
+          options.reason === "final_message"
+            ? existing.replaced_by_event_id ?? finalEventId
+            : options.reason === "dismissed"
+              ? null
+              : existing.replaced_by_event_id,
         updated_at: Date.parse(options.occurred_at) >= Date.parse(existing.updated_at)
           ? options.occurred_at
           : existing.updated_at,
@@ -302,8 +373,9 @@ export function settleManagerActivity(
 }
 
 /**
- * Resolve a run for settlement. An omitted run id is safe only when the room
- * has one active run (or, with none active, one visible history run).
+ * Resolve a run for settlement. An omitted run id is safe when the room has
+ * one active run. With no active work, the newest retained history is the only
+ * plausible target for an untagged final message.
  */
 export function resolveManagerActivityForSettlement(
   state: ManagerActivityState,
@@ -319,7 +391,7 @@ export function resolveManagerActivityForSettlement(
   const active = visible.filter((group) => group.display === "active");
   if (active.length === 1) return active[0];
   if (active.length > 1) return null;
-  return visible.length === 1 ? visible[0] : null;
+  return visible.at(-1) ?? null;
 }
 
 export function visibleManagerActivityGroups(
@@ -327,11 +399,150 @@ export function visibleManagerActivityGroups(
   roomId: string,
 ): ManagerActivityGroup[] {
   return Object.values(state.groups)
-    .filter((group) => group.room_id === roomId && group.display !== "replaced")
+    .filter((group) =>
+      group.room_id === roomId &&
+      group.display !== "replaced" &&
+      !group.replaced_by_event_id
+    )
     .sort((left, right) =>
       Date.parse(left.updated_at) - Date.parse(right.updated_at) ||
       left.progress_group_id.localeCompare(right.progress_group_id)
     );
+}
+
+/**
+ * Build the room timeline projection without reviving one row per historical
+ * manager handoff. Active runs retain their own identity; two or more
+ * completed, unanchored runs become one expandable history row.
+ *
+ * This is presentation-only. The underlying groups remain separate so a late
+ * final message can still settle the exact run it belongs to.
+ */
+export function presentedManagerActivityGroups(
+  state: ManagerActivityState,
+  roomId: string,
+  options: { asOfMs?: number } = {},
+): ManagerActivityGroup[] {
+  // A final message replaces the transient *position*, not the history. Keep
+  // those settled groups in the presentation projection so placement can
+  // render them collapsed above the exact reply. A dismissed group has no
+  // replacement event and stays hidden.
+  const presented = Object.values(state.groups)
+    .filter((group) =>
+      group.room_id === roomId &&
+      (group.display !== "replaced" || Boolean(group.replaced_by_event_id)) &&
+      (
+        group.display !== "active" ||
+        options.asOfMs === undefined ||
+        !Number.isFinite(options.asOfMs) ||
+        options.asOfMs - Date.parse(group.updated_at) < MANAGER_ACTIVITY_STALE_MS
+      )
+    )
+    .sort((left, right) =>
+      Date.parse(left.updated_at) - Date.parse(right.updated_at) ||
+      left.progress_group_id.localeCompare(right.progress_group_id)
+    );
+  const histories = presented.filter((group) => group.display === "history");
+  if (histories.length < 2) return presented;
+
+  const frames = new Map<string, ManagerActivityFrame>();
+  for (const group of histories) {
+    for (const frame of group.history) {
+      const key = `${frame.progress_group_id}\u0000${frameKey(frame)}`;
+      const current = frames.get(key);
+      if (!current || JSON.stringify(frame) > JSON.stringify(current)) {
+        frames.set(key, frame);
+      }
+    }
+  }
+
+  const commonTaskId = histories.every(
+    (group) => group.task_id === histories[0].task_id,
+  )
+    ? histories[0].task_id
+    : undefined;
+  const latestHistory = histories.at(-1)!;
+  const combined: ManagerActivityGroup = {
+    progress_group_id: `manager-history:${roomId}`,
+    room_id: roomId,
+    ...(commonTaskId !== undefined ? { task_id: commonTaskId } : {}),
+    current: null,
+    history: [...frames.values()].sort(compareFrames),
+    display: "history",
+    replaced_by_event_id: null,
+    updated_at: latestHistory.updated_at,
+  };
+
+  return [
+    ...presented.filter((group) => group.display !== "history"),
+    combined,
+  ].sort((left, right) =>
+    Date.parse(left.updated_at) - Date.parse(right.updated_at) ||
+    left.progress_group_id.localeCompare(right.progress_group_id)
+  );
+}
+
+/**
+ * Attach manager activity above the Silicon message carrying the same run
+ * identity. A settled replacement uses its exact final event id, which keeps
+ * the collapsed history beside the reply even when the final message arrived
+ * before the durable done frame. Only genuinely unassociated activity trails
+ * the timeline.
+ */
+export function placeManagerActivityGroups(
+  groups: readonly ManagerActivityGroup[],
+  events: readonly Pick<
+    Event,
+    "event_id" | "sender_kind" | "type" | "content" | "is_final" | "created_at"
+  >[],
+): {
+  attachedToEvent: Map<string, ManagerActivityGroup[]>;
+  trailing: ManagerActivityGroup[];
+} {
+  const attachedToEvent = new Map<string, ManagerActivityGroup[]>();
+  const trailing: ManagerActivityGroup[] = [];
+  const eventsById = new Map(events.map((event) => [event.event_id, event]));
+
+  const attach = (eventId: string, group: ManagerActivityGroup) => {
+    const attached = attachedToEvent.get(eventId) ?? [];
+    attached.push(group);
+    attachedToEvent.set(eventId, attached);
+  };
+
+  for (const group of groups) {
+    if (group.replaced_by_event_id) {
+      if (eventsById.has(group.replaced_by_event_id)) {
+        attach(group.replaced_by_event_id, group);
+      }
+      // If the exact reply is outside this loaded history window, do not move
+      // its activity to the bottom and misrepresent it as current work.
+      continue;
+    }
+    if (group.display === "replaced") continue;
+
+    const associatedMessage = [...events].reverse().find((event) =>
+      event.sender_kind === "silicon" &&
+      MANAGER_ACTIVITY_REPLACING_EVENT_TYPES.has(event.type) &&
+      event.is_final !== false &&
+      event.content.progress_group_id === group.progress_group_id
+    );
+    if (associatedMessage) {
+      attach(associatedMessage.event_id, group);
+      continue;
+    }
+    const supersedingMessage = events.some((event) =>
+      eventReplacesManagerActivity(event) &&
+      Date.parse(event.created_at) >= Date.parse(group.updated_at)
+    );
+    if (supersedingMessage) {
+      // A later final Silicon reply proves this unmatched run is no longer
+      // current. Keep its cached identity available for a late done frame, but
+      // never misrepresent it as new work below the reply.
+      continue;
+    }
+    trailing.push(group);
+  }
+  return { attachedToEvent, trailing };
 }
 
 export function managerActivityLabel(frame: ManagerActivityFrame): string {

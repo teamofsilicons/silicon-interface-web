@@ -88,7 +88,9 @@ si operations resolve all
 Work cards use a first-class, persisted Glass contract. A task owns its todo
 items and append-only history; milestone, blocker, worker, call, and terminal
 updates remain attached to the same stable `task_id`. Multiple tasks may be
-active in one room.
+active in one room. Calls made outside a durable task use the same persistent
+call card and transcript contract with room scope instead of fabricated task
+context.
 
 Short manager activity remains on the existing progress channel. Stable frame
 and group identities let Interface build an expandable, replay-safe history;
@@ -160,6 +162,9 @@ si --json work worker patch task_123 group_social invoke_1 --data '{"state":"com
 si --json work call create task_123 --data '{"work_event_id":"event_call_1","kind":"call","call_id":"call_1","direction":"outbound","target_kind":"manager","target_id":"saket","target_name":"Saket manager","state":"connecting","body":"Calling Saket manager","blocks":[],"transcript":[]}'
 si --json work call patch task_123 call_1 --data '{"state":"completed","transcript":[{"transcript_id":"transcript_1","speaker_kind":"silicon","speaker_id":"saket_manager","speaker_name":"Saket manager","body":"Approved","blocks":[],"revision":1}]}'
 
+si --json work call create --data '{"room_id":"room_123","work_event_id":"event_call_fleet","kind":"call","call_id":"call_fleet","direction":"outbound","target_kind":"silicon","target_id":"architecture","target_name":"Architecture Silicon","state":"connecting","body":"Calling Architecture Silicon","blocks":[],"transcript":[]}'
+si --json work call patch call_fleet --data '{"state":"completed","transcript":[{"transcript_id":"transcript_fleet_1","speaker_kind":"silicon","speaker_id":"architecture","speaker_name":"Architecture Silicon","body":"Architecture approved","blocks":[],"revision":1}]}'
+
 si --json work complete task_123 --data '{"work_event_id":"event_complete","kind":"completion","body":"Fitness app delivered and verified","blocks":[]}'
 si --json work fail task_123 --data '{"work_event_id":"event_failure","kind":"failure","body":"Build could not recover","blocks":[{"type":"file","media_id":"media_1","filename":"build.log"}]}'
 si --json work cancel task_123 --data '{"work_event_id":"event_cancel","kind":"cancellation","body":"Cancelled by the requester","blocks":[]}'
@@ -199,6 +204,8 @@ POST   /api/v1/work/tasks/{task_id}/worker-groups/{group_id}/invocations
 PATCH  /api/v1/work/tasks/{task_id}/worker-groups/{group_id}/invocations/{invocation_id}
 POST   /api/v1/work/tasks/{task_id}/calls
 PATCH  /api/v1/work/tasks/{task_id}/calls/{call_id}
+POST   /api/v1/work/calls
+PATCH  /api/v1/work/calls/{call_id}
 POST   /api/v1/work/tasks/{task_id}/complete
 POST   /api/v1/work/tasks/{task_id}/fail
 POST   /api/v1/work/tasks/{task_id}/cancel

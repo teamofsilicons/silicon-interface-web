@@ -51,6 +51,9 @@ next-env.d.ts
 # generated package archives
 /packages/silicon-interface-cli/*.tgz
 
+# generated CLI installation and operation state
+/.silicon-interface/
+
 # Python helpers
 __pycache__/
 *.py[cod]

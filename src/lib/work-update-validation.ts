@@ -454,26 +454,36 @@ interface ParsedEventBase extends Omit<WorkEventBase, "kind"> {
 function parseEventBase(row: UnknownRecord): ParsedEventBase | null {
   if (row.schema_version !== WORK_UPDATE_SCHEMA_VERSION) return null;
   const workEventId = identifier(row.work_event_id);
-  const taskId = identifier(row.task_id);
+  const taskId = row.task_id == null ? null : identifier(row.task_id);
   const roomId = identifier(row.room_id);
-  const taskTitle = text(row.task_title, false);
+  const taskTitle = row.task_title == null ? null : text(row.task_title, false);
   const body = text(row.body);
   const blocks = parseWorkContentBlocks(row.blocks);
-  const timing = parseWorkTimingSnapshot(row.timing);
+  const timing = row.timing == null ? null : parseWorkTimingSnapshot(row.timing);
   const history = parseWorkHistory(row.history);
   const eventRevision = revision(row.revision);
   const createdAt = isoDate(row.created_at);
   const updatedAt = isoDate(row.updated_at);
-  if (!workEventId || !taskId || !roomId || !taskTitle || body === null || !blocks ||
-      !timing || !history || eventRevision === null || !createdAt || !updatedAt ||
-      !EVENT_KINDS.has(row.kind as WorkEventKind)) return null;
+  const kind = EVENT_KINDS.has(row.kind as WorkEventKind)
+    ? row.kind as WorkEventKind
+    : null;
+  if (!workEventId || !roomId || body === null || !blocks || !history ||
+      eventRevision === null || !createdAt || !updatedAt || !kind ||
+      (row.task_id != null && !taskId) ||
+      (row.task_title != null && !taskTitle) ||
+      (row.timing != null && !timing)) return null;
+  const hasTaskId = taskId !== null;
+  const hasTaskTitle = taskTitle !== null;
+  const hasTiming = timing !== null;
+  if (hasTaskId !== hasTaskTitle || hasTaskId !== hasTiming) return null;
+  if (kind !== "call" && !hasTaskId) return null;
   return {
     schema_version: WORK_UPDATE_SCHEMA_VERSION,
     work_event_id: workEventId,
     task_id: taskId,
     room_id: roomId,
     task_title: taskTitle,
-    kind: row.kind as WorkEventKind,
+    kind,
     body,
     blocks,
     timing,
@@ -543,24 +553,37 @@ export function parseWorkPersistentEvent(value: unknown): WorkPersistentEvent | 
   if (!row) return null;
   const base = parseEventBase(row);
   if (!base) return null;
+  const linkedBase = base.task_id !== null &&
+      base.task_title !== null &&
+      base.timing !== null
+    ? {
+        ...base,
+        task_id: base.task_id,
+        task_title: base.task_title,
+        timing: base.timing,
+      }
+    : null;
   switch (base.kind) {
     case "milestone":
-      return { ...base, kind: "milestone" } satisfies WorkMilestoneEvent;
+      return linkedBase
+        ? { ...linkedBase, kind: "milestone" } satisfies WorkMilestoneEvent
+        : null;
     case "completion":
     case "failure":
     case "cancellation":
-      if (base.timing.timer_state !== "stopped") return null;
-      return { ...base, kind: base.kind } satisfies WorkTerminalEvent;
+      if (!linkedBase || linkedBase.timing.timer_state !== "stopped") return null;
+      return { ...linkedBase, kind: base.kind } satisfies WorkTerminalEvent;
     case "blocker": {
+      if (!linkedBase) return null;
       const blockerId = identifier(row.blocker_id);
       if (!blockerId || (row.state !== "open" && row.state !== "resolved")) return null;
       const resolvedAt = row.resolved_at === null ? null : isoDate(row.resolved_at);
       if (row.state === "open" ? row.resolved_at !== null : !resolvedAt) return null;
       if (row.state === "open" &&
-          (base.timing.timer_state !== "paused" ||
-            base.timing.timer_pause_reason !== "blocker")) return null;
+          (linkedBase.timing.timer_state !== "paused" ||
+            linkedBase.timing.timer_pause_reason !== "blocker")) return null;
       return {
-        ...base,
+        ...linkedBase,
         kind: "blocker",
         blocker_id: blockerId,
         state: row.state,
@@ -568,6 +591,7 @@ export function parseWorkPersistentEvent(value: unknown): WorkPersistentEvent | 
       } satisfies WorkBlockerEvent;
     }
     case "worker_group": {
+      if (!linkedBase) return null;
       const groupId = identifier(row.group_id);
       if (!groupId || !Array.isArray(row.workers)) return null;
       const workers: WorkWorkerInvocation[] = [];
@@ -579,7 +603,7 @@ export function parseWorkPersistentEvent(value: unknown): WorkPersistentEvent | 
         workers.push(worker);
       }
       return {
-        ...base,
+        ...linkedBase,
         kind: "worker_group",
         group_id: groupId,
         workers,

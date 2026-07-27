@@ -3,7 +3,7 @@
 import * as React from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { ArrowDown, Check, Checks, Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
+import { ArrowDown, Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -49,7 +49,7 @@ import type {
   WsFrame,
 } from "@/lib/types";
 import { clearRoomProgress, getRoomProgress } from "@/lib/progress-cache";
-import { orderRunAnchoredReplies } from "@/lib/run-anchored-timeline";
+import { preserveCanonicalTimelineOrder } from "@/lib/run-anchored-timeline";
 import { parseWorkTimelineRecord } from "@/lib/work-update-validation";
 import {
   workEventCountsAsUnread,
@@ -61,7 +61,10 @@ import {
   type WorkUpdateState,
 } from "@/lib/work-update-state";
 import { dedupeWorkTimelineEnvelopes } from "@/lib/work-timeline-dedupe";
-import type { WorkTimelineRecord } from "@/lib/work-update-types";
+import type {
+  ManagerActivityGroup,
+  WorkTimelineRecord,
+} from "@/lib/work-update-types";
 import {
   getManagerActivityState,
   recordManagerActivity,
@@ -70,7 +73,10 @@ import {
 } from "@/lib/work-manager-activity-cache";
 import {
   eventReplacesManagerActivity,
-  visibleManagerActivityGroups,
+  MANAGER_ACTIVITY_STALE_MS,
+  managerActivityReplacementEvent,
+  placeManagerActivityGroups,
+  presentedManagerActivityGroups,
 } from "@/lib/work-manager-activity";
 import {
   appendRoomEventSnippet,
@@ -166,17 +172,14 @@ import {
   selectionTouchesTimeline,
   shouldPinOwnedTimelineTail,
   shouldLoadOlderNearTimelineTop,
-  timelineTailMessageIsVisible,
+  timelineTailIsVisible,
   touchMovesTowardTimelineHistory,
   wheelMovesTowardTimelineHistory,
 } from "@/lib/timeline-text-selection";
 import { authoritativeEditConflict } from "@/lib/edit-conflict";
 import { reconcileReplyTarget } from "@/lib/reply-state";
 import { chatConnectingCopy } from "@/lib/connection-status";
-import {
-  messageReceiptPresentation,
-  strongestMessageReceiptStatus,
-} from "@/lib/message-receipt";
+import { strongestMessageReceiptStatus } from "@/lib/message-receipt";
 import { mergeSearchPage, recentLocalSearch } from "@/lib/reliable-search";
 import {
   aggregateReactions,
@@ -207,7 +210,6 @@ import {
 import {
   canSendPlaintextToRoom,
   mergeDeliverySummaries,
-  normalizeDeliveryObject,
   normalizeDeliverySummary,
 } from "@/lib/delivery-state";
 import { deviceId } from "@/lib/device-id";
@@ -264,8 +266,6 @@ import { sendTimeoutMs } from "@/lib/send-timeout";
 import type { AnnotationOpenRequest } from "@/components/chat/media-previewer";
 import { ProfileDrawer } from "@/components/chat/profile-drawer";
 import { CronDrawer } from "@/components/chat/cron-drawer";
-import { SiliconBrowserMark } from "@/components/chat/remote-browser-card";
-import { SiliconBrowserDialog } from "@/components/chat/silicon-browser-dialog";
 import { SaveContactDialog } from "@/components/chat/save-contact-dialog";
 import type { Contact } from "@/lib/types";
 import { contactKey } from "@/lib/use-contacts";
@@ -341,21 +341,14 @@ interface ProgressEntry {
   state: ProgressState;
   note: string;
   updatedAt: number;
-  source: "local" | "server";
+  source: "server";
   /** §1.2 — determinate progress (0..100) when the silicon reports it. */
   pct?: number | null;
   /** §1.6 — public handle of whoever is actually working, so the progress
    *  avatar isn't a "most recent silicon sender" guess. */
   handle?: string | null;
-  /** Carbon message this run is working on — anchors the status under it. */
+  /** Carbon message that triggered this run; never used to reorder the UI. */
   anchorEventId?: string | null;
-  /** Plain recipient activity shown before real work progress. */
-  receipt?:
-    | "waiting"
-    | "partially_delivered"
-    | "delivered"
-    | "partially_read"
-      | "read";
 }
 
 function progressStateForManagerKind(
@@ -373,9 +366,8 @@ function progressStateForManagerKind(
 
 function cachedManagerProgress(roomId: string): ProgressEntry | null {
   const groups = visibleCachedManagerActivities(roomId);
-  const group = [...groups].reverse().find((candidate) => candidate.display === "active") ??
-    groups.at(-1);
-  const frame = group?.current ?? group?.history.at(-1);
+  const group = [...groups].reverse().find((candidate) => candidate.display === "active");
+  const frame = group?.current;
   if (!group || !frame) return null;
   const updatedAt = Date.parse(group.updated_at);
   return {
@@ -427,32 +419,6 @@ function materializedWorkRecord(
     const current = state.events[incoming.event.work_event_id];
     return current ? { type: "m.work_event", event: current } : incoming;
   }
-}
-
-type ActivityReceipt = NonNullable<ProgressEntry["receipt"]>;
-
-function activityReceiptFromDeliveries(
-  deliveries: Record<string, NonNullable<Event["delivery"]>> | undefined,
-): ActivityReceipt | null {
-  const statuses = Object.values(deliveries ?? {}).map(
-    (delivery) => normalizeDeliveryObject(delivery).state,
-  );
-  if (statuses.length === 0) return null;
-  if (statuses.every((status) => status === "read")) return "read";
-  if (
-    statuses.every(
-      (status) =>
-        status === "delivered" || status === "partially_read" || status === "read",
-    )
-  ) {
-    return statuses.every((status) => status === "delivered")
-      ? "delivered"
-      : "partially_read";
-  }
-  if (statuses.some((status) => status === "partially_delivered")) {
-    return "partially_delivered";
-  }
-  return "waiting";
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
@@ -526,13 +492,9 @@ const PROGRESS_MESSAGE_TYPES = new Set([
 ]);
 
 const MIN_PROGRESS_STATUS_MS = 1000;
-// How long recipient activity shows before switching to the
-// actual silicon work progress.
-const RECEIPT_HOLD_MS = 3000;
 // §1.1 — progress staleness. We keep showing the last live line as long as the
 // silicon might still be working; only after a long silence do we collapse it to
 // a quiet "Still working…" (with a dismiss, in case it died with no `done`).
-const PROGRESS_STALE_HARD_MS = 100_000;
 // Backend search: hits per block (page) and the debounce before firing a query.
 const SEARCH_INTERVAL = 40;
 const SEARCH_DEBOUNCE_MS = 280;
@@ -911,7 +873,6 @@ export function RoomView({
   // room I may only watch. No composer, no reactions/replies/take-backs, and
   // no read-receipts (I'm not a member, so the read POST would 403 anyway).
   const readOnly = !!room.observed;
-  const showsProgressForReplies = !readOnly && peers.some((p) => p.kind === "silicon");
   React.useEffect(() => {
     if (siliconPeers.length === 0 || connectionStatePending) return;
     let alive = true;
@@ -993,7 +954,9 @@ export function RoomView({
       if (cancelled) return;
       let next = getManagerActivityState();
       let sawActivity = false;
-      for (const event of ordered) {
+      let pendingGroupId: string | null = null;
+      for (let index = 0; index < ordered.length; index += 1) {
+        const event = ordered[index];
         if (event.type === "m.progress") {
           const groupId = String(event.content.progress_group_id || event.event_id);
           next = recordManagerActivity(
@@ -1010,30 +973,45 @@ export function RoomView({
             },
           );
           sawActivity = true;
+          const state = event.content.state ?? event.content.kind;
+          if (state !== "done") pendingGroupId = groupId;
+          const priorFinalMessage = state === "done"
+            ? managerActivityReplacementEvent(ordered.slice(0, index), groupId)
+            : null;
+          if (priorFinalMessage) {
+            next = settleCachedManagerActivity(room.room_id, {
+              reason: "final_message",
+              progress_group_id: groupId,
+              occurred_at: event.created_at,
+              final_message_event_id: priorFinalMessage.event_id,
+            });
+            if (pendingGroupId === groupId) pendingGroupId = null;
+          } else if (state === "done") {
+            pendingGroupId = groupId;
+          }
         } else if (
           sawActivity &&
           eventReplacesManagerActivity(event)
         ) {
+          const explicitGroupId =
+            typeof event.content.progress_group_id === "string"
+              ? event.content.progress_group_id
+              : null;
+          const selectedGroupId: string | null = explicitGroupId ?? pendingGroupId;
           next = settleCachedManagerActivity(room.room_id, {
             reason: "final_message",
-            progress_group_id:
-              typeof event.content.progress_group_id === "string"
-                ? event.content.progress_group_id
-                : null,
+            progress_group_id: selectedGroupId,
             occurred_at: event.created_at,
             final_message_event_id: event.event_id,
           });
+          if (selectedGroupId === pendingGroupId) pendingGroupId = null;
         }
       }
       if (cancelled) return;
       setManagerActivityState(next);
       const reconstructedProgress = cachedManagerProgress(room.room_id);
       if (!reconstructedProgress) clearRoomProgress(room.room_id);
-      setActiveProgress((current) =>
-        current?.source === "local"
-          ? current
-          : reconstructedProgress,
-      );
+      setActiveProgress(reconstructedProgress);
     });
     return () => {
       cancelled = true;
@@ -1067,41 +1045,6 @@ export function RoomView({
   // read before this point when they are visibly rendered; hydration still
   // controls history/pagination readiness.
   const [hydrated, setHydrated] = React.useState(false);
-  // Drives the "waiting → delivered → read" activity sequence.
-  const receiptTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clearReceiptTimer = React.useCallback(() => {
-    if (receiptTimerRef.current) {
-      clearTimeout(receiptTimerRef.current);
-      receiptTimerRef.current = null;
-    }
-  }, []);
-  // Show plain recipient activity, then after a beat fall through to the
-  // actual silicon work progress.
-  const showReceipt = React.useCallback(
-    (kind: ActivityReceipt) => {
-      setActiveProgress({
-        roomId: room.room_id,
-        groupId: `receipt:${room.room_id}`,
-        state: "thinking",
-        note: "",
-        updatedAt: Date.now(),
-        source: "local",
-        receipt: kind,
-      });
-      clearReceiptTimer();
-      receiptTimerRef.current = setTimeout(() => {
-        receiptTimerRef.current = null;
-        // Drop the receipt → start the real progress (unless a server progress
-        // frame or the silicon's reply already replaced it).
-        setActiveProgress((prev) =>
-          prev && prev.receipt
-            ? { ...prev, receipt: undefined, state: "thinking", updatedAt: Date.now() }
-            : prev,
-        );
-      }, RECEIPT_HOLD_MS);
-    },
-    [room.room_id, clearReceiptTimer],
-  );
   // True while the composer is holding a silicon text (not yet sent) — shows
   // "holding the message until you finish typing." in place of silicon progress.
   const [holdingMessage, setHoldingMessage] = React.useState(false);
@@ -1360,7 +1303,6 @@ export function RoomView({
     }>
   >({});
   const [cronOpen, setCronOpen] = React.useState(false);
-  const [browserOpen, setBrowserOpen] = React.useState(false);
   const [droppedFiles, setDroppedFiles] = React.useState<File[]>([]);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
   // #5 — Per-handle activity state. Each entry expires after `until`.
@@ -1415,6 +1357,7 @@ export function RoomView({
   const scrollRootRef = React.useRef<HTMLDivElement | null>(null);
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
   const timelineContentRef = React.useRef<HTMLDivElement | null>(null);
+  const timelineTailRef = React.useRef<HTMLDivElement | null>(null);
   const timelineInteractionRef = React.useRef<HTMLDivElement | null>(null);
   const pendingRoomScrollRestoreRef = React.useRef<RoomScrollMemory | null>(
     openedScrollMemory && !openedScrollMemory.atBottom ? openedScrollMemory : null,
@@ -1983,7 +1926,6 @@ export function RoomView({
     // running shows progress immediately instead of waiting for the next frame.
     setActiveProgress(getRoomProgress(roomId) ?? cachedManagerProgress(roomId));
     setManagerActivityState(getManagerActivityState());
-    clearReceiptTimer();
     setActivities({});
     restoredDraftReplyIdRef.current = null;
     setReplyTo(null);
@@ -2219,7 +2161,6 @@ export function RoomView({
       mounted = false;
       cancelPendingBottomScroll();
       cancelBottomAnimation();
-      clearReceiptTimer();
     };
   }, [
     cancelBottomAnimation,
@@ -2229,7 +2170,6 @@ export function RoomView({
     openedScrollMemory,
     room.room_id,
     myUsername,
-    clearReceiptTimer,
     reportHistoryFailure,
     reportHistoryHealthy,
     captureHistoryViewportAnchor,
@@ -2320,18 +2260,13 @@ export function RoomView({
               timelineDevice,
             ),
           );
-          // §1.7 — after a (re)connect, resync the progress line from the cache
-          // rather than blindly dropping it: this effect also fires on the first
-          // connect of a fresh page load, and the cache (persisted across
-          // refresh) is the only record of an in-flight task. A local receipt
-          // line is left alone. If the task finished, the cache was cleared by a
-          // final message; a done run without a final message retains its
-          // expandable activity history.
+          // §1.7 — after a (re)connect, resync the Stemcell progress line from
+          // the cache. If the task finished, the cache was cleared by a final
+          // message; a done run without a final message retains its expandable
+          // activity history.
           setManagerActivityState(getManagerActivityState());
-          setActiveProgress((p) =>
-            p && p.source !== "server"
-              ? p
-              : getRoomProgress(room.room_id) ?? cachedManagerProgress(room.room_id),
+          setActiveProgress(
+            getRoomProgress(room.room_id) ?? cachedManagerProgress(room.room_id),
           );
         })
         .catch((error) => reportHistoryFailure(error));
@@ -2562,7 +2497,7 @@ export function RoomView({
       if (incoming.type === "m.progress") {
         const state = (incoming.content.state as ProgressState) || "thinking";
         const groupId = String(incoming.content.progress_group_id || incoming.event_id);
-        const nextManagerActivity = recordManagerActivity(
+        let nextManagerActivity = recordManagerActivity(
           {
             ...incoming.content,
             room_id: room.room_id,
@@ -2575,8 +2510,24 @@ export function RoomView({
             frame_id: incoming.event_id,
           },
         );
+        const priorFinalMessage = state === "done"
+          ? managerActivityReplacementEvent(
+              [
+                ...eventProjectionRef.current,
+                ...recentServerEventRef.current.values(),
+              ],
+              groupId,
+            )
+          : null;
+        if (priorFinalMessage) {
+          nextManagerActivity = settleCachedManagerActivity(room.room_id, {
+            reason: "final_message",
+            progress_group_id: groupId,
+            occurred_at: incoming.created_at,
+            final_message_event_id: priorFinalMessage.event_id,
+          });
+        }
         setManagerActivityState(nextManagerActivity);
-        clearReceiptTimer(); // real progress takes over from any receipt line
         const incomingProgress: ProgressEntry = {
           roomId: room.room_id,
           groupId,
@@ -2622,7 +2573,6 @@ export function RoomView({
         };
       }
       if (!updatesExisting && !mine && eventReplacesManagerActivity(merged)) {
-        clearReceiptTimer();
         const settled = settleCachedManagerActivity(room.room_id, {
           reason: "final_message",
           progress_group_id:
@@ -2663,7 +2613,6 @@ export function RoomView({
     } else if (f.type === "delivery_receipt") {
       if (!f.member_handle || f.member_handle !== myUsername) {
         const delivered = new Set(f.event_ids);
-        const receipt = activityReceiptFromDeliveries(f.deliveries);
         setEvents((prev) =>
           prev.map((event) => {
             if (!delivered.has(event.event_id) || event.sender_handle !== myUsername) {
@@ -2685,7 +2634,6 @@ export function RoomView({
             };
           }),
         );
-        if (receipt && activeProgress?.receipt) showReceipt(receipt);
       }
     } else if (f.type === "event.delta") {
       setEvents((prev) => {
@@ -2712,7 +2660,6 @@ export function RoomView({
         const finalizedEvent = { ...pendingEvent, is_final: true };
         recentServerEventRef.current.set(f.event_id, finalizedEvent);
         if (eventReplacesManagerActivity(finalizedEvent)) {
-          clearReceiptTimer();
           const settled = settleCachedManagerActivity(room.room_id, {
             reason: "final_message",
             progress_group_id:
@@ -2768,7 +2715,6 @@ export function RoomView({
       if (f.member_handle && f.member_handle === myUsername) return;
       // §2.6 — mark by POSITION, not string `<=`. String ordering is only valid
       // for fixed-width Crockford ULIDs; forwarded/UUID-fallback ids break it.
-      const receipt = activityReceiptFromDeliveries(f.deliveries);
       setEvents((prev) => {
         const cutoffIdx = prev.findIndex((e) => e.event_id === f.event_id);
         let changed = false;
@@ -2795,9 +2741,6 @@ export function RoomView({
         });
         return changed ? updated : prev;
       });
-      // My just-sent message got read → upgrade the receipt line ("read"),
-      // which restarts the brief hold before the real progress shows.
-      if (receipt && activeProgress?.receipt) showReceipt(receipt);
     } else if (f.type === "thread_read_receipt") {
       if (f.member_handle && f.member_handle === myUsername) {
         return;
@@ -2846,7 +2789,6 @@ export function RoomView({
           occurred_at: occurredAt,
         });
         setManagerActivityState(nextManagerActivity);
-        clearReceiptTimer(); // real progress takes over from any receipt line
         const incomingProgress: ProgressEntry = {
           roomId: room.room_id,
           groupId: f.progress_group_id,
@@ -3969,8 +3911,8 @@ export function RoomView({
         text: outgoingPreviewText(payload),
         status: "waiting",
       });
-      // No progress yet — we don't show anything until the message is actually
-      // sent (see onAck → showReceipt).
+      // No progress is synthesized here. The activity row appears only after
+      // an actual Stemcell progress frame arrives.
       vibrate(8); // §3c — feather-light haptic on send
       // Prompt for notification access on the user's first send: an in-app ask
       // first, then (on "enable") the real OS permission prompt. One-time.
@@ -4036,10 +3978,6 @@ export function RoomView({
         clientId,
       ),
     );
-    // Server acceptance is still waiting; a recipient receipt upgrades it.
-    if (showsProgressForReplies && PROGRESS_MESSAGE_TYPES.has(real.type)) {
-      showReceipt("waiting");
-    }
     if (real.delivery_state === "queued_for_maintenance") {
       const queuedFor = real.maintenance_recipients?.length
         ? real.maintenance_recipients
@@ -4062,8 +4000,6 @@ export function RoomView({
       });
     }
   }, [
-    showsProgressForReplies,
-    showReceipt,
     room.room_id,
     myUsername,
     setEvents,
@@ -5019,10 +4955,18 @@ export function RoomView({
   // and in the page-level cache), so a lingering entry genuinely means work is
   // still in flight — including inter-silicon chats where every message is a
   // silicon, and multi-step tasks that post then keep working.
-  const shouldShowActiveProgress = !search && activeProgress?.roomId === room.room_id;
-  const activeManagerActivityGroups = React.useMemo(
-    () => visibleManagerActivityGroups(managerActivityState, room.room_id),
-    [managerActivityState, room.room_id],
+  const progressStaleMs = activeProgress ? progressNow - activeProgress.updatedAt : 0;
+  const shouldShowActiveProgress =
+    !search &&
+    activeProgress?.roomId === room.room_id &&
+    progressStaleMs < MANAGER_ACTIVITY_STALE_MS;
+  const managerActivityGroups = React.useMemo(
+    () => presentedManagerActivityGroups(
+      managerActivityState,
+      room.room_id,
+      { asOfMs: progressNow },
+    ),
+    [managerActivityState, progressNow, room.room_id],
   );
   const progressAvatarHandle = React.useMemo(() => {
     // §1.6 — prefer the handle the progress frame actually attributed the work
@@ -5036,56 +4980,37 @@ export function RoomView({
     return headerSeed;
   }, [activeProgress, visibleEvents, peer, headerSeed]);
   // §1.1 — how long since the progress line last advanced.
-  const progressStaleMs = activeProgress ? progressNow - activeProgress.updatedAt : 0;
   const progressAvatarSrc = React.useMemo(() => {
     if (!progressAvatarHandle) return headerPhoto;
     return photoFor("silicon", progressAvatarHandle) ?? headerPhoto;
   }, [progressAvatarHandle, photoFor, headerPhoto]);
+  const displayedManagerGroups = React.useMemo(
+    () => !search && !holdingMessage ? managerActivityGroups : [],
+    [holdingMessage, managerActivityGroups, search],
+  );
+  const managerPlacement = React.useMemo(
+    () => placeManagerActivityGroups(
+      displayedManagerGroups,
+      canonicalDisplayRows,
+    ),
+    [canonicalDisplayRows, displayedManagerGroups],
+  );
 
-  // §1 — anchor the active run's status to the message that started it. A
-  // message's immutable local key is stable across the optimistic→server
-  // swap, so identity beats timestamps here (wall-clock skew put the status
-  // above the latest message). Record the newest message's key when a run
-  // begins.
-  const lastRowKey = canonicalDisplayRows.length
-    ? timelineRenderKey(canonicalDisplayRows[canonicalDisplayRows.length - 1])
-    : null;
-  const [runAnchorKey, setRunAnchorKey] = React.useState<string | null>(null);
-  // Capture the anchor ONCE, on the rising edge of "a run is active" — the
-  // message that was latest when the silicon began working. Messages sent while
-  // the run stays active must NOT move the anchor (a later message just creates
-  // a new progress group-id); they fall below the status as a fresh turn.
-  const runActiveNow = !search && shouldShowActiveProgress && !holdingMessage;
-  const runAnchorGenerationRef = React.useRef(0);
-  React.useEffect(() => {
-    const generation = ++runAnchorGenerationRef.current;
-    queueMicrotask(() => {
-      if (runAnchorGenerationRef.current !== generation) return;
-      if (!runActiveNow) {
-        setRunAnchorKey(null);
-        return;
-      }
-      setRunAnchorKey((prev) => prev ?? lastRowKey);
-    });
-    return () => {
-      if (runAnchorGenerationRef.current === generation) {
-        runAnchorGenerationRef.current += 1;
-      }
-    };
-  }, [runActiveNow, lastRowKey]);
-
-  // The active run's server-stamped anchor (the carbon message it's working on),
-  // when present — preferred over the client rising-edge guess.
-  const activeAnchorId = activeProgress?.anchorEventId ?? null;
-
-  // §1 — fold the flat timeline into "turn" groups, and place each silicon run
-  // (its reply + working status) under the carbon message that triggered it.
+  // Fold the authoritative timeline into sender panels without moving events.
+  // Run anchors are metadata only; both replies and live Stemcell progress stay
+  // after every message that Glass accepted before them.
   const timelineItems = React.useMemo(() => {
     type Party = "carbon" | "silicon";
     type Row = (typeof displayRows)[number];
     type Item =
       | { kind: "panel"; party: Party; events: Row[]; key: string; dayLabel: string | null }
       | { kind: "system"; event: Row; key: string; dayLabel: string | null }
+      | {
+          kind: "manager";
+          group: ManagerActivityGroup;
+          key: string;
+          dayLabel: string | null;
+        }
       | { kind: "progress"; key: string; dayLabel: string | null };
     const keyOf = (e: Row) => timelineRenderKey(e);
     const isSystem = (e: Row) => e.type === "m.system" || e.type === "m.session_marker";
@@ -5095,48 +5020,12 @@ export function RoomView({
       return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     };
 
-    // Glass owns the run association. Reorder only replies whose server anchor
-    // is present in this loaded window; partial history and old servers retain
-    // their canonical stream order.
-    const present = new Set(canonicalDisplayRows.map((e) => e.event_id));
-    const repliesByAnchor = new Map<string, Row[]>();
-    for (const e of canonicalDisplayRows) {
-      const anchor = e.run_anchor_event_id;
-      if (e.sender_kind === "silicon" && anchor && present.has(anchor)) {
-        const list = repliesByAnchor.get(anchor) ?? [];
-        list.push(e);
-        repliesByAnchor.set(anchor, list);
-      }
-    }
-    const rows: Row[] = orderRunAnchoredReplies(canonicalDisplayRows);
+    const rows: Row[] = preserveCanonicalTimelineOrder(canonicalDisplayRows);
 
-    const runActiveRaw = !search && shouldShowActiveProgress && !holdingMessage;
-    // Prefer the server anchor; fall back to the client rising-edge anchor when
-    // the backend doesn't stamp one (older server, or a cron/proactive run).
-    const useServerAnchor = !!activeAnchorId && present.has(activeAnchorId);
-    let runActive: boolean;
-    if (activeManagerActivityGroups.length > 0) {
-      // Canonical room-scoped groups already encode final-message settlement.
-      // Do not let a stale legacy anchor hide another group's retained history.
-      runActive = runActiveRaw;
-    } else if (useServerAnchor) {
-      // Interim normal messages and durable work cards may be anchored to the
-      // same run. Only a committed conversational answer replaces activity.
-      const replacingReply = repliesByAnchor.get(activeAnchorId)?.some(
-        eventReplacesManagerActivity,
-      ) ?? false;
-      runActive = runActiveRaw && !replacingReply;
-    } else {
-      const anchorIdx =
-        runActiveRaw && runAnchorKey ? rows.findIndex((e) => keyOf(e) === runAnchorKey) : -1;
-      const repliedAfterAnchor =
-        anchorIdx >= 0 && rows.slice(anchorIdx + 1).some(eventReplacesManagerActivity);
-      runActive = runActiveRaw && !repliedAfterAnchor;
-    }
+    const runActive = !search && shouldShowActiveProgress && !holdingMessage;
 
     const raw: Array<{ item: Item; iso: string }> = [];
     let cur: { party: Party; events: Row[] } | null = null;
-    let progressPlaced = false;
     let lastIso = rows.length ? rows[0].created_at : new Date(0).toISOString();
     const flush = () => {
       if (cur && cur.events.length) {
@@ -5156,7 +5045,21 @@ export function RoomView({
     const pushProgress = (iso: string) => {
       flush();
       raw.push({ item: { kind: "progress", key: "run-progress", dayLabel: null }, iso });
-      progressPlaced = true;
+    };
+    const pushManager = (
+      group: ManagerActivityGroup,
+      fallbackIso: string,
+    ) => {
+      flush();
+      raw.push({
+        item: {
+          kind: "manager",
+          group,
+          key: `manager:${group.room_id}:${group.progress_group_id}`,
+          dayLabel: null,
+        },
+        iso: group.history[0]?.occurred_at ?? fallbackIso,
+      });
     };
     for (const e of rows) {
       lastIso = e.created_at;
@@ -5177,18 +5080,13 @@ export function RoomView({
         }
         cur.events.push(e);
       }
-      // Insert the run status right after the carbon message it's answering —
-      // but ONLY when the server told us which one (run_anchor_event_id). With
-      // no server anchor (cron/proactive, or a run with no unanswered carbon),
-      // the client rising-edge guess lands mid-list after reply reordering, so
-      // we let it fall through to the bottom instead.
-      if (runActive && !progressPlaced && useServerAnchor && e.event_id === activeAnchorId) {
-        pushProgress(e.created_at);
-      }
     }
     flush();
-    // No server anchor (or it's out of the loaded window) → pin to the bottom.
-    if (runActive && !progressPlaced) pushProgress(lastIso);
+    for (const group of managerPlacement.trailing) {
+      pushManager(group, group.updated_at || lastIso);
+    }
+    // Legacy live Stemcell activity has no normalized manager group.
+    if (runActive && displayedManagerGroups.length === 0) pushProgress(lastIso);
     // Day band before the first item of each new local calendar day.
     let prevDay: string | null = null;
     for (const r of raw) {
@@ -5204,9 +5102,8 @@ export function RoomView({
     search,
     shouldShowActiveProgress,
     holdingMessage,
-    runAnchorKey,
-    activeAnchorId,
-    activeManagerActivityGroups.length,
+    displayedManagerGroups,
+    managerPlacement,
   ]);
 
   // Keep every loaded row mounted. Message panels have dynamic heights (media,
@@ -5239,31 +5136,22 @@ export function RoomView({
     return () => window.cancelAnimationFrame(frame);
   }, [search, timelineItems]);
 
-  const lastTimelineEventId = displayRows.length
-    ? displayRows[displayRows.length - 1].event_id
-    : null;
-  // File bundles render their text/caption event as the visible timeline row;
-  // the trailing media event is only a pin inside it. Resolve that projection
-  // before testing visibility or the arrow can remain over a visibly-latest
-  // message even though its raw media event has no standalone DOM node.
-  const lastRenderedTimelineEventId = lastTimelineEventId
-    ? renderedEventIdFor(lastTimelineEventId)
-    : null;
-  const newestMessageIsVisible = React.useCallback(() => {
+  // The visual tail is authoritative for the page-down arrow. The last chat
+  // message may be followed by any number of manager/progress/work-update rows,
+  // and a room can temporarily contain those rows without a message at all.
+  const renderedTimelineTailIsVisible = React.useCallback(() => {
     const scroller = scrollerRef.current;
-    const node = lastRenderedTimelineEventId
-      ? messageNodeRefs.current.get(lastRenderedTimelineEventId)
-      : null;
-    if (!scroller || !node) return false;
+    const tail = timelineTailRef.current;
+    if (!scroller || !tail) return false;
     const viewport = scroller.getBoundingClientRect();
-    const message = node.getBoundingClientRect();
-    return timelineTailMessageIsVisible({
+    const marker = tail.getBoundingClientRect();
+    return timelineTailIsVisible({
       viewportTop: viewport.top,
       viewportBottom: viewport.bottom,
-      messageTop: message.top,
-      messageBottom: message.bottom,
+      tailTop: marker.top,
+      tailBottom: marker.bottom,
     });
-  }, [lastRenderedTimelineEventId]);
+  }, []);
 
   // Restore the exact event/pixel captured before a prepend. Keep the anchor
   // alive after this first pre-paint correction: late media/preview sizing is
@@ -5294,7 +5182,7 @@ export function RoomView({
       viewportHeight = nextViewportHeight;
       contentHeight = nextContentHeight;
       if (preserveHistoryViewportAnchor()) {
-        const tailVisible = newestMessageIsVisible();
+        const tailVisible = renderedTimelineTailIsVisible();
         timelineTailVisibleRef.current = tailVisible;
         setTimelineAtBottom(tailVisible);
         return;
@@ -5305,7 +5193,7 @@ export function RoomView({
       })) {
         keepOwnedBottomPinned();
       } else {
-        const tailVisible = newestMessageIsVisible();
+        const tailVisible = renderedTimelineTailIsVisible();
         timelineTailVisibleRef.current = tailVisible;
         setTimelineAtBottom(tailVisible);
       }
@@ -5319,7 +5207,7 @@ export function RoomView({
   }, [
     cancelPendingBottomScroll,
     hydrated,
-    newestMessageIsVisible,
+    renderedTimelineTailIsVisible,
     preserveHistoryViewportAnchor,
     room.room_id,
     keepOwnedBottomPinned,
@@ -5331,11 +5219,11 @@ export function RoomView({
     // browser anchoring, or our own correction. They are not evidence of user
     // intent and therefore must never revoke bottom-follow ownership. Wheel,
     // touch, pointer, keyboard, and selection handlers do that synchronously.
-    const tailVisible = newestMessageIsVisible();
+    const tailVisible = renderedTimelineTailIsVisible();
     timelineTailVisibleRef.current = tailVisible;
     setTimelineAtBottom(tailVisible);
     if (tailVisible) setUnseenBelow(0);
-  }, [newestMessageIsVisible]);
+  }, [renderedTimelineTailIsVisible]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -5583,58 +5471,59 @@ export function RoomView({
         </>
       );
     }
+    if (item.kind === "manager") {
+      return (
+        <>
+          {dayBand}
+          <div className="my-3">
+            <WorkManagerActivityHistory
+              group={item.group}
+              avatarSeed={
+                (progressAvatarHandle
+                  ? peerByHandle.get(progressAvatarHandle)?.id
+                  : null) ||
+                progressAvatarHandle ||
+                headerSeed
+              }
+              avatarSrc={progressAvatarSrc}
+              avatarAsciiSrc={
+                progressAvatarHandle
+                  ? asciiFor("silicon", progressAvatarHandle) ?? headerAscii
+                  : headerAscii
+              }
+              avatarFamily={
+                (progressAvatarHandle
+                  ? peerByHandle.get(progressAvatarHandle)?.kind
+                  : null) ?? "silicon"
+              }
+            />
+          </div>
+        </>
+      );
+    }
     if (item.kind === "progress") {
       if (!activeProgress) return dayBand;
       return (
         <>
           {dayBand}
           <div className="my-3">
-            {activeManagerActivityGroups.length > 0 ? (
-              <div className="grid gap-2">
-                {activeManagerActivityGroups.map((group) => (
-                  <WorkManagerActivityHistory
-                    key={`${group.room_id}:${group.progress_group_id}`}
-                    group={group}
-                    avatarSeed={
-                      (progressAvatarHandle
-                        ? peerByHandle.get(progressAvatarHandle)?.id
-                        : null) ||
-                      progressAvatarHandle ||
-                      headerSeed
-                    }
-                    avatarSrc={progressAvatarSrc}
-                    avatarAsciiSrc={
-                      progressAvatarHandle
-                        ? asciiFor("silicon", progressAvatarHandle) ?? headerAscii
-                        : headerAscii
-                    }
-                    avatarFamily={
-                      (progressAvatarHandle
-                        ? peerByHandle.get(progressAvatarHandle)?.kind
-                        : null) ?? "silicon"
-                    }
-                  />
-                ))}
-              </div>
-            ) : (
-              <ProgressLine
-                entry={activeProgress}
-                avatarSeed={progressAvatarHandle || headerSeed}
-                avatarSrc={progressAvatarSrc}
-                avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
-                staleMs={progressStaleMs}
-                onDismiss={() => {
-                  const settled = settleCachedManagerActivity(room.room_id, {
-                    reason: "dismissed",
-                    progress_group_id: activeProgress.groupId,
-                    occurred_at: new Date().toISOString(),
-                  });
-                  setManagerActivityState(settled);
-                  clearRoomProgress(room.room_id);
-                  setActiveProgress(cachedManagerProgress(room.room_id));
-                }}
-              />
-            )}
+            <ProgressLine
+              entry={activeProgress}
+              avatarSeed={progressAvatarHandle || headerSeed}
+              avatarSrc={progressAvatarSrc}
+              avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
+              staleMs={progressStaleMs}
+              onDismiss={() => {
+                const settled = settleCachedManagerActivity(room.room_id, {
+                  reason: "dismissed",
+                  progress_group_id: activeProgress.groupId,
+                  occurred_at: new Date().toISOString(),
+                });
+                setManagerActivityState(settled);
+                clearRoomProgress(room.room_id);
+                setActiveProgress(cachedManagerProgress(room.room_id));
+              }}
+            />
           </div>
         </>
       );
@@ -5646,6 +5535,8 @@ export function RoomView({
         <div className="my-3">
           {item.events.map((e, j) => {
             const renderedId = e.event_id;
+            const attachedManagerGroups =
+              managerPlacement.attachedToEvent.get(renderedId) ?? [];
             const authoritative = hasAuthoritativeEventId(e);
             const parsedWorkCandidate = parseWorkTimelineRecord(e.type, e.content);
             const parsedWork = parsedWorkCandidate && (
@@ -5659,10 +5550,11 @@ export function RoomView({
               ? materializedWorkRecord(workUpdateState, parsedWork)
               : null;
             const workEventIsMine = isMyEvent(e, myUsername);
-            const showWorkTaskAvatar =
-              workRecord?.type === "m.work_task" &&
+            const showWorkUpdateAvatar =
+              workRecord !== null &&
               !workEventIsMine &&
-              e.sender_kind === "silicon";
+              e.sender_kind === "silicon" &&
+              (workRecord.type === "m.work_task" || workRecord.event.kind === "call");
             return (
               <React.Fragment key={timelineRenderKey(e)}>
                 <div
@@ -5683,10 +5575,10 @@ export function RoomView({
                     className={cn(
                       "flex w-full items-start",
                       workEventIsMine ? "justify-end" : "justify-start",
-                      showWorkTaskAvatar && "gap-2",
+                      showWorkUpdateAvatar && "gap-2",
                     )}
                   >
-                    {showWorkTaskAvatar ? (
+                    {showWorkUpdateAvatar ? (
                       <IdAvatar
                         seed={e.sender_public_id || e.sender_handle || "?"}
                         src={photoFor(e.sender_kind, e.sender_handle)}
@@ -5699,7 +5591,7 @@ export function RoomView({
                     <WorkEventCard
                       event={workRecord}
                       task={
-                        workRecord.type === "m.work_event"
+                        workRecord.type === "m.work_event" && workRecord.event.task_id
                           ? workUpdateState.tasks[workRecord.event.task_id]
                           : undefined
                       }
@@ -5715,6 +5607,19 @@ export function RoomView({
                 <MessageBubble
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
+                  managerActivity={
+                    attachedManagerGroups.length ? (
+                      <div className="space-y-1">
+                        {attachedManagerGroups.map((group) => (
+                          <WorkManagerActivityHistory
+                            key={`${group.room_id}:${group.progress_group_id}`}
+                            group={group}
+                            className="max-w-none"
+                          />
+                        ))}
+                      </div>
+                    ) : undefined
+                  }
                   myHandle={myUsername}
                   roomId={room.room_id}
                   onAttachAnnotations={readOnly ? undefined : onAttachAnnotations}
@@ -5903,18 +5808,6 @@ export function RoomView({
             Edit
           </Button>
         )}
-        {/* Browser — open (or join) this silicon's cloud browser, left of crons. */}
-        {peer?.kind === "silicon" && search === null && (
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => setBrowserOpen(true)}
-            aria-label="open this silicon's browser"
-            title="open this silicon's browser"
-          >
-            <SiliconBrowserMark className="h-4 w-4" />
-          </Button>
-        )}
         {/* Crons — only in a 1-on-1 silicon chat, left of search. */}
         {peer?.kind === "silicon" && search === null && (
           <Button
@@ -5948,15 +5841,6 @@ export function RoomView({
           siliconName={contact?.name ?? peer.name}
           open={cronOpen}
           onOpenChange={setCronOpen}
-        />
-      )}
-
-      {peer?.kind === "silicon" && (
-        <SiliconBrowserDialog
-          siliconId={peer.id}
-          siliconName={contact?.name ?? peer.name}
-          open={browserOpen}
-          onOpenChange={setBrowserOpen}
         />
       )}
 
@@ -6185,7 +6069,7 @@ export function RoomView({
               ))}
             </div>
             {holdingNode ? <div className="px-6">{holdingNode}</div> : null}
-            <div className="h-4 shrink-0" />
+            <div ref={timelineTailRef} data-timeline-tail className="h-4 shrink-0" />
           </div>
         </div>
       )}
@@ -6531,44 +6415,11 @@ function ProgressLine({
   staleMs?: number;
   onDismiss?: () => void;
 }) {
-  // Activity matches the sidebar: clock while waiting, one tick when delivered,
-  // and two ticks only when read.
-  if (entry.receipt) {
-    const presentation = messageReceiptPresentation(
-      entry.receipt === "waiting" ? "sent" : entry.receipt,
-    );
-    const receiptIcon = presentation.visual === "read"
-      ? <Checks className="h-4 w-4 text-[#1A1A1A]" weight="bold" aria-hidden />
-      : presentation.visual === "delivered" || presentation.visual === "sent"
-        ? <Check className="h-4 w-4" weight="bold" aria-hidden />
-        : <Clock className="h-4 w-4 opacity-60" aria-hidden />;
-    return (
-      <div className="my-2 flex w-full items-center justify-start gap-2">
-        <div className="w-7 shrink-0">
-          <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "silicon"} />
-        </div>
-        <div className="min-w-0 max-w-[70%]">
-          <span className="silicon-activity-line flex min-h-7 items-center text-sm">
-            <span className="inline-flex min-w-0 max-w-full items-center gap-3 overflow-hidden">
-              <span
-                className="inline-flex items-center gap-1.5"
-                role="status"
-                aria-label={presentation.label}
-              >
-                {receiptIcon}
-                <span className="silicon-activity-copy">{presentation.label}</span>
-              </span>
-            </span>
-          </span>
-        </div>
-      </div>
-    );
-  }
   // §1.1 — keep the last live line going while the silicon might still be
   // working (no "no update for Ns" countdown). Only after a long silence do we
   // collapse to a quiet "Still working…" with a dismiss, in case it died with no
   // `done` frame.
-  const dead = staleMs >= PROGRESS_STALE_HARD_MS;
+  const dead = staleMs >= MANAGER_ACTIVITY_STALE_MS;
   if (dead) {
     return (
       <div className="my-2 flex w-full items-start gap-2">

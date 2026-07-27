@@ -372,6 +372,15 @@ export function WorkUpdateDemo({
                         <MessageBubble
                           event={item.event}
                           isMine={item.mine}
+                          managerActivity={
+                            item.managerActivity ? (
+                              <WorkManagerActivityHistory
+                                group={item.managerActivity}
+                                initiallyExpanded={false}
+                                className="max-w-none"
+                              />
+                            ) : undefined
+                          }
                           myHandle="alex"
                           isDirect
                           status={item.mine ? "read" : undefined}

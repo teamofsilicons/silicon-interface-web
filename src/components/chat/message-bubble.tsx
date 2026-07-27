@@ -241,6 +241,8 @@ export type MessageStatus = MessageReceiptStatus;
 interface Props {
   event: Event;
   isMine: boolean;
+  /** Collapsed manager work history grouped with, but outside, the message bubble. */
+  managerActivity?: React.ReactNode;
   /** My own handle — used to highlight reactions I've already given. */
   myHandle?: string | null;
   /** The message this one is replying to, if any — rendered as a quote. */
@@ -318,6 +320,7 @@ interface Props {
 export function MessageBubble({
   event,
   isMine,
+  managerActivity,
   myHandle,
   replyToEvent,
   onJumpToEvent,
@@ -563,6 +566,14 @@ export function MessageBubble({
             <span>{senderLabel}</span>
           </div>
         )}
+        {managerActivity ? (
+          <div
+            className="max-w-full"
+            data-manager-activity-grouped="true"
+          >
+            {managerActivity}
+          </div>
+        ) : null}
         {/* §2 — attachments sent with this text peek over the bubble's top edge
             as tilted bookmarks; the negative margin tucks them onto the bubble. */}
         {pinnedAttachments && pinnedAttachments.length > 0 && (
@@ -591,6 +602,7 @@ export function MessageBubble({
           </div>
         )}
         <div
+          data-message-bubble="true"
           className={cn(
             // Symmetric p-3 padding so an inline image/file inside the bubble
             // has equal whitespace on top and left (previously px-3 py-2 left

@@ -159,6 +159,7 @@ test("the fake run covers the complete successful Build a Fitness App story", ()
   assert.equal(scenes.completed.timeline.some((item) => item.kind === "manager"), false);
   const finalItem = scenes.completed.timeline.at(-1);
   assert.equal(finalItem.kind, "message");
+  assert.equal(finalItem.managerActivity, undefined);
   assert.equal(finalItem.event.sender_kind, "silicon");
   assert.equal(finalItem.event.is_final, true);
   assert.equal(finalItem.event.content.work_continues, undefined);

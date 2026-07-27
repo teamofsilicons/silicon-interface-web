@@ -56,16 +56,17 @@ export function isTimelineAtBottom(input: {
 }
 
 /** The page-down affordance is visual, not ownership state. Hide it as soon
- * as even one pixel of the newest message intersects the timeline viewport. */
-export function timelineTailMessageIsVisible(input: {
+ * as the rendered end marker intersects the timeline viewport. Measuring the
+ * marker instead of the newest message also covers trailing work/progress rows. */
+export function timelineTailIsVisible(input: {
   viewportTop: number;
   viewportBottom: number;
-  messageTop: number;
-  messageBottom: number;
+  tailTop: number;
+  tailBottom: number;
 }): boolean {
   return (
-    input.messageBottom > input.viewportTop &&
-    input.messageTop < input.viewportBottom
+    input.tailBottom > input.viewportTop &&
+    input.tailTop < input.viewportBottom
   );
 }
 

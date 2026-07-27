@@ -176,8 +176,8 @@ function callState(state: WorkCallEvent["state"]): WorkCallState {
 function callView(event: WorkCallEvent, task?: WorkTaskView): WorkCallView {
   return {
     id: event.work_event_id,
-    taskId: event.task_id,
-    taskTitle: task?.title ?? event.task_title,
+    taskId: event.task_id ?? undefined,
+    taskTitle: task?.title ?? event.task_title ?? undefined,
     direction: event.direction,
     state: callState(event.state),
     peer: event.target_name,
@@ -234,7 +234,9 @@ export interface WorkEventCardProps {
 export function WorkEventCard({ event: input, className, onReply, task }: WorkEventCardProps) {
   const event = unpackEvent(input);
   if ("todos" in event) return <WorkTaskCard task={taskView(event)} className={className} />;
-  const linkedTask = task && task.task_id === event.task_id && task.room_id === event.room_id
+  const linkedTask = event.task_id && task &&
+      task.task_id === event.task_id &&
+      task.room_id === event.room_id
     ? taskView(task)
     : undefined;
   if (event.kind === "worker_group") {
@@ -257,6 +259,12 @@ function activityKind(frame: ManagerActivityFrame): WorkActivityKind {
   return frame.kind;
 }
 
+function isTerminalActivityShell(frame: ManagerActivityFrame): boolean {
+  if (frame.kind !== "done") return false;
+  const note = frame.note.trim().toLowerCase().replace(/[.!]+$/, "");
+  return !note || note === "done" || note === "manager finished";
+}
+
 function activityView(group: ManagerActivityGroup): WorkManagerActivity[] {
   const frames = [...group.history];
   if (group.current && !frames.some(
@@ -264,8 +272,17 @@ function activityView(group: ManagerActivityGroup): WorkManagerActivity[] {
   )) {
     frames.push(group.current);
   }
-  return frames.map((frame) => ({
-    id: `${frame.frame_id}:${frame.revision}`,
+  const meaningfulFrames = frames.filter((frame) => !isTerminalActivityShell(frame));
+  const displayedFrames = meaningfulFrames.length ? meaningfulFrames : frames;
+  return displayedFrames.map((frame) => activityForFrame(group, frame));
+}
+
+function activityForFrame(
+  group: ManagerActivityGroup,
+  frame: ManagerActivityFrame,
+): WorkManagerActivity {
+  return {
+    id: `${frame.progress_group_id}:${frame.frame_id}:${frame.revision}`,
     kind: activityKind(frame),
     label: frame.note || frame.kind.replaceAll("_", " "),
     state:
@@ -274,7 +291,7 @@ function activityView(group: ManagerActivityGroup): WorkManagerActivity[] {
         : "completed",
     at: frame.occurred_at,
     description: frame.progress_pct == null ? undefined : `${Math.round(frame.progress_pct)}% complete`,
-  }));
+  };
 }
 
 export interface WorkManagerActivityHistoryProps {
@@ -297,11 +314,22 @@ export function WorkManagerActivityHistory({
   avatarAsciiSrc,
   avatarFamily,
 }: WorkManagerActivityHistoryProps) {
+  const active = group.display === "active" && group.current !== null;
+  const summaryFrame = active ? group.current : group.history.at(-1);
   return (
     <WorkManagerActivityList
+      key={active ? "active" : "settled"}
       activities={activityView(group)}
+      summaryActivityId={
+        summaryFrame
+          ? `${summaryFrame.progress_group_id}:${summaryFrame.frame_id}:${summaryFrame.revision}`
+          : undefined
+      }
+      summaryActivity={
+        summaryFrame ? activityForFrame(group, summaryFrame) : undefined
+      }
       className={className}
-      initiallyExpanded={initiallyExpanded}
+      initiallyExpanded={initiallyExpanded ?? active}
       avatarSeed={avatarSeed}
       avatarSrc={avatarSrc}
       avatarAsciiSrc={avatarAsciiSrc}

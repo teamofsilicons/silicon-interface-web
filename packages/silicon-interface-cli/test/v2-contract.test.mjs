@@ -365,7 +365,7 @@ test("v2 sends protocol metadata and reuses a pending client id after failure", 
       assert.equal(requests[1].payload.content.client_id, requests[0].payload.content.client_id);
       assert.equal(requests[0].headers["x-chat-protocol"], "1");
       assert.equal(requests[0].headers["x-silicon-key"], "test-key");
-      assert.match(requests[0].headers["user-agent"], /silicon-interface-cli\/2\.0\.1/);
+      assert.match(requests[0].headers["user-agent"], /silicon-interface-cli\/2\.0\.2/);
       assert.match(requests[0].headers.traceparent, /^00-[a-f0-9]{32}-[a-f0-9]{16}-01$/);
     } finally {
       await closeServer(mock.server);

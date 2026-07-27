@@ -17,7 +17,7 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "2.0.1";
+const VERSION = "2.0.2";
 const CHAT_PROTOCOL = 1;
 const PING_INTERVAL_MS = 25_000;
 const PING_TIMEOUT_MS = 62_500;

@@ -4,7 +4,7 @@ import type {
   ManagerActivityKind,
   ManagerActivityState,
 } from "./work-update-types";
-import type { Event } from "./types";
+import type { Event, ProgressState } from "./types";
 
 const MANAGER_ACTIVITY_REPLACING_EVENT_TYPES = new Set([
   "m.text",
@@ -229,6 +229,125 @@ function frameKey(frame: ManagerActivityFrame): string {
   return `${frame.frame_id}\u0000${frame.revision}`;
 }
 
+function collapsePublicPathMentions(value: string): string {
+  return value.replace(
+    /(`?)(?!(?:[a-z][a-z0-9+.-]*:\/\/))((?:~?\/|\.{1,2}\/|[A-Za-z]:[\\/]|(?:[A-Za-z0-9_.-]+[\\/]))[^\s`"'<>]*)(`?)/gi,
+    (match, open: string, rawPath: string, close: string, offset: number, input: string) => {
+      if (input.slice(Math.max(0, offset - 8), offset).includes("://")) return match;
+      const suffixMatch = rawPath.match(/[),.;:\]}]+$/);
+      const suffix = suffixMatch?.[0] ?? "";
+      const path = suffix ? rawPath.slice(0, -suffix.length) : rawPath;
+      const parts = path.split(/[\\/]+/).filter(Boolean);
+      const fileName = parts[parts.length - 1];
+      if (!fileName || fileName === path) return match;
+      const tick = open || close ? "`" : "";
+      return `${tick}${fileName}${tick}${suffix}`;
+    },
+  );
+}
+
+function sentenceCase(value: string): string {
+  const text = value.trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
+}
+
+/**
+ * Convert a producer note into user-facing manager activity copy.
+ *
+ * Both the transient line and retained history use this formatter so internal
+ * tool mechanics, generic reasoning shells, and local filesystem paths cannot
+ * leak through one presentation while being hidden by the other.
+ */
+export function publicManagerActivityNote(
+  note: string,
+  kind: ManagerActivityKind | ProgressState,
+): string | null {
+  const text = collapsePublicPathMentions(note.trim());
+  if (!text) return null;
+  const normalized = text.toLowerCase().replace(/[.…]+$/g, "").trim();
+  if (
+    kind === "done" &&
+    (!normalized || normalized === "done" || normalized === "manager finished")
+  ) {
+    return null;
+  }
+  if (
+    normalized.startsWith("called tool") ||
+    normalized.startsWith("calling tool") ||
+    normalized.startsWith("tool call") ||
+    normalized.startsWith("tool:")
+  ) {
+    return null;
+  }
+  if (
+    kind === "thinking" &&
+    (normalized === "thinking" || normalized.startsWith("thought for "))
+  ) {
+    return null;
+  }
+  if (
+    kind === "executing" &&
+    (normalized.startsWith("executing command failed") ||
+      normalized.startsWith("message failed:"))
+  ) {
+    return sentenceCase(text);
+  }
+  if (
+    kind === "executing" &&
+    (normalized.startsWith("executing:") ||
+      normalized === "executing command" ||
+      normalized.startsWith("executing output:") ||
+      normalized.startsWith("executing done:"))
+  ) {
+    return "Executing command";
+  }
+  return sentenceCase(text);
+}
+
+export function isTerminalManagerActivityShell(
+  frame: ManagerActivityFrame,
+): boolean {
+  return frame.kind === "done" &&
+    publicManagerActivityNote(frame.note, frame.kind) === null;
+}
+
+function hasPresentableActivity(group: ManagerActivityGroup): boolean {
+  return [...group.history, ...(group.current ? [group.current] : [])]
+    .some((frame) => !isTerminalManagerActivityShell(frame));
+}
+
+function publicFrameKey(frame: ManagerActivityFrame): string {
+  return JSON.stringify([
+    frame.kind,
+    publicManagerActivityNote(frame.note, frame.kind),
+    frame.task_id ?? null,
+    frame.progress_pct ?? null,
+  ]);
+}
+
+function mergePresentedFrames(
+  groups: readonly ManagerActivityGroup[],
+): ManagerActivityFrame[] {
+  const frames = new Map<string, ManagerActivityFrame>();
+  for (const group of groups) {
+    for (const frame of group.history) {
+      if (isTerminalManagerActivityShell(frame)) continue;
+      const key = publicFrameKey(frame);
+      const current = frames.get(key);
+      if (!current || compareFrames(frame, current) > 0) frames.set(key, frame);
+    }
+  }
+  return [...frames.values()].sort(compareFrames);
+}
+
+function commonTaskId(
+  groups: readonly ManagerActivityGroup[],
+): string | null | undefined {
+  return groups.every((group) => group.task_id === groups[0]?.task_id)
+    ? groups[0]?.task_id
+    : undefined;
+}
+
 function mergeActivityHistory(
   history: readonly ManagerActivityFrame[],
   frame: ManagerActivityFrame,
@@ -430,6 +549,7 @@ export function presentedManagerActivityGroups(
   const presented = Object.values(state.groups)
     .filter((group) =>
       group.room_id === roomId &&
+      hasPresentableActivity(group) &&
       (group.display !== "replaced" || Boolean(group.replaced_by_event_id)) &&
       (
         group.display !== "active" ||
@@ -443,40 +563,52 @@ export function presentedManagerActivityGroups(
       left.progress_group_id.localeCompare(right.progress_group_id)
     );
   const histories = presented.filter((group) => group.display === "history");
-  if (histories.length < 2) return presented;
+  let projected = histories.length < 2
+    ? presented
+    : [
+        ...presented.filter((group) => group.display !== "history"),
+        {
+          progress_group_id: `manager-history:${roomId}`,
+          room_id: roomId,
+          ...(commonTaskId(histories) !== undefined
+            ? { task_id: commonTaskId(histories) }
+            : {}),
+          current: null,
+          history: mergePresentedFrames(histories),
+          display: "history" as const,
+          replaced_by_event_id: null,
+          updated_at: histories.at(-1)!.updated_at,
+        },
+      ];
 
-  const frames = new Map<string, ManagerActivityFrame>();
-  for (const group of histories) {
-    for (const frame of group.history) {
-      const key = `${frame.progress_group_id}\u0000${frameKey(frame)}`;
-      const current = frames.get(key);
-      if (!current || JSON.stringify(frame) > JSON.stringify(current)) {
-        frames.set(key, frame);
-      }
-    }
+  const replacedByEvent = new Map<string, ManagerActivityGroup[]>();
+  for (const group of projected) {
+    if (!group.replaced_by_event_id) continue;
+    const matches = replacedByEvent.get(group.replaced_by_event_id) ?? [];
+    matches.push(group);
+    replacedByEvent.set(group.replaced_by_event_id, matches);
+  }
+  for (const [eventId, groups] of replacedByEvent) {
+    if (groups.length < 2) continue;
+    const groupIds = new Set(groups.map((group) => group.progress_group_id));
+    projected = [
+      ...projected.filter((group) => !groupIds.has(group.progress_group_id)),
+      {
+        progress_group_id: `manager-replaced:${JSON.stringify([roomId, eventId])}`,
+        room_id: roomId,
+        ...(commonTaskId(groups) !== undefined
+          ? { task_id: commonTaskId(groups) }
+          : {}),
+        current: null,
+        history: mergePresentedFrames(groups),
+        display: "replaced",
+        replaced_by_event_id: eventId,
+        updated_at: groups.at(-1)!.updated_at,
+      },
+    ];
   }
 
-  const commonTaskId = histories.every(
-    (group) => group.task_id === histories[0].task_id,
-  )
-    ? histories[0].task_id
-    : undefined;
-  const latestHistory = histories.at(-1)!;
-  const combined: ManagerActivityGroup = {
-    progress_group_id: `manager-history:${roomId}`,
-    room_id: roomId,
-    ...(commonTaskId !== undefined ? { task_id: commonTaskId } : {}),
-    current: null,
-    history: [...frames.values()].sort(compareFrames),
-    display: "history",
-    replaced_by_event_id: null,
-    updated_at: latestHistory.updated_at,
-  };
-
-  return [
-    ...presented.filter((group) => group.display !== "history"),
-    combined,
-  ].sort((left, right) =>
+  return projected.sort((left, right) =>
     Date.parse(left.updated_at) - Date.parse(right.updated_at) ||
     left.progress_group_id.localeCompare(right.progress_group_id)
   );
@@ -546,7 +678,8 @@ export function placeManagerActivityGroups(
 }
 
 export function managerActivityLabel(frame: ManagerActivityFrame): string {
-  if (frame.note.trim()) return frame.note;
+  const note = publicManagerActivityNote(frame.note, frame.kind);
+  if (note) return note;
   switch (frame.kind) {
     case "thinking": return "Thinking";
     case "reading": return "Reading";

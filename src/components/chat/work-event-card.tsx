@@ -14,6 +14,10 @@ import type {
   WorkTimingSnapshot,
   WorkWorkerGroupEvent,
 } from "@/lib/work-update-types";
+import {
+  isTerminalManagerActivityShell,
+  managerActivityLabel,
+} from "@/lib/work-manager-activity";
 
 import { WorkCallCard } from "./work-call-card";
 import { WorkContentBlocks } from "./work-content-blocks";
@@ -259,12 +263,6 @@ function activityKind(frame: ManagerActivityFrame): WorkActivityKind {
   return frame.kind;
 }
 
-function isTerminalActivityShell(frame: ManagerActivityFrame): boolean {
-  if (frame.kind !== "done") return false;
-  const note = frame.note.trim().toLowerCase().replace(/[.!]+$/, "");
-  return !note || note === "done" || note === "manager finished";
-}
-
 function activityView(group: ManagerActivityGroup): WorkManagerActivity[] {
   const frames = [...group.history];
   if (group.current && !frames.some(
@@ -272,9 +270,8 @@ function activityView(group: ManagerActivityGroup): WorkManagerActivity[] {
   )) {
     frames.push(group.current);
   }
-  const meaningfulFrames = frames.filter((frame) => !isTerminalActivityShell(frame));
-  const displayedFrames = meaningfulFrames.length ? meaningfulFrames : frames;
-  return displayedFrames.map((frame) => activityForFrame(group, frame));
+  const meaningfulFrames = frames.filter((frame) => !isTerminalManagerActivityShell(frame));
+  return meaningfulFrames.map((frame) => activityForFrame(group, frame));
 }
 
 function activityForFrame(
@@ -284,7 +281,7 @@ function activityForFrame(
   return {
     id: `${frame.progress_group_id}:${frame.frame_id}:${frame.revision}`,
     kind: activityKind(frame),
-    label: frame.note || frame.kind.replaceAll("_", " "),
+    label: managerActivityLabel(frame),
     state:
       group.display === "active" && group.current?.frame_id === frame.frame_id && frame.kind !== "done"
         ? "active"
@@ -315,19 +312,20 @@ export function WorkManagerActivityHistory({
   avatarFamily,
 }: WorkManagerActivityHistoryProps) {
   const active = group.display === "active" && group.current !== null;
-  const summaryFrame = active ? group.current : group.history.at(-1);
+  const activities = activityView(group);
+  if (!activities.length) return null;
+  const currentActivityId = group.current
+    ? `${group.current.progress_group_id}:${group.current.frame_id}:${group.current.revision}`
+    : null;
+  const summaryActivity = active && currentActivityId
+    ? activities.find((activity) => activity.id === currentActivityId) ?? activities.at(-1)
+    : activities.at(-1);
   return (
     <WorkManagerActivityList
       key={active ? "active" : "settled"}
-      activities={activityView(group)}
-      summaryActivityId={
-        summaryFrame
-          ? `${summaryFrame.progress_group_id}:${summaryFrame.frame_id}:${summaryFrame.revision}`
-          : undefined
-      }
-      summaryActivity={
-        summaryFrame ? activityForFrame(group, summaryFrame) : undefined
-      }
+      activities={activities}
+      summaryActivityId={summaryActivity?.id}
+      summaryActivity={summaryActivity}
       className={className}
       initiallyExpanded={initiallyExpanded ?? active}
       avatarSeed={avatarSeed}

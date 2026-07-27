@@ -77,6 +77,7 @@ import {
   managerActivityReplacementEvent,
   placeManagerActivityGroups,
   presentedManagerActivityGroups,
+  publicManagerActivityNote,
 } from "@/lib/work-manager-activity";
 import {
   appendRoomEventSnippet,
@@ -6603,8 +6604,8 @@ function ProgressLineLive({
 
 function progressLineOptions(state: ProgressState, noteValue: string): string[] {
   // The actual flow: the silicon's note if it sent one, else the real state.
-  const note = meaningfulProgressNote(noteValue, state);
-  if (note) return [sentenceCase(note)];
+  const note = publicManagerActivityNote(noteValue, state);
+  if (note) return [note];
   return [progressStateLabel(state)];
 }
 
@@ -6652,65 +6653,6 @@ function progressStateLabel(state: ProgressState): string {
     default:
       return "Working";
   }
-}
-
-function meaningfulProgressNote(note: string, state: ProgressState): string {
-  const text = collapsePathMentions(note.trim());
-  if (!text) return "";
-  const normalized = text.toLowerCase().replace(/[.…]+$/g, "").trim();
-  // Internal tool-call chatter ("called tool: reply", "calling tool: …") is a
-  // mechanic, not a user-facing status — fall back to the plain state label.
-  if (
-    normalized.startsWith("called tool") ||
-    normalized.startsWith("calling tool") ||
-    normalized.startsWith("tool call") ||
-    normalized.startsWith("tool:")
-  ) {
-    return "";
-  }
-  if (state === "thinking" && (normalized === "thinking" || normalized.startsWith("thought for "))) {
-    return "";
-  }
-  if (
-    state === "executing" &&
-    (normalized.startsWith("executing command failed") ||
-      normalized.startsWith("message failed:"))
-  ) {
-    return sentenceCase(text);
-  }
-  if (
-    state === "executing" &&
-    (normalized.startsWith("executing:") ||
-      normalized === "executing command" ||
-      normalized.startsWith("executing output:") ||
-      normalized.startsWith("executing done:"))
-  ) {
-    return "Executing command";
-  }
-  return text;
-}
-
-function collapsePathMentions(value: string): string {
-  return value.replace(
-    /(`?)(?!(?:[a-z][a-z0-9+.-]*:\/\/))((?:~?\/|\.{1,2}\/|[A-Za-z]:[\\/]|(?:[A-Za-z0-9_.-]+[\\/]))[^\s`"'<>]*)(`?)/gi,
-    (match, open: string, rawPath: string, close: string, offset: number, input: string) => {
-      if (input.slice(Math.max(0, offset - 8), offset).includes("://")) return match;
-      const suffixMatch = rawPath.match(/[),.;:\]}]+$/);
-      const suffix = suffixMatch?.[0] ?? "";
-      const path = suffix ? rawPath.slice(0, -suffix.length) : rawPath;
-      const parts = path.split(/[\\/]+/).filter(Boolean);
-      const fileName = parts[parts.length - 1];
-      if (!fileName || fileName === path) return match;
-      const tick = open || close ? "`" : "";
-      return `${tick}${fileName}${tick}${suffix}`;
-    },
-  );
-}
-
-function sentenceCase(value: string): string {
-  const text = value.trim();
-  if (!text) return "Working";
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function SearchBar({

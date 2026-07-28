@@ -40,6 +40,22 @@ function historyKeys(entries) {
   return entries.map((entry) => `${entry.history_id}:${entry.revision}`);
 }
 
+function durableTimelineItems(scene) {
+  return scene.timeline.filter((item) => item.kind !== "manager");
+}
+
+function timelineInstant(item) {
+  if (item.kind === "message") return Date.parse(item.event.created_at);
+  if (item.kind === "work") {
+    return Date.parse(
+      item.record.type === "m.work_task"
+        ? item.record.task.created_at
+        : item.record.event.created_at,
+    );
+  }
+  return Date.parse(item.group.history[0]?.occurred_at ?? item.group.updated_at);
+}
+
 function assertPrefix(previous, current, message) {
   assert.deepEqual(
     current.slice(0, previous.length),
@@ -76,6 +92,32 @@ test("every staged work card round-trips through the canonical validator", () =>
         `${stage} ${record.type} fixture must stay canonical`,
       );
     }
+  }
+});
+
+test("durable showcase updates remain an append-only chronological timeline", () => {
+  let previousIds = [];
+  for (const stage of FITNESS_DEMO_STAGES) {
+    const scene = buildFitnessDemoScene(stage, NOW);
+    const durable = durableTimelineItems(scene);
+    const ids = durable.map((item) => item.id);
+    assertPrefix(
+      previousIds,
+      ids,
+      `${stage} must not move or remove an earlier durable timeline item`,
+    );
+    const instants = durable.map(timelineInstant);
+    assert.deepEqual(
+      instants,
+      [...instants].sort((left, right) => left - right),
+      `${stage} durable items must stay in chronological order`,
+    );
+    assert.equal(
+      new Set(ids).size,
+      ids.length,
+      `${stage} must expose one timeline anchor per durable item`,
+    );
+    previousIds = ids;
   }
 });
 

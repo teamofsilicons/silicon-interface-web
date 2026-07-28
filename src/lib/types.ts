@@ -286,6 +286,8 @@ export interface Room {
   team_slug: string | null;
   peer_kinds: Kind[]; // member kinds excluding self — for Carbons/Silicons filters
   peers: RoomPeer[]; // resolved counterpart projections (one entry for direct rooms)
+  /** Glass-managed group logo. Direct rooms continue to use the peer avatar. */
+  profile_photo_url?: string | null;
   unread: boolean;
   /** Number of unread messages to me — drives the numbered sidebar badge.
    *  Patched live on the client as event frames arrive. */

@@ -430,6 +430,13 @@ function compareTimelineOrder(left: TimelineEvent, right: TimelineEvent): number
   if (leftAccepted && rightAccepted && left.accepted_at && right.accepted_at) {
     const acceptedOrder = left.accepted_at.localeCompare(right.accepted_at);
     if (acceptedOrder !== 0) return acceptedOrder;
+    if (
+      Number.isSafeInteger(left.stream_position) &&
+      Number.isSafeInteger(right.stream_position) &&
+      left.stream_position !== right.stream_position
+    ) {
+      return Number(left.stream_position) - Number(right.stream_position);
+    }
     if (left.event_id !== right.event_id) return left.event_id < right.event_id ? -1 : 1;
   }
   if (

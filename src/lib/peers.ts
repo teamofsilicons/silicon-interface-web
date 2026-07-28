@@ -71,7 +71,7 @@ export function roomDisplay(room: Room): RoomDisplay {
   return {
     name: groupName,
     handle: room.room_id,
-    photoUrl: null,
+    photoUrl: room.profile_photo_url ?? null,
     asciiUrl: null,
     peer: null,
     subtitle:

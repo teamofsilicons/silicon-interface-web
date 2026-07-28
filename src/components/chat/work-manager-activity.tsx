@@ -50,8 +50,8 @@ export interface WorkManagerActivityListProps {
 }
 
 /**
- * Manager activity expands while work is live and collapses into retained,
- * safe status history when it settles (never raw reasoning).
+ * Manager activity stays as a quiet, single-line live status until the user
+ * chooses to expand its retained, safe history (never raw reasoning).
  */
 export function WorkManagerActivityList({
   activities,
@@ -64,9 +64,7 @@ export function WorkManagerActivityList({
   summaryActivityId,
   summaryActivity,
 }: WorkManagerActivityListProps) {
-  const [expanded, setExpanded] = React.useState(
-    initiallyExpanded ?? activities.some((entry) => entry.state === "active"),
-  );
+  const [expanded, setExpanded] = React.useState(initiallyExpanded ?? false);
   const historyId = React.useId();
   const current = [...activities].reverse().find((entry) => entry.state === "active") ??
     summaryActivity ??

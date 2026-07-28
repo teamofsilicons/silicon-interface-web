@@ -68,7 +68,7 @@ function replyEvent(event_id, progress_group_id, overrides = {}) {
   };
 }
 
-test("active manager activity is expanded by default", () => {
+test("active manager activity is collapsed by default", () => {
   const activities = [{
     id: "activity-1",
     kind: "thinking",
@@ -85,8 +85,8 @@ test("active manager activity is expanded by default", () => {
   assert.match(markup, /src="\/fitness-builder\.png"/);
   assert.doesNotMatch(markup, /src="\/logo\.svg"/);
   assert.match(markup, /manager-activity-shimmer/);
-  assert.match(markup, /aria-expanded="true"/);
-  assert.match(markup, /aria-label="Manager activity history"/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.doesNotMatch(markup, /aria-label="Manager activity history"/);
   assert.doesNotMatch(markup, /STEPS?/);
 
   const identityFreeMarkup = renderToStaticMarkup(React.createElement(

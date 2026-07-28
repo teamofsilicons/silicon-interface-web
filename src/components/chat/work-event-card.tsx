@@ -156,7 +156,6 @@ function workerGroupView(event: WorkWorkerGroupEvent, task?: WorkTaskView): Work
     workers: event.workers.map((worker) => ({
       id: worker.invocation_id,
       name: worker.name,
-      task: worker.description,
       state: worker.state,
       description: worker.description,
       currentActivity:
@@ -183,6 +182,7 @@ function callView(event: WorkCallEvent, task?: WorkTaskView): WorkCallView {
     taskId: event.task_id ?? undefined,
     taskTitle: task?.title ?? event.task_title ?? undefined,
     direction: event.direction,
+    targetKind: event.target_kind,
     state: callState(event.state),
     peer: event.target_name,
     summary: event.body,
@@ -327,7 +327,7 @@ export function WorkManagerActivityHistory({
       summaryActivityId={summaryActivity?.id}
       summaryActivity={summaryActivity}
       className={className}
-      initiallyExpanded={initiallyExpanded ?? active}
+      initiallyExpanded={initiallyExpanded ?? false}
       avatarSeed={avatarSeed}
       avatarSrc={avatarSrc}
       avatarAsciiSrc={avatarAsciiSrc}

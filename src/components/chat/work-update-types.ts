@@ -94,7 +94,6 @@ export type WorkWorkerState = WorkItemState | "failed" | "cancelled";
 export interface WorkWorkerView {
   id: string;
   name: string;
-  task?: string;
   state: WorkWorkerState;
   description?: string;
   currentActivity?: string;
@@ -129,6 +128,7 @@ export interface WorkCallView {
   taskId?: string;
   taskTitle?: string;
   direction: WorkCallDirection;
+  targetKind: "manager" | "silicon";
   state: WorkCallState;
   peer: string;
   summary?: string;

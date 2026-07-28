@@ -6,10 +6,8 @@ import { UsersThree } from "@phosphor-icons/react/dist/ssr";
 import { cn } from "@/lib/utils";
 
 import {
-  WorkCardHeader,
   WorkDetailsDialog,
   WorkStateIcon,
-  WorkTimerFooter,
   workStateLabel,
 } from "./work-update-shared";
 import type { WorkWorkerGroupView, WorkWorkerView } from "./work-update-types";
@@ -18,21 +16,13 @@ function WorkerRow({ worker }: { worker: WorkWorkerView }) {
   return (
     <li
       className={cn(
-        "flex min-w-0 items-center gap-2 border-b px-3.5 py-2.5 last:border-b-0",
-        worker.state === "in_progress" && "bg-secondary/45",
+        "relative flex min-w-0 items-center gap-2 py-2 pl-1 pr-10",
+        worker.state === "in_progress" && "text-foreground",
       )}
     >
       <WorkStateIcon state={worker.state} />
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <p className="min-w-0 break-words text-sm font-medium">{worker.name}</p>
-          {worker.task ? <p className="min-w-0 truncate text-xs text-muted-foreground">{worker.task}</p> : null}
-        </div>
-        {worker.currentActivity ? (
-          <p className="mt-0.5 truncate text-xs text-muted-foreground" aria-live="polite">
-            {worker.currentActivity}
-          </p>
-        ) : null}
+        <p className="min-w-0 break-words text-sm font-medium">{worker.name}</p>
       </div>
       <span className="sr-only">{workStateLabel(worker.state)}</span>
       <WorkDetailsDialog
@@ -42,6 +32,7 @@ function WorkerRow({ worker }: { worker: WorkWorkerView }) {
         state={worker.state}
         history={worker.history}
         triggerLabel={`Open activity for worker ${worker.name}`}
+        triggerClassName="absolute inset-0 z-10 h-full w-full justify-end cursor-pointer bg-transparent px-2 hover:bg-foreground/[0.025] hover:text-foreground"
       />
     </li>
   );
@@ -59,49 +50,48 @@ export function WorkWorkerGroupCard({ group, className }: WorkWorkerGroupCardPro
   const completed = group.workers.filter((worker) => worker.state === "completed").length;
 
   return (
-    <article
-      className={cn("w-full max-w-[36rem] overflow-hidden border bg-elevated shadow-sm", className)}
+    <section
+      className={cn("w-full max-w-[34rem]", className)}
       aria-labelledby={headingId}
       data-work-event-id={group.id}
       data-work-event-kind="worker_group"
     >
-      <div>
-        <WorkCardHeader
-          headingId={headingId}
-          taskTitle={group.taskTitle}
-          history={group.history}
-          description={group.description}
-          dialogTitle={`${group.taskTitle} · workers`}
-          dialogChildren={
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                {completed} completed, {active} active, {group.workers.length} total.
-              </p>
-              {group.content}
-            </div>
-          }
-        />
-      </div>
-      {group.description ? <p className="border-b px-3.5 py-2.5 text-sm text-muted-foreground">{group.description}</p> : null}
-      <div className="flex items-center gap-2 border-b bg-secondary/35 px-3.5 py-2.5">
-        <UsersThree className="h-5 w-5" weight="fill" aria-hidden />
-        <h4 className="text-sm font-semibold">
+      <div className="relative flex min-h-10 min-w-0 items-center gap-2.5 pr-10">
+        <UsersThree className="h-5 w-5 shrink-0" weight="regular" aria-hidden />
+        <h3 id={headingId} className="min-w-0 flex-1 break-words text-sm font-medium">
           Started {group.workers.length} {group.workers.length === 1 ? "worker" : "workers"}
-        </h4>
-        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
-          {completed}/{group.workers.length} DONE
-        </span>
+        </h3>
+        <WorkDetailsDialog
+          title={`${group.taskTitle} · workers`}
+          description={group.description}
+          history={group.history}
+          triggerLabel={`Open worker details for ${group.taskTitle}`}
+          triggerClassName="absolute inset-0 z-10 h-full w-full justify-end cursor-pointer bg-transparent px-2 hover:bg-foreground/[0.025] hover:text-foreground"
+        >
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {completed} completed, {active} active, {group.workers.length} total.
+            </p>
+            {group.content}
+          </div>
+        </WorkDetailsDialog>
       </div>
+
       {group.workers.length ? (
-        <ul aria-label="Workers">
+        <ul
+          aria-label="Workers"
+          className="ml-2.5 border-l border-border/90 pl-3.5"
+        >
           {group.workers.map((worker) => (
             <WorkerRow key={worker.id} worker={worker} />
           ))}
         </ul>
       ) : (
-        <p className="px-3.5 py-4 text-sm text-muted-foreground">No workers were included.</p>
+        <p className="ml-7 py-2 text-sm text-muted-foreground">No workers were included.</p>
       )}
-      <WorkTimerFooter timer={group.timer} />
-    </article>
+      <span className="sr-only">
+        {completed} completed, {active} active, {group.workers.length} total.
+      </span>
+    </section>
   );
 }

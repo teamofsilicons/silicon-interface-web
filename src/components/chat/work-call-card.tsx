@@ -22,7 +22,6 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { workCallPreviewContent } from "@/lib/work-call-presentation";
 
 import { WorkHistory } from "./work-update-shared";
 import type { WorkCallState, WorkCallView } from "./work-update-types";
@@ -71,40 +70,41 @@ export interface WorkCallCardProps {
 export function WorkCallCard({ call, className }: WorkCallCardProps) {
   const title = callTitle(call);
   const PhoneIcon = call.direction === "inbound" ? PhoneIncoming : PhoneOutgoing;
-  const contentPreview = workCallPreviewContent(call);
+  const active = call.state === "calling" || call.state === "connected";
 
   return (
     <article
-      className={cn("w-full max-w-[36rem] overflow-hidden border bg-elevated shadow-sm", className)}
+      className={cn("w-full max-w-[34rem]", className)}
       data-work-event-id={call.id}
       data-work-event-kind="call"
     >
-      {call.taskTitle ? (
-        <div className="border-b px-3.5 py-2 font-mono text-[10px] tracking-wide text-muted-foreground">
-          {call.taskTitle}
-        </div>
-      ) : null}
       <Dialog>
         <DialogTrigger asChild>
           <button
             type="button"
-            className="flex w-full min-w-0 items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-accent"
-            aria-label={`${title}. Open call transcript`}
+            className="group -ml-1 flex min-h-10 w-[calc(100%+0.25rem)] min-w-0 items-center gap-2.5 px-1 py-1.5 text-left outline-none transition-colors hover:bg-foreground/[0.035] focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            aria-label={`${title}. ${callStateLabel[call.state]}. Open call transcript`}
           >
-            <PhoneIcon className="h-5 w-5 shrink-0" weight="fill" aria-hidden />
+            <PhoneIcon className="h-5 w-5 shrink-0" weight="regular" aria-hidden />
             <span className="min-w-0 flex-1">
-              <span className="block break-words text-sm font-semibold">{title}</span>
-              <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                <CallStateIcon state={call.state} />
-                {callStateLabel[call.state]}
-              </span>
-              {contentPreview ? (
-                <span className="mt-1 line-clamp-2 break-words text-xs leading-relaxed text-muted-foreground">
-                  {contentPreview}
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className={cn(
+                  "min-w-0 truncate text-sm font-medium",
+                  active && "manager-activity-shimmer",
+                )}>
+                  {title}
                 </span>
-              ) : null}
+                <span className="sr-only">{callStateLabel[call.state]}.</span>
+                {call.state !== "completed" ? (
+                  <CallStateIcon state={call.state} />
+                ) : null}
+              </span>
             </span>
-            <CaretRight className="h-4 w-4 shrink-0 text-muted-foreground" weight="bold" aria-hidden />
+            <CaretRight
+              className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+              weight="bold"
+              aria-hidden
+            />
           </button>
         </DialogTrigger>
         <DialogContent className="max-h-[min(88dvh,48rem)] w-[calc(100%-1.5rem)] max-w-2xl gap-0 overflow-hidden p-0">
@@ -114,7 +114,7 @@ export function WorkCallCard({ call, className }: WorkCallCardProps) {
               {title}
             </DialogTitle>
             <DialogDescription>
-              {call.summary ?? `${callStateLabel[call.state]} · conversation transcript`}
+              {call.summary ?? `${callStateLabel[call.state]} conversation with ${call.peer}`}
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="max-h-[calc(min(88dvh,48rem)-5rem)]">
@@ -141,7 +141,7 @@ export function WorkCallCard({ call, className }: WorkCallCardProps) {
                     ))}
                   </ol>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No transcript entries yet.</p>
+                  <p className="text-sm text-muted-foreground">No conversation content yet.</p>
                 )}
               </section>
               {call.history?.length ? (

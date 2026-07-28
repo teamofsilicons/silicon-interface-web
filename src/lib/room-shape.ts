@@ -218,6 +218,9 @@ export function normalizeRoom(value: unknown): Room | null {
     team_slug: nullableStr(raw.team_slug),
     peer_kinds: peerKinds,
     peers,
+    ...(raw.profile_photo_url !== undefined
+      ? { profile_photo_url: nullableStr(raw.profile_photo_url) }
+      : {}),
     unread: Boolean(raw.unread),
     unread_count: typeof raw.unread_count === "number" ? raw.unread_count : undefined,
     unread_boundary: normalizeUnreadBoundary(raw.unread_boundary),

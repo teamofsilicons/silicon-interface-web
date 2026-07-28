@@ -26,7 +26,7 @@ function WorkTodoRow({ item }: { item: WorkChecklistItem }) {
         <p
           className={cn(
             "break-words text-sm leading-snug",
-            item.state === "completed" && "text-muted-foreground line-through decoration-border",
+            item.state === "completed" && "text-muted-foreground",
           )}
         >
           {item.title}
@@ -60,12 +60,11 @@ export interface WorkTaskCardProps {
 export function WorkTaskCard({ task, className }: WorkTaskCardProps) {
   const headingId = React.useId();
   const complete = task.items.filter((item) => item.state === "completed").length;
-  const progress = task.items.length > 0 ? (complete / task.items.length) * 100 : 0;
 
   return (
     <article
       className={cn(
-        "w-full max-w-[36rem] overflow-hidden border bg-elevated text-foreground shadow-sm",
+        "w-full max-w-[34rem] overflow-hidden border bg-elevated text-foreground shadow-xs",
         className,
       )}
       aria-labelledby={headingId}
@@ -81,6 +80,7 @@ export function WorkTaskCard({ task, className }: WorkTaskCardProps) {
           currentActivity={task.currentActivity}
           history={task.history}
           triggerCoversHeader
+          showStateIcon={false}
           dialogChildren={
             task.items.length ? (
               <section aria-label="Todo summary">
@@ -104,12 +104,6 @@ export function WorkTaskCard({ task, className }: WorkTaskCardProps) {
 
       {task.items.length ? (
         <>
-          <div className="h-0.5 bg-border" aria-hidden>
-            <div
-              className="h-full bg-foreground transition-[width] duration-500 motion-reduce:transition-none"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
           <p className="sr-only" aria-live="polite">
             {complete} of {task.items.length} todo items completed
           </p>

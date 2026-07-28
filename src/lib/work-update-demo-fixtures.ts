@@ -1062,7 +1062,7 @@ export function buildFitnessDemoScene(
       id: `manager:${manager.progress_group_id}`,
       kind: "manager",
       group: manager,
-      initiallyExpanded: stage === "kickoff",
+      initiallyExpanded: false,
     });
   }
 

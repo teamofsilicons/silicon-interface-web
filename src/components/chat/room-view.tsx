@@ -5554,8 +5554,7 @@ export function RoomView({
             const showWorkUpdateAvatar =
               workRecord !== null &&
               !workEventIsMine &&
-              e.sender_kind === "silicon" &&
-              (workRecord.type === "m.work_task" || workRecord.event.kind === "call");
+              e.sender_kind === "silicon";
             return (
               <React.Fragment key={timelineRenderKey(e)}>
                 <div

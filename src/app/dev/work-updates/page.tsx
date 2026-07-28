@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 
+import { WorkUpdateCatalog } from "@/components/chat/work-update-catalog";
 import { WorkUpdateDemo } from "@/components/chat/work-update-demo";
 import { workUpdateDemoAvailable } from "@/lib/work-update-demo-access";
 import { fitnessDemoStage } from "@/lib/work-update-demo-fixtures";
@@ -16,6 +17,11 @@ export default async function WorkUpdatesDemoPage({
   const rawAutoplay = Array.isArray(query.autoplay)
     ? query.autoplay[0]
     : query.autoplay;
+  const rawView = Array.isArray(query.view) ? query.view[0] : query.view;
+
+  if (rawView === "all") {
+    return <WorkUpdateCatalog nowIso={new Date().toISOString()} />;
+  }
 
   return (
     <WorkUpdateDemo

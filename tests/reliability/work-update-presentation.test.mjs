@@ -144,7 +144,46 @@ test("rich call transcript content participates in local search", () => {
   assert.equal(workEventPreview(call), "Received call from COS Silicon");
 });
 
-test("standalone calls keep call previews and search without a task heading", () => {
+test("every call state projects only its heading outside the transcript dialog", () => {
+  const cases = [
+    { direction: "outbound", state: "connecting", expected: "Calling Motion Silicon" },
+    { direction: "outbound", state: "in_progress", expected: "Calling Motion Silicon" },
+    { direction: "outbound", state: "completed", expected: "Called Motion Silicon" },
+    { direction: "outbound", state: "failed", expected: "Called Motion Silicon" },
+    { direction: "outbound", state: "cancelled", expected: "Called Motion Silicon" },
+    { direction: "inbound", state: "completed", expected: "Received call from Motion Silicon" },
+    { direction: "inbound", state: "failed", expected: "Received call from Motion Silicon" },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const call = work("call", {
+      work_event_id: `call-heading-${index}`,
+      call_id: `call-heading-${index}`,
+      direction: item.direction,
+      target_kind: "silicon",
+      target_id: "motion",
+      target_name: "Motion Silicon",
+      state: item.state,
+      transcript: [{
+        transcript_id: `line-heading-${index}`,
+        speaker_kind: "silicon",
+        speaker_id: "motion",
+        speaker_name: "Motion Silicon",
+        body: "This log must remain inside details.",
+        blocks: [],
+        revision: 1,
+        created_at: NOW,
+        updated_at: NOW,
+      }],
+    });
+    assert.equal(workEventPreview(call), item.expected);
+    const record = parsedWorkRecord(call);
+    assert.ok(record);
+    assert.match(workRecordSearchText(record), /This log must remain inside details/);
+  }
+});
+
+test("standalone calls keep heading-only projections and search without a task heading", () => {
   const call = work("call", {
     task_id: null,
     task_title: null,

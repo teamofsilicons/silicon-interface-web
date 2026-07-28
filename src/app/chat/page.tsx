@@ -47,6 +47,7 @@ import {
   workEventPreview,
   workNotificationTier,
 } from "@/lib/work-update-presentation";
+import { eventReplayRevisionKey } from "@/lib/event-revision";
 import {
   appendRoomEventSnippet,
   readRoomEventSnippet,
@@ -691,8 +692,7 @@ function ChatPageInner() {
       if (owner) void updateStoredEventDeliveries(owner, f.deliveries).catch(() => undefined);
     }
     if (f.type === "event") {
-      const revision = f.event.stream_position ?? `${f.event.edited_at ?? ""}:${f.event.redacted_at ?? ""}`;
-      const key = `${f.event.event_id}:${revision}`;
+      const key = eventReplayRevisionKey(f.event);
       if (seenEventKeysRef.current.has(key)) return;
       seenEventKeysRef.current.add(key);
       seenEventOrderRef.current.push(key);

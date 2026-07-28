@@ -55,6 +55,9 @@ const contentSecurityPolicy = [
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // Browser-based local QA opens the development fixture through 127.0.0.1.
+  // Allow that exact loopback host so Client Components hydrate normally.
+  ...(isDev ? { allowedDevOrigins: ["127.0.0.1"] } : {}),
   // Keep parallel local/staging test servers from sharing build state.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   // This repository lives below a user-level package-lock.json. Pinning the

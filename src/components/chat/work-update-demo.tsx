@@ -358,9 +358,6 @@ export function WorkUpdateDemo({
           >
             <div className="flex min-h-full flex-col justify-end">
               <div className="w-full shrink-0 px-4 py-4 sm:px-6">
-                <div className="py-1 text-center font-mono text-[10px] text-muted-foreground">
-                  FAKE RUN · BUILD A FITNESS APP
-                </div>
                 {scene.timeline.map((item) => {
                   if (item.kind === "message") {
                     return (
@@ -408,19 +405,16 @@ export function WorkUpdateDemo({
                     <div
                       key={item.id}
                       className={cn(
-                        "my-3 flex w-full items-start justify-start",
-                        item.record.type === "m.work_task" && "gap-2",
+                        "my-3 flex w-full items-start justify-start gap-2",
                       )}
                       data-demo-item={item.id}
                     >
-                      {item.record.type === "m.work_task" ? (
-                        <IdAvatar
-                          seed="fitness-builder"
-                          size={28}
-                          family="silicon"
-                          className="mt-0.5"
-                        />
-                      ) : null}
+                      <IdAvatar
+                        seed="fitness-builder"
+                        size={28}
+                        family="silicon"
+                        className="mt-0.5"
+                      />
                       <WorkEventCard
                         event={item.record}
                         task={currentTask}

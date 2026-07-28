@@ -70,40 +70,53 @@ export function WorkStatusCard({ event, className, onReply }: WorkStatusCardProp
     : baseConfig;
   const terminal = event.kind === "completion" || event.kind === "failure" || event.kind === "cancellation";
   const taskState = event.task?.state ?? config.state;
+  const flagged =
+    event.kind === "blocker" ||
+    event.kind === "failure" ||
+    event.kind === "cancellation";
+  const flagKind = flagged
+    ? event.kind as "blocker" | "failure" | "cancellation"
+    : null;
 
   return (
     <article
       className={cn(
-        "w-full max-w-[36rem] overflow-hidden border bg-elevated text-foreground shadow-sm",
-        event.kind === "blocker" && "border-foreground/40",
-        event.kind === "failure" && "border-destructive/60",
+        "w-full max-w-[34rem] text-foreground",
         className,
       )}
       aria-labelledby={headingId}
       data-work-event-id={event.id}
       data-work-event-kind={event.kind}
     >
+      {flagKind ? (
+        <div
+          className={cn(
+            "inline-flex h-6 items-center gap-1.5 border border-b-0 px-2.5 font-mono text-[9px] font-semibold tracking-[0.14em]",
+            config.labelClass,
+          )}
+        >
+          <WorkNoticeIcon kind={flagKind} />
+          <span>{config.label}</span>
+        </div>
+      ) : null}
+
       <div
         className={cn(
-          "flex items-center gap-2 border-b px-3.5 py-1.5 font-mono text-[10px] font-semibold tracking-[0.14em]",
-          config.labelClass,
+          "overflow-hidden border bg-elevated shadow-xs",
+          event.kind === "blocker" && "border-foreground/40",
+          event.kind === "failure" && "border-destructive/60",
         )}
       >
-        {(event.kind === "blocker" || event.kind === "failure" || event.kind === "cancellation") && (
-          <WorkNoticeIcon kind={event.kind} />
-        )}
-        <span>{config.label}</span>
-      </div>
-
-      <div>
         <WorkCardHeader
           headingId={headingId}
           taskTitle={event.taskTitle}
           taskState={taskState}
+          showStateIcon={false}
           description={event.task?.description ?? event.description}
           currentActivity={event.task?.currentActivity}
           history={event.task?.history ?? event.history}
           dialogTitle={event.task ? event.taskTitle : `${event.taskTitle} · ${config.label.toLocaleLowerCase()}`}
+          triggerCoversHeader
           dialogChildren={event.task ? (
             <div className="space-y-5">
               {event.task.items.length ? (
@@ -136,50 +149,56 @@ export function WorkStatusCard({ event, className, onReply }: WorkStatusCardProp
             </div>
           ) : event.content}
         />
-      </div>
 
-      <div className={cn("px-4 py-4", event.kind === "completion" && "py-5")}>
-        {event.kind === "completion" ? (
-          <div className="flex min-w-0 items-start gap-3">
-            <CheckCircle className="mt-0.5 h-9 w-9 shrink-0 text-success" weight="fill" aria-hidden />
-            <div className="min-w-0 flex-1">
-              <h4 className="text-base font-semibold">{event.title ?? "Completed"}</h4>
-              <WorkRichContent description={event.description} className="mt-1" />
-              {event.content ? <div className="mt-3 grid min-w-0 gap-2 [&>*]:max-w-full">{event.content}</div> : null}
+        <div className={cn("px-4 py-4", event.kind === "completion" && "py-5")}>
+          {event.kind === "milestone" ? (
+            <p className="label-mono mb-2 text-[9px] font-semibold tracking-[0.14em] text-muted-foreground">
+              UPDATE
+            </p>
+          ) : null}
+
+          {event.kind === "completion" ? (
+            <div className="flex min-w-0 items-start gap-3">
+              <CheckCircle className="mt-0.5 h-8 w-8 shrink-0 text-success" weight="fill" aria-hidden />
+              <div className="min-w-0 flex-1">
+                <h4 className="text-base font-semibold">{event.title ?? "Completed"}</h4>
+                <WorkRichContent description={event.description} className="mt-1" />
+                {event.content ? <div className="mt-3 grid min-w-0 gap-2 [&>*]:max-w-full">{event.content}</div> : null}
+              </div>
             </div>
-          </div>
-        ) : (
-          <>
-            {event.title ? <h4 className="mb-1.5 break-words text-sm font-semibold">{event.title}</h4> : null}
-            <WorkRichContent description={event.description}>{event.content}</WorkRichContent>
-            {!event.title && !event.description && !event.content ? (
-              <p className="text-sm text-muted-foreground">No additional details were provided.</p>
-            ) : null}
-          </>
-        )}
+          ) : (
+            <>
+              {event.title ? <h4 className="mb-1.5 break-words text-sm font-semibold">{event.title}</h4> : null}
+              <WorkRichContent description={event.description}>{event.content}</WorkRichContent>
+              {!event.title && !event.description && !event.content ? (
+                <p className="text-sm text-muted-foreground">No additional details were provided.</p>
+              ) : null}
+            </>
+          )}
 
-        {event.kind === "blocker" && onReply && !event.resolved ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="mt-4"
-            onClick={() => onReply(event.blockerId ?? event.id)}
-          >
-            <ChatCenteredText aria-hidden />
-            Reply to blocker
-          </Button>
+          {event.kind === "blocker" && onReply && !event.resolved ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="mt-4"
+              onClick={() => onReply(event.blockerId ?? event.id)}
+            >
+              <ChatCenteredText aria-hidden />
+              Reply to blocker
+            </Button>
+          ) : null}
+        </div>
+
+        {event.kind === "completion" ? (
+          <div className="flex items-stretch border-t">
+            <WorkTimerFooter timer={event.timer} terminal className="min-w-0 flex-1 border-t-0" />
+            <WorkConfettiButton />
+          </div>
+        ) : event.kind !== "milestone" ? (
+          <WorkTimerFooter timer={event.timer} terminal={terminal} />
         ) : null}
       </div>
-
-      {event.kind === "completion" ? (
-        <div className="flex items-stretch border-t">
-          <WorkTimerFooter timer={event.timer} terminal className="min-w-0 flex-1 border-t-0" />
-          <WorkConfettiButton />
-        </div>
-      ) : event.kind !== "milestone" ? (
-        <WorkTimerFooter timer={event.timer} terminal={terminal} />
-      ) : null}
     </article>
   );
 }

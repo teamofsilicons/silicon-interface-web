@@ -309,6 +309,7 @@ export function WorkCardHeader({
   dialogChildren,
   headingId,
   triggerCoversHeader = false,
+  showStateIcon = true,
 }: {
   taskTitle: string;
   taskState?: AnyWorkState;
@@ -319,15 +320,16 @@ export function WorkCardHeader({
   dialogChildren?: React.ReactNode;
   headingId?: string;
   triggerCoversHeader?: boolean;
+  showStateIcon?: boolean;
 }) {
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center gap-2 border-b pl-3.5 pr-1.5 py-2.5",
+        "flex min-h-11 min-w-0 items-center gap-2 border-b py-2.5 pl-3.5 pr-1.5",
         triggerCoversHeader && "relative pr-12",
       )}
     >
-      {taskState ? (
+      {taskState && showStateIcon ? (
         <>
           <WorkStateIcon state={taskState} />
           <span className="sr-only">{workStateLabel(taskState)}.</span>
@@ -370,7 +372,7 @@ export function WorkRichContent({
 }
 
 export function WorkNoticeIcon({ kind }: { kind: "blocker" | "failure" | "cancellation" }) {
-  if (kind === "blocker") return <WarningCircle className="h-5 w-5" weight="fill" aria-hidden />;
-  if (kind === "failure") return <XCircle className="h-5 w-5" weight="fill" aria-hidden />;
-  return <XCircle className="h-5 w-5" aria-hidden />;
+  if (kind === "blocker") return <WarningCircle className="h-3.5 w-3.5" weight="fill" aria-hidden />;
+  if (kind === "failure") return <XCircle className="h-3.5 w-3.5" weight="fill" aria-hidden />;
+  return <XCircle className="h-3.5 w-3.5" aria-hidden />;
 }

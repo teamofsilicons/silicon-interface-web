@@ -41,6 +41,8 @@ import type {
   Invitee,
   JwtPair,
   LoginStartResponse,
+  LordIdentity,
+  LordTeam,
   MediaObject,
   ProgressState,
   Room,
@@ -426,6 +428,13 @@ export type GlobalNotificationPreferencesPatch = Partial<
   quiet_hours?: Partial<GlobalNotificationPreferences["quiet_hours"]>;
 };
 
+function mediaReadPath(mediaId: string, suffix = "") {
+  const lords = typeof window !== "undefined" &&
+    window.location.hostname === "lords.interface.teamofsilicons.com";
+  const scope = lords ? "/api/v1/lords/media" : "/api/v1/media";
+  return `${scope}/${encodeURIComponent(mediaId)}${suffix}`;
+}
+
 export const api = {
   // -------- registered installation --------
   registerDevice: (payload: {
@@ -470,6 +479,30 @@ export const api = {
   /** Mint a single-use, 60s-TTL WS ticket so the socket URL never carries the
    *  long-lived JWT. One ticket per connect attempt (single-use). */
   wsTicket: () => call<{ ticket: string; expires_in: number }>("POST", "/api/v1/ws/ticket", {}),
+
+  // -------- Lords oversight (read-only) --------
+  lordWsTicket: () =>
+    call<{ ticket: string; expires_in: number }>("POST", "/api/v1/lords/ws/ticket", {}),
+  lordTeams: () => call<{ teams: LordTeam[] }>("GET", "/api/v1/lords/teams"),
+  lordIdentities: (team = "all") =>
+    call<{ identities: LordIdentity[] }>(
+      "GET",
+      `/api/v1/lords/identities?team=${encodeURIComponent(team)}`,
+    ),
+  lordIdentityRooms: (kind: "carbon" | "silicon", id: string, limit = 200) =>
+    call<{ rooms: Room[] }>(
+      "GET",
+      `/api/v1/lords/identities/${kind}/${encodeURIComponent(id)}/rooms?limit=${limit}`,
+    ),
+  lordRoomEvents: (roomId: string, opts: { before?: string; after?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams({ limit: String(opts.limit ?? 100) });
+    if (opts.before) q.set("before", opts.before);
+    if (opts.after) q.set("after", opts.after);
+    return call<{ events: Event[] }>(
+      "GET",
+      `/api/v1/lords/rooms/${encodeURIComponent(roomId)}/events?${q.toString()}`,
+    );
+  },
 
   // -------- health / dev --------
   healthz: () => call<{ status: string }>("GET", "/healthz", undefined, { auth: false }),
@@ -1239,19 +1272,19 @@ export const api = {
       attachment_url?: string | null;
     }>(
       "GET",
-      `/api/v1/media/${media_id}`,
+      mediaReadPath(media_id),
     ),
   /** Authenticated, CORS-readable bytes for canvas/PDF processing. Normal
    * playback still uses the direct presigned download URL. */
   mediaContent: (media_id: string) =>
-    callBlob(`/api/v1/media/${encodeURIComponent(media_id)}/content`),
+    callBlob(mediaReadPath(media_id, "/content")),
   /** A bounded authenticated text head for CSV/Markdown previews. This route
    * stays valid after the direct object-storage grant embedded in old events
    * has expired. */
   mediaTextPreview: async (media_id: string, maxBytes = 64 * 1024) => {
     const bounded = Math.max(4 * 1024, Math.min(Math.trunc(maxBytes), 256 * 1024));
     const blob = await callBlob(
-      `/api/v1/media/${encodeURIComponent(media_id)}/content?head=${bounded}`,
+      `${mediaReadPath(media_id, "/content")}?head=${bounded}`,
     );
     return blob.text();
   },

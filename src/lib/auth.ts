@@ -20,7 +20,7 @@ let currentCarbon: Carbon | null = null;
 
 type PersistedCarbonIdentity = Pick<
   Carbon,
-  "carbon_id" | "username" | "name" | "tagline" | "timezone" | "is_staff"
+  "carbon_id" | "username" | "name" | "tagline" | "timezone" | "is_staff" | "is_lord"
 >;
 
 function persistedCarbonIdentity(carbon: Carbon): PersistedCarbonIdentity {
@@ -31,6 +31,7 @@ function persistedCarbonIdentity(carbon: Carbon): PersistedCarbonIdentity {
     tagline: carbon.tagline,
     timezone: carbon.timezone,
     is_staff: carbon.is_staff,
+    is_lord: carbon.is_lord,
   };
 }
 
@@ -47,6 +48,7 @@ function hydratePersistedCarbon(value: unknown): Carbon | null {
     tagline: typeof row.tagline === "string" ? row.tagline : "",
     timezone: typeof row.timezone === "string" ? row.timezone : "",
     is_staff: row.is_staff === true,
+    is_lord: row.is_lord === true,
     email: "",
     phone: "",
     profile_photo_key: "",

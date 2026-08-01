@@ -55,11 +55,15 @@ export function TeamPanel({
   onClose,
   initialTab,
   onRoomOpened,
+  readOnly = false,
 }: {
   slug: string;
   onClose?: () => void;
   initialTab?: TeamPanelTab;
   onRoomOpened?: (room: Room) => void;
+  /** Lords oversight can inspect every team without exposing any team
+   * mutations or member-message shortcuts from this surface. */
+  readOnly?: boolean;
 }) {
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-background">
@@ -69,6 +73,7 @@ export function TeamPanel({
         onClose={onClose}
         initialTab={initialTab}
         onRoomOpened={onRoomOpened}
+        readOnly={readOnly}
       />
     </section>
   );
@@ -81,11 +86,13 @@ function TeamPanelBody({
   onClose,
   initialTab,
   onRoomOpened,
+  readOnly,
 }: {
   slug: string;
   onClose?: () => void;
   initialTab?: TeamPanelTab;
   onRoomOpened?: (room: Room) => void;
+  readOnly: boolean;
 }) {
   const [team, setTeam] = React.useState<Team | null>(null);
   const [members, setMembers] = React.useState<TeamMembership[]>([]);
@@ -155,7 +162,9 @@ function TeamPanelBody({
     { id: "settings", label: "Settings", headOnly: true },
     { id: "billing", label: "Billing", headOnly: true },
   ];
-  const tabs = allTabs.filter((item) => !item.headOnly || head);
+  const tabs = allTabs.filter((item) =>
+    !item.headOnly || head || (readOnly && item.id === "settings"),
+  );
 
   return (
     <>
@@ -203,6 +212,7 @@ function TeamPanelBody({
                 members={members}
                 onViewAll={() => setTab("members")}
                 onRoomOpened={onRoomOpened}
+                allowMessaging={!readOnly}
               />
               <CronsSection slug={slug} limit={10} onViewAll={() => setTab("crons")} />
             </div>
@@ -220,7 +230,11 @@ function TeamPanelBody({
           </Section>
         )}
         {tab === "members" && (
-          <MembersSection members={members} onRoomOpened={onRoomOpened} />
+          <MembersSection
+            members={members}
+            onRoomOpened={onRoomOpened}
+            allowMessaging={!readOnly}
+          />
         )}
         {tab === "crons" && <CronsSection slug={slug} />}
         {tab === "invites" && head && (
@@ -229,7 +243,9 @@ function TeamPanelBody({
             <InviteesSection slug={slug} />
           </div>
         )}
-        {tab === "settings" && head && <SettingsSection team={team} onSaved={setTeam} />}
+        {tab === "settings" && (head || readOnly) && (
+          <SettingsSection team={team} onSaved={setTeam} readOnly={readOnly} />
+        )}
         {tab === "billing" && head && <BillingSection slug={slug} />}
       </div>
     </>
@@ -413,10 +429,12 @@ function MembersPreview({
   members,
   onViewAll,
   onRoomOpened,
+  allowMessaging = true,
 }: {
   members: TeamMembership[];
   onViewAll: () => void;
   onRoomOpened?: (room: Room) => void;
+  allowMessaging?: boolean;
 }) {
   const visibleMembers = members;
   const orderedMembers = [...visibleMembers].sort((a, b) => {
@@ -448,7 +466,9 @@ function MembersPreview({
                 </span>
                 <span className="flex shrink-0 items-center gap-2">
                   <span className="label-mono">{m.role}</span>
-                  <MessageMemberButton member={m} onRoomOpened={onRoomOpened} />
+                  {allowMessaging ? (
+                    <MessageMemberButton member={m} onRoomOpened={onRoomOpened} />
+                  ) : null}
                 </span>
               </li>
             );
@@ -467,9 +487,11 @@ function MembersPreview({
 function MembersSection({
   members,
   onRoomOpened,
+  allowMessaging = true,
 }: {
   members: TeamMembership[];
   onRoomOpened?: (room: Room) => void;
+  allowMessaging?: boolean;
 }) {
   const [active, setActive] = React.useState<"carbon" | "silicon">("carbon");
   const visibleMembers = members;
@@ -515,7 +537,9 @@ function MembersSection({
                 </span>
                 <span className="flex shrink-0 items-center gap-2">
                   <span className="label-mono">{m.role}</span>
-                  <MessageMemberButton member={m} onRoomOpened={onRoomOpened} />
+                  {allowMessaging ? (
+                    <MessageMemberButton member={m} onRoomOpened={onRoomOpened} />
+                  ) : null}
                 </span>
               </li>
             );
@@ -1579,17 +1603,27 @@ function sameSettingsDraft(a: TeamSettingsDraft, b: TeamSettingsDraft): boolean 
   );
 }
 
-function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => void }) {
+function SettingsSection({
+  team,
+  onSaved,
+  readOnly = false,
+}: {
+  team: Team;
+  onSaved: (t: Team) => void;
+  readOnly?: boolean;
+}) {
   const savedDraft = React.useMemo(() => draftFromTeam(team), [team]);
-  const [draft, setDraft] = React.useState<TeamSettingsDraft>(() => readSettingsDraft(team));
+  const [draft, setDraft] = React.useState<TeamSettingsDraft>(() =>
+    readOnly ? draftFromTeam(team) : readSettingsDraft(team),
+  );
   const [busy, setBusy] = React.useState(false);
   const [logoBusy, setLogoBusy] = React.useState(false);
-  const dirty = !sameSettingsDraft(draft, savedDraft);
+  const dirty = !readOnly && !sameSettingsDraft(draft, savedDraft);
 
   const split = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 
   React.useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (readOnly || typeof window === "undefined") return;
     try {
       const key = settingsDraftKey(team.slug);
       if (dirty) window.sessionStorage.setItem(key, JSON.stringify(draft));
@@ -1597,10 +1631,10 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
     } catch {
       /* sessionStorage may be unavailable; the visible dirty marker still works */
     }
-  }, [dirty, draft, team.slug]);
+  }, [dirty, draft, readOnly, team.slug]);
 
   const uploadLogo = async (file: File | null | undefined) => {
-    if (!file) return;
+    if (readOnly || !file) return;
     setLogoBusy(true);
     try {
       const updated = await api.uploadTeamLogo(team.slug, await compressProfileImage(file));
@@ -1614,6 +1648,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
   };
 
   const save = async () => {
+    if (readOnly) return;
     setBusy(true);
     try {
       const updated = await api.patchTeam(team.slug, {
@@ -1637,7 +1672,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
   };
 
   return (
-    <Section title="settings (heads only)">
+    <Section title={readOnly ? "settings · read-only" : "settings (heads only)"}>
       <div className="space-y-4">
         <div className="grid gap-4 border bg-card p-4 sm:grid-cols-[88px_1fr] sm:items-center">
           <div className="relative size-20 overflow-hidden border bg-background">
@@ -1661,35 +1696,43 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
                 <Label htmlFor="team-logo">team logo</Label>
               </div>
               <p className="text-sm text-muted-foreground">
-                Upload a square mark for the team tab, sidebar, and Glass workspace.
+                {readOnly
+                  ? "This square mark appears in the team tab, sidebar, and Glass workspace."
+                  : "Upload a square mark for the team tab, sidebar, and Glass workspace."}
               </p>
             </div>
-            <Input
-              id="team-logo"
-              type="file"
-              accept="image/*"
-              className="sr-only"
-              disabled={logoBusy}
-              onChange={(e) => {
-                const file = e.currentTarget.files?.[0];
-                e.currentTarget.value = "";
-                void uploadLogo(file);
-              }}
-            />
-            <label
-              htmlFor="team-logo"
-              className={cn(
-                "inline-flex h-10 cursor-pointer items-center gap-2 border bg-background px-4 text-sm font-medium transition-colors hover:bg-accent",
-                logoBusy && "pointer-events-none opacity-60",
-              )}
-            >
-              {logoBusy ? (
-                <CircleNotch className="h-4 w-4 animate-spin" />
-              ) : (
-                <UploadSimple className="h-4 w-4" />
-              )}
-              change logo
-            </label>
+            {readOnly ? (
+              <p className="label-mono text-[11px] text-muted-foreground">view only</p>
+            ) : (
+              <>
+                <Input
+                  id="team-logo"
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  disabled={logoBusy}
+                  onChange={(e) => {
+                    const file = e.currentTarget.files?.[0];
+                    e.currentTarget.value = "";
+                    void uploadLogo(file);
+                  }}
+                />
+                <label
+                  htmlFor="team-logo"
+                  className={cn(
+                    "inline-flex h-10 cursor-pointer items-center gap-2 border bg-background px-4 text-sm font-medium transition-colors hover:bg-accent",
+                    logoBusy && "pointer-events-none opacity-60",
+                  )}
+                >
+                  {logoBusy ? (
+                    <CircleNotch className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <UploadSimple className="h-4 w-4" />
+                  )}
+                  change logo
+                </label>
+              </>
+            )}
           </div>
         </div>
 
@@ -1699,6 +1742,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
             id="teamname"
             value={draft.name}
             onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
+            readOnly={readOnly}
           />
         </div>
 
@@ -1707,6 +1751,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
           hint="Members can create invites to specific Silicons."
           on={draft.letInvite}
           onToggle={() => setDraft((prev) => ({ ...prev, letInvite: !prev.letInvite }))}
+          disabled={readOnly}
         />
 
         <Toggle
@@ -1714,6 +1759,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
           hint="Require a whitelisted, verified email to join."
           on={draft.verify}
           onToggle={() => setDraft((prev) => ({ ...prev, verify: !prev.verify }))}
+          disabled={readOnly}
         />
 
         <div className={draft.verify ? "space-y-2" : "pointer-events-none space-y-2 opacity-50"}>
@@ -1724,7 +1770,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
               placeholder="acme.com, acme.io"
               value={draft.domains}
               onChange={(e) => setDraft((prev) => ({ ...prev, domains: e.target.value }))}
-              disabled={!draft.verify}
+              disabled={!draft.verify || readOnly}
             />
           </div>
           <div className="space-y-1">
@@ -1734,7 +1780,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
               placeholder="ceo@acme.com"
               value={draft.emails}
               onChange={(e) => setDraft((prev) => ({ ...prev, emails: e.target.value }))}
-              disabled={!draft.verify}
+              disabled={!draft.verify || readOnly}
             />
           </div>
           {!draft.verify && (
@@ -1744,9 +1790,11 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
           )}
         </div>
 
-        <Button onClick={save} disabled={busy} className="w-full">
-          {busy && <CircleNotch className="animate-spin" />} save settings
-        </Button>
+        {!readOnly ? (
+          <Button onClick={save} disabled={busy} className="w-full">
+            {busy && <CircleNotch className="animate-spin" />} save settings
+          </Button>
+        ) : null}
         {dirty ? (
           <p className="label-mono text-center text-[11px] text-muted-foreground">
             unsaved settings
@@ -1762,17 +1810,20 @@ function Toggle({
   hint,
   on,
   onToggle,
+  disabled = false,
 }: {
   label: string;
   hint: string;
   on: boolean;
   onToggle: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onToggle}
-      className="flex w-full items-center justify-between gap-3 border bg-card px-3 py-2 text-left transition-colors hover:bg-accent"
+      disabled={disabled}
+      className="flex w-full items-center justify-between gap-3 border bg-card px-3 py-2 text-left transition-colors hover:bg-accent disabled:cursor-default disabled:hover:bg-card"
     >
       <span>
         <span className="block text-sm font-medium">{label}</span>

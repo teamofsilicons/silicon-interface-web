@@ -327,7 +327,7 @@ export function WorkManagerActivityHistory({
       summaryActivityId={summaryActivity?.id}
       summaryActivity={summaryActivity}
       className={className}
-      initiallyExpanded={initiallyExpanded ?? false}
+      initiallyExpanded={initiallyExpanded ?? active}
       avatarSeed={avatarSeed}
       avatarSrc={avatarSrc}
       avatarAsciiSrc={avatarAsciiSrc}

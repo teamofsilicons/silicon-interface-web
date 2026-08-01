@@ -64,7 +64,9 @@ export function WorkManagerActivityList({
   summaryActivityId,
   summaryActivity,
 }: WorkManagerActivityListProps) {
-  const [expanded, setExpanded] = React.useState(initiallyExpanded ?? false);
+  const [expanded, setExpanded] = React.useState(
+    initiallyExpanded ?? activities.some((entry) => entry.state === "active"),
+  );
   const historyId = React.useId();
   const current = [...activities].reverse().find((entry) => entry.state === "active") ??
     summaryActivity ??

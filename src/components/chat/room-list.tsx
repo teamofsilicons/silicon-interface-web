@@ -68,6 +68,15 @@ export interface GroupSection {
   rooms: Room[];
 }
 
+/** Labeled sections for a flat conversation list. This keeps read-only
+ * surfaces such as Lords on the same row implementation as the main chat
+ * sidebar without opting into personal/team folder controls. */
+export interface FlatSection {
+  id: string;
+  label: string;
+  rooms: Room[];
+}
+
 /** Callbacks for the sidebar's folder grouping; only supplied when grouping is
  *  active (a team tab is selected). */
 export interface GroupControls {
@@ -99,7 +108,11 @@ interface Props {
   contacts?: Map<string, Contact>;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onNew: () => void;
+  onNew?: () => void;
+  /** Optional labeled partitions rendered with the standard conversation
+   * rows. `rooms` remains the complete flat projection for empty-state logic. */
+  flatSections?: FlatSection[];
+  emptyMessage?: string;
   loading?: boolean;
   className?: string;
   /** Set when a file is being dragged over a row; we use it to switch into
@@ -138,6 +151,8 @@ export function RoomList({
   selectedId,
   onSelect,
   onNew,
+  flatSections,
+  emptyMessage = "No conversations yet.",
   loading,
   className,
   hoverRoomId,
@@ -180,8 +195,8 @@ export function RoomList({
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
         <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-28 text-center">
-          <p className="text-sm text-muted-foreground">No conversations yet.</p>
-          <Button onClick={onNew}>Start a new chat</Button>
+          <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+          {onNew ? <Button onClick={onNew}>Start a new chat</Button> : null}
         </div>
       </div>
     );
@@ -263,6 +278,32 @@ export function RoomList({
               </ul>
             </div>
           )
+        ) : flatSections ? (
+          <div>
+            {loading ? <GlyphSkeleton /> : null}
+            {flatSections
+              .filter((section) => section.rooms.length > 0)
+              .map((section) => (
+                <section key={section.id} aria-labelledby={`room-section-${section.id}`}>
+                  <div
+                    id={`room-section-${section.id}`}
+                    className="sticky top-0 z-[1] flex h-9 items-center justify-between border-b bg-background/95 px-6 backdrop-blur"
+                  >
+                    <span className="label-mono text-[10px] text-muted-foreground">
+                      {section.label}
+                    </span>
+                    <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+                      {section.rooms.length}
+                    </span>
+                  </div>
+                  <ul className="divide-y">
+                    {section.rooms.map((r) => (
+                      <RoomRow key={r.room_id} room={r} {...rowProps} />
+                    ))}
+                  </ul>
+                </section>
+              ))}
+          </div>
         ) : (
           <ul className="divide-y">
             {loading && (
@@ -543,6 +584,37 @@ function RoomRow({
   // that case the right slot shows a send-status tick instead of a
   // badge (✓✓ once the other side has read it, ✓ until then).
   const mineLast = !!myHandle && r.last_event?.sender_handle === myHandle;
+  const lastSenderPeer =
+    r.kind === "group" && r.last_event?.sender_handle
+      ? peers.find(
+          (candidate) =>
+            candidate.handle === r.last_event?.sender_handle ||
+            candidate.id === r.last_event?.sender_handle,
+        ) ?? null
+      : null;
+  const lastSenderKind =
+    r.last_event?.sender_kind === "carbon" || r.last_event?.sender_kind === "silicon"
+      ? r.last_event.sender_kind
+      : lastSenderPeer?.kind;
+  const lastSenderContact =
+    lastSenderKind && r.last_event?.sender_handle
+      ? contacts?.get(
+          contactKey(
+            lastSenderKind,
+            lastSenderPeer?.id ?? r.last_event.sender_handle,
+          ),
+        )
+      : undefined;
+  const groupSenderLabel =
+    r.kind === "group" &&
+    r.last_event?.sender_handle &&
+    r.last_event.sender_kind !== "system"
+      ? mineLast
+        ? "you"
+        : lastSenderContact?.name?.trim() ||
+          lastSenderPeer?.name?.trim() ||
+          r.last_event.sender_handle.replace(/^@/, "")
+      : null;
   const lastReceiptStatus: MessageReceiptStatus =
     r.last_event?.delivery?.state ?? (r.last_event?.read ? "read" : "sent");
   // Direct 1-on-1 peer (for @id / saved-contact display).
@@ -726,7 +798,11 @@ function RoomRow({
               ) : serverStatus === "held" ? (
                 <span className="text-foreground/70">scheduled message</span>
               ) : (
-                <LastEventPreview room={r} fallback={preview} />
+                <LastEventPreview
+                  room={r}
+                  fallback={preview}
+                  senderLabel={groupSenderLabel}
+                />
               )}
             </p>
             {unread > 0 ? (
@@ -851,11 +927,20 @@ function fileNamePreview(preview: string): string {
 
 /** One-line, type-aware last-message preview: a Phosphor icon (no emojis) plus
  *  a short label. Falls back to the plain text preview for text / no events. */
-function LastEventPreview({ room, fallback }: { room: Room; fallback: string }) {
+function LastEventPreview({
+  room,
+  fallback,
+  senderLabel,
+}: {
+  room: Room;
+  fallback: string;
+  senderLabel?: string | null;
+}) {
   const t = room.last_event?.type;
   const iconCls = "h-3 w-3 shrink-0";
   const wrap = (icon: React.ReactNode, label: React.ReactNode) => (
     <span className="flex min-w-0 items-center gap-1 align-middle">
+      {senderLabel ? <span className="shrink-0 font-medium">{senderLabel}:</span> : null}
       {icon}
       <span className="min-w-0 truncate">{label}</span>
     </span>
@@ -881,7 +966,12 @@ function LastEventPreview({ room, fallback }: { room: Room; fallback: string }) 
     case "m.work_event":
       return wrap(<Briefcase className={iconCls} />, stripPreviewEmoji(fallback) || "work update");
     default:
-      return <>{fallback}</>;
+      return senderLabel ? (
+        <span className="flex min-w-0 items-center gap-1">
+          <span className="shrink-0 font-medium">{senderLabel}:</span>
+          <span className="min-w-0 truncate">{fallback}</span>
+        </span>
+      ) : <>{fallback}</>;
   }
 }
 

@@ -17,3 +17,14 @@ test("valid sessions enter before non-authoritative browser setup finishes", () 
   assert.doesNotMatch(source, /await ensureDeviceRegistration\(\)/);
   assert.doesNotMatch(source, /await navigator\.storage\?\.persist\?\.\(\)/);
 });
+
+test("returning owners are released before network restoration settles", () => {
+  const retainedEntry = source.indexOf("if (canPaintRetainedSession(");
+  const boot = source.indexOf("void boot();", retainedEntry);
+  assert.ok(retainedEntry >= 0);
+  assert.ok(boot > retainedEntry);
+  assert.match(
+    source.slice(retainedEntry, boot),
+    /authStore\.hasPersistedOwner\(\)/,
+  );
+});

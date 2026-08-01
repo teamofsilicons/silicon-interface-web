@@ -71,6 +71,13 @@ export function WorkCallCard({ call, className }: WorkCallCardProps) {
   const title = callTitle(call);
   const PhoneIcon = call.direction === "inbound" ? PhoneIncoming : PhoneOutgoing;
   const active = call.state === "calling" || call.state === "connected";
+  const historyId = React.useId();
+  const [historyExpanded, setHistoryExpanded] = React.useState(false);
+  const summary = call.summary?.trim();
+  const visibleSummary =
+    summary && summary.localeCompare(title, undefined, { sensitivity: "base" }) !== 0
+      ? summary
+      : null;
 
   return (
     <article
@@ -86,25 +93,23 @@ export function WorkCallCard({ call, className }: WorkCallCardProps) {
             aria-label={`${title}. ${callStateLabel[call.state]}. Open call transcript`}
           >
             <PhoneIcon className="h-5 w-5 shrink-0" weight="regular" aria-hidden />
-            <span className="min-w-0 flex-1">
-              <span className="flex min-w-0 items-center gap-1.5">
-                <span className={cn(
-                  "min-w-0 truncate text-sm font-medium",
-                  active && "manager-activity-shimmer",
-                )}>
-                  {title}
-                </span>
-                <span className="sr-only">{callStateLabel[call.state]}.</span>
-                {call.state !== "completed" ? (
-                  <CallStateIcon state={call.state} />
-                ) : null}
+            <span className="flex min-w-0 max-w-full items-center gap-1.5">
+              <span className={cn(
+                "min-w-0 truncate text-sm font-medium",
+                active && "manager-activity-shimmer",
+              )}>
+                {title}
               </span>
+              <span className="sr-only">{callStateLabel[call.state]}.</span>
+              {call.state !== "completed" ? (
+                <CallStateIcon state={call.state} />
+              ) : null}
+              <CaretRight
+                className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+                weight="bold"
+                aria-hidden
+              />
             </span>
-            <CaretRight
-              className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-              weight="bold"
-              aria-hidden
-            />
           </button>
         </DialogTrigger>
         <DialogContent className="max-h-[min(88dvh,48rem)] w-[calc(100%-1.5rem)] max-w-2xl gap-0 overflow-hidden p-0">
@@ -113,8 +118,8 @@ export function WorkCallCard({ call, className }: WorkCallCardProps) {
               <PhoneIcon className="h-5 w-5" weight="fill" aria-hidden />
               {title}
             </DialogTitle>
-            <DialogDescription>
-              {call.summary ?? `${callStateLabel[call.state]} conversation with ${call.peer}`}
+            <DialogDescription className={cn(!visibleSummary && "sr-only")}>
+              {visibleSummary ?? `${callStateLabel[call.state]} conversation with ${call.peer}`}
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="max-h-[calc(min(88dvh,48rem)-5rem)]">
@@ -146,8 +151,30 @@ export function WorkCallCard({ call, className }: WorkCallCardProps) {
               </section>
               {call.history?.length ? (
                 <section aria-label="Call history">
-                  <h3 className="label-mono mb-3 text-[10px] tracking-wide text-muted-foreground">CALL HISTORY</h3>
-                  <WorkHistory entries={call.history} />
+                  <button
+                    type="button"
+                    className="group -ml-1 flex min-h-8 items-center gap-1.5 px-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                    aria-expanded={historyExpanded}
+                    aria-controls={historyId}
+                    onClick={() => setHistoryExpanded((value) => !value)}
+                  >
+                    <CaretRight
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none",
+                        historyExpanded && "rotate-90",
+                      )}
+                      weight="bold"
+                      aria-hidden
+                    />
+                    <span className="label-mono text-[10px] tracking-wide text-muted-foreground transition-colors group-hover:text-foreground">
+                      CALL HISTORY
+                    </span>
+                  </button>
+                  {historyExpanded ? (
+                    <div id={historyId} className="mt-3">
+                      <WorkHistory entries={call.history} />
+                    </div>
+                  ) : null}
                 </section>
               ) : null}
             </div>

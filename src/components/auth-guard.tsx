@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { ensureDeviceRegistration } from "@/lib/device-registration";
 import {
+  canPaintRetainedSession,
   isAuthoritativeSessionRevocation,
   sessionBootDecision,
   type WebSessionRestoreState,
@@ -73,6 +74,9 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           anonymousConfirmations,
         );
         if (decision === "login") {
+          // A retained shell may already be visible while restoration runs.
+          // Cover it before an authoritative revocation redirects the page.
+          setOk(false);
           if (state === "revoked") authStore.clear("revoked");
           router.replace("/auth/login");
           return;
@@ -100,6 +104,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
               // Only a typed backend revocation may end an established local
               // session. Generic 401s can be stale-token or cookie-availability
               // races and remain in the retry path below.
+              setOk(false);
               authStore.clear("revoked");
               router.replace("/auth/login");
               return;
@@ -131,6 +136,21 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         running = false;
       }
     };
+    // The restricted persisted identity and owner-namespaced chat caches are
+    // deliberately the app's offline-capable state. Paint that shell now for a
+    // returning browser instead of holding it behind refresh + /me round trips;
+    // boot still starts in the same effect and refreshes authority/profile in
+    // the background. A first-time or explicitly logged-out browser continues
+    // to see the boot sequence until its session state is known.
+    if (canPaintRetainedSession(
+      Boolean(authStore.getAccess() || authStore.getSiliconKey()),
+      authStore.hasPersistedOwner(),
+      authStore.wasExplicitlyLoggedOut(),
+    )) {
+      queueMicrotask(() => {
+        if (alive) setOk(true);
+      });
+    }
     void boot();
     // An offline first boot must not strand a legacy, installation-unbound
     // session until the guard happens to remount. Registration is idempotent

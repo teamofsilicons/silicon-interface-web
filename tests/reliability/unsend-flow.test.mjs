@@ -41,6 +41,18 @@ test("waiting sends expose a durable cancel path instead of a fake unsend", () =
   assert.match(composer, /stageMediaSendIntent\(\{/);
 });
 
+test("group chats use the Carbon-to-Carbon unsend window", () => {
+  const gate = functionSlice(roomView, "const roomIncludesSilicon", "const canEditMessage");
+
+  assert.match(
+    gate,
+    /const directRoomIncludesSilicon = room\.kind === "direct" && roomIncludesSilicon/,
+  );
+  assert.match(gate, /if \(directRoomIncludesSilicon\) return false/);
+  assert.match(gate, /if \(typeof ev\.can_unsend === "boolean"\) return ev\.can_unsend/);
+  assert.doesNotMatch(gate, /if \(roomIncludesSilicon\) return false/);
+});
+
 test("copying content into the composer remains an explicit recovery action", () => {
   const correction = functionSlice(roomView, "const onCorrection", "const confirmTextCorrection");
   const copyCalls = [...correction.matchAll(/copyEventToComposer\(event\)/g)];

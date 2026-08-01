@@ -3314,6 +3314,7 @@ export function RoomView({
   };
 
   const roomIncludesSilicon = peers.some((p) => p.kind === "silicon");
+  const directRoomIncludesSilicon = room.kind === "direct" && roomIncludesSilicon;
   const canUnsendMessage = React.useCallback(
     (ev: LocalEvent | Event) => {
       if (!isMyEvent(ev, myUsername)) return false;
@@ -3324,11 +3325,14 @@ export function RoomView({
       if (local._status === "failed" || local._failure) return false;
       const isHeldOrPending = ev.event_id.startsWith("temp-") && Boolean(local._clientId);
       if (isHeldOrPending) return true;
-      if (roomIncludesSilicon) return false;
+      // Group chats use the same sender/read-window rule as Carbon ↔ Carbon
+      // chats, even when a Silicon is also a member. Only a direct Silicon
+      // conversation keeps its stricter no-unsend rule.
+      if (directRoomIncludesSilicon) return false;
       if (typeof ev.can_unsend === "boolean") return ev.can_unsend;
       return local._status !== "read";
     },
-    [myUsername, roomIncludesSilicon],
+    [directRoomIncludesSilicon, myUsername],
   );
   const canEditMessage = React.useCallback(
     (ev: LocalEvent | Event) => {
@@ -4997,9 +5001,11 @@ export function RoomView({
     [canonicalDisplayRows, displayedManagerGroups],
   );
 
-  // Fold the authoritative timeline into sender panels without moving events.
-  // Run anchors are metadata only; both replies and live Stemcell progress stay
-  // after every message that Glass accepted before them.
+  // Fold the authoritative timeline into sender panels without moving durable
+  // events. Manager activity is an ephemeral overlay rather than a stream row,
+  // so weave an unmatched run in at its first activity timestamp. This keeps
+  // durable work it initiated (for example a Silicon call) below its parent
+  // activity while retaining the canonical order of all server events.
   const timelineItems = React.useMemo(() => {
     type Party = "carbon" | "silicon";
     type Row = (typeof displayRows)[number];
@@ -5062,7 +5068,35 @@ export function RoomView({
         iso: group.history[0]?.occurred_at ?? fallbackIso,
       });
     };
+    const trailingManagers = managerPlacement.trailing.map((group, index) => ({
+      group,
+      index,
+      iso: group.history[0]?.occurred_at ?? group.updated_at,
+    })).sort((left, right) => {
+      const leftAt = Date.parse(left.iso);
+      const rightAt = Date.parse(right.iso);
+      if (Number.isFinite(leftAt) && Number.isFinite(rightAt) && leftAt !== rightAt) {
+        return leftAt - rightAt;
+      }
+      if (Number.isFinite(leftAt) !== Number.isFinite(rightAt)) {
+        return Number.isFinite(leftAt) ? -1 : 1;
+      }
+      return left.index - right.index;
+    });
+    let nextManagerIndex = 0;
+    const pushManagersThrough = (iso: string) => {
+      const eventAt = Date.parse(iso);
+      if (!Number.isFinite(eventAt)) return;
+      while (nextManagerIndex < trailingManagers.length) {
+        const manager = trailingManagers[nextManagerIndex];
+        const managerAt = Date.parse(manager.iso);
+        if (!Number.isFinite(managerAt) || managerAt > eventAt) break;
+        pushManager(manager.group, manager.iso || iso);
+        nextManagerIndex += 1;
+      }
+    };
     for (const e of rows) {
+      pushManagersThrough(e.created_at);
       lastIso = e.created_at;
       if (isSystem(e)) {
         flush();
@@ -5083,8 +5117,10 @@ export function RoomView({
       }
     }
     flush();
-    for (const group of managerPlacement.trailing) {
-      pushManager(group, group.updated_at || lastIso);
+    while (nextManagerIndex < trailingManagers.length) {
+      const manager = trailingManagers[nextManagerIndex];
+      pushManager(manager.group, manager.iso || lastIso);
+      nextManagerIndex += 1;
     }
     // Legacy live Stemcell activity has no normalized manager group.
     if (runActive && displayedManagerGroups.length === 0) pushProgress(lastIso);
@@ -5858,6 +5894,7 @@ export function RoomView({
         room={room}
         events={events}
         currentUsername={carbon?.username}
+        currentCarbon={carbon}
         contact={
           focusSender
             ? contactForSender(focusSender.kind, focusSender.handle)

@@ -11,6 +11,20 @@ export type SessionBootDecision =
   | "login"
   | "retry";
 
+/**
+ * A returning browser can paint its owner-scoped, durable shell before the
+ * network renews request authority. Explicit logout is the one synchronous
+ * signal that must keep protected UI hidden; backend revocation is handled as
+ * soon as the restore request answers.
+ */
+export function canPaintRetainedSession(
+  hasInMemoryAuthority: boolean,
+  hasKnownOwner: boolean,
+  explicitlyLoggedOut: boolean,
+): boolean {
+  return !explicitlyLoggedOut && (hasInMemoryAuthority || hasKnownOwner);
+}
+
 /** Only an explicit client/auth rejection proves that browser authority ended. */
 export function isAuthoritativeSessionRevocation(
   status: number | null,

@@ -15,12 +15,21 @@ const [callSource, workerSource, statusSource, taskSource, demoSource, roomViewS
 test("calls use the sketched inline row and keep the full-row transcript trigger", () => {
   assert.match(callSource, /className=\{cn\("w-full max-w-\[34rem\]"/);
   assert.match(callSource, /<DialogTrigger asChild>[\s\S]*?<button/);
+  assert.match(
+    callSource,
+    /<span className="flex min-w-0 max-w-full items-center gap-1\.5">[\s\S]*?\{title\}[\s\S]*?<CaretRight/,
+  );
+  assert.doesNotMatch(callSource, /<span className="min-w-0 flex-1">/);
   assert.match(callSource, /Received call from \$\{call\.peer\}/);
   assert.match(callSource, /Calling \$\{call\.peer\}/);
   assert.match(callSource, /Called \$\{call\.peer\}/);
   assert.doesNotMatch(callSource, /contentPreview|workCallPreviewContent/);
-  assert.match(callSource, /<DialogContent[\s\S]*?call\.summary/);
+  assert.match(callSource, /<DialogContent[\s\S]*?visibleSummary/);
   assert.match(callSource, /<DialogContent[\s\S]*?call\.transcript\.map/);
+  assert.match(callSource, /const \[historyExpanded, setHistoryExpanded\] = React\.useState\(false\)/);
+  assert.match(callSource, /aria-expanded=\{historyExpanded\}/);
+  assert.match(callSource, /historyExpanded \? \([\s\S]*?<WorkHistory entries=\{call\.history\}/);
+  assert.match(callSource, /summary\.localeCompare\(title/);
   assert.doesNotMatch(callSource, /message count|messages? received/i);
 });
 
@@ -56,5 +65,16 @@ test("all incoming durable update kinds receive the sender Silicon avatar", () =
   assert.match(
     demoSource,
     /className=\{cn\([\s\S]*?"my-3 flex w-full items-start justify-start gap-2"[\s\S]*?<IdAvatar[\s\S]*?<WorkEventCard/,
+  );
+});
+
+test("manager activity is woven before durable work that starts during the run", () => {
+  assert.match(
+    roomViewSource,
+    /pushManagersThrough\(e\.created_at\);[\s\S]*?if \(isSystem\(e\)\)/,
+  );
+  assert.match(
+    roomViewSource,
+    /group\.history\[0\]\?\.occurred_at \?\? group\.updated_at/,
   );
 });

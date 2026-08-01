@@ -600,6 +600,10 @@ function copyPackage(targetDir) {
   return dest;
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\"'\"'`)}'`;
+}
+
 function writeShim(targetDir, name) {
   const binDir = path.join(targetDir, ".silicon-interface", "bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -609,7 +613,7 @@ set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)
 export SILICON_INTERFACE_ROOT="$ROOT"
-exec node "$ROOT/.silicon-interface/package/bin/silicon-interface.mjs" "$@"
+exec ${shellQuote(process.execPath)} "$ROOT/.silicon-interface/package/bin/silicon-interface.mjs" "$@"
 `;
   fs.writeFileSync(shimPath, shim, { mode: 0o755 });
   try {

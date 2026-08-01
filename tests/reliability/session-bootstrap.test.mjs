@@ -2,11 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canPaintRetainedSession,
   classifySessionRestoreFailure,
   compatibilityRestoreAllowsEntry,
   isAuthoritativeSessionRevocation,
   sessionBootDecision,
 } from "../../src/lib/session-bootstrap.ts";
+
+test("returning browsers may paint durable state while authority restores", () => {
+  assert.equal(canPaintRetainedSession(false, true, false), true);
+  assert.equal(canPaintRetainedSession(true, false, false), true);
+  assert.equal(canPaintRetainedSession(false, false, false), false);
+  assert.equal(canPaintRetainedSession(true, true, true), false);
+});
 
 test("only explicit auth rejection is treated as an ended browser session", () => {
   for (const status of [400, 401]) {

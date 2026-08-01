@@ -12,7 +12,7 @@ const [callCardSource, taskCardSource, statusCardSource, demoSource, roomViewSou
 
 test("every collapsed call stays heading-only while details retain conversation content", () => {
   assert.doesNotMatch(callCardSource, /contentPreview|workCallPreviewContent/);
-  assert.match(callCardSource, /<DialogContent[\s\S]*?call\.summary/);
+  assert.match(callCardSource, /<DialogContent[\s\S]*?visibleSummary/);
   assert.match(callCardSource, /<DialogContent[\s\S]*?call\.content/);
   assert.match(callCardSource, /<DialogContent[\s\S]*?call\.transcript\.map/);
   assert.match(callCardSource, /<DialogContent[\s\S]*?call\.history/);

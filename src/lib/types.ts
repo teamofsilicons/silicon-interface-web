@@ -79,6 +79,8 @@ export interface Carbon {
   // Core-team flag. Gates the /dev console client-side; the backend
   // independently gates /api/v1/dev/* (DEBUG) and /api/v1/cost/* (IsAdminUser).
   is_staff?: boolean;
+  /** Hidden all-team oversight role. Server authorization remains canonical. */
+  is_lord?: boolean;
   email_verified_at: string | null;
   phone_verified_at: string | null;
   created_at: string;
@@ -358,6 +360,25 @@ export interface TeamMembership {
   member_photo_url: string | null;
   role: TeamRole;
   joined_at: string;
+}
+
+export interface LordTeam {
+  team_id: string;
+  slug: string;
+  name: string;
+  logo_url: string | null;
+}
+
+export interface LordIdentity {
+  kind: "carbon" | "silicon";
+  id: string;
+  handle: string;
+  name: string;
+  profile_photo_url: string | null;
+  profile_ascii_url?: string | null;
+  is_lord?: boolean;
+  team_slugs: string[];
+  connection_state?: "online" | "connecting" | "offline" | string;
 }
 
 export interface Invite {

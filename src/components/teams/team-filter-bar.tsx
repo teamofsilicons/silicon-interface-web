@@ -36,9 +36,13 @@ export interface TeamChip {
 export function TeamFilterBar({
   filters,
   onChange,
+  showUnread = true,
 }: {
   filters: ChatFilters;
   onChange: (f: ChatFilters) => void;
+  /** Oversight surfaces do not own read receipts, so they keep the shared
+   * Carbon/Silicon filters without presenting a misleading Unread control. */
+  showUnread?: boolean;
 }) {
   const toggleKind = (k: "carbon" | "silicon") =>
     onChange({
@@ -50,9 +54,11 @@ export function TeamFilterBar({
 
   return (
     <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto border-b py-2 pl-6 pr-3">
-      <Chip active={filters.unread} onClick={() => onChange({ ...filters, unread: !filters.unread })}>
-        <Tray className="h-3.5 w-3.5" /> Unread
-      </Chip>
+      {showUnread ? (
+        <Chip active={filters.unread} onClick={() => onChange({ ...filters, unread: !filters.unread })}>
+          <Tray className="h-3.5 w-3.5" /> Unread
+        </Chip>
+      ) : null}
       <Chip active={filters.kinds.includes("carbon")} onClick={() => toggleKind("carbon")}>
         <UsersThree className="h-3.5 w-3.5" /> Carbons
       </Chip>

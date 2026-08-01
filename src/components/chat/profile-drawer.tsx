@@ -12,7 +12,16 @@ import { api } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { compactUrlLabel } from "@/lib/link-display";
 import { isGifMedia } from "@/lib/media-meta";
-import type { Contact, CarbonPublic, Event, LinkPreview, Room, SiliconPublic } from "@/lib/types";
+import type {
+  Carbon,
+  Contact,
+  CarbonPublic,
+  Event,
+  LinkPreview,
+  Room,
+  RoomPeer,
+  SiliconPublic,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { albumMediaItems } from "@/lib/albums";
 import {
@@ -44,6 +53,8 @@ interface Props {
   room: Room;
   events: Event[];
   currentUsername?: string;
+  /** Signed-in member, included because Room.peers intentionally excludes self. */
+  currentCarbon?: Carbon | null;
   /** Saved-contact record for the room's counterpart, if any. */
   contact?: Contact;
   /** Opens the Save/Edit contact dialog (only for 1-on-1 peers). */
@@ -81,10 +92,33 @@ interface ProfileLink {
   preview: LinkPreview | null;
 }
 
+interface GroupProfileMember {
+  kind: "carbon" | "silicon";
+  id: string;
+  handle: string;
+  name: string;
+  photoUrl: string | null;
+  asciiUrl: string | null;
+  isCurrentUser: boolean;
+}
+
+function groupProfileMemberFromPeer(peer: RoomPeer): GroupProfileMember {
+  return {
+    kind: peer.kind,
+    id: peer.id,
+    handle: peer.handle,
+    name: peer.name,
+    photoUrl: peer.profile_photo_url,
+    asciiUrl: peer.profile_ascii_url ?? null,
+    isCurrentUser: false,
+  };
+}
+
 export function ProfileDrawer({
   room,
   events,
   currentUsername,
+  currentCarbon,
   contact,
   onEditContact,
   open,
@@ -94,8 +128,10 @@ export function ProfileDrawer({
   onMessage,
   onSeeInChat,
 }: Props) {
+  const showingGroupOverview = room.kind === "group" && !focusSender;
   // Sender priority: explicit focus → first non-me sender → first room peer.
   const counterpart: SenderRef | null = (() => {
+    if (showingGroupOverview) return null;
     if (focusSender) return focusSender;
     for (const e of events) {
       if (
@@ -111,6 +147,40 @@ export function ProfileDrawer({
     }
     return null;
   })();
+  const groupMembers = React.useMemo<GroupProfileMember[]>(() => {
+    if (!showingGroupOverview) return [];
+    const members: GroupProfileMember[] = [];
+    const seen = new Set<string>();
+    const add = (member: GroupProfileMember) => {
+      const key = `${member.kind}:${member.id || member.handle}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      members.push(member);
+    };
+    if (currentCarbon) {
+      add({
+        kind: "carbon",
+        id: currentCarbon.carbon_id,
+        handle: currentCarbon.username,
+        name: currentCarbon.name,
+        photoUrl: currentCarbon.profile_photo_url,
+        asciiUrl: currentCarbon.profile_ascii_url ?? null,
+        isCurrentUser: true,
+      });
+    } else if (currentUsername) {
+      add({
+        kind: "carbon",
+        id: currentUsername,
+        handle: currentUsername,
+        name: currentUsername,
+        photoUrl: null,
+        asciiUrl: null,
+        isCurrentUser: true,
+      });
+    }
+    for (const peer of room.peers) add(groupProfileMemberFromPeer(peer));
+    return members;
+  }, [currentCarbon, currentUsername, room.peers, showingGroupOverview]);
 
   const [profile, setProfile] = React.useState<CarbonPublic | SiliconPublic | null>(null);
   const [profileLoading, setProfileLoading] = React.useState(false);
@@ -321,16 +391,24 @@ export function ProfileDrawer({
   };
 
   // Derived display strings — never bare "@" anywhere.
-  const handle = profile
-    ? "carbon_id" in profile
-      ? profile.carbon_id
-      : profile.silicon_id
-    : counterpart?.handle ?? room.peers[0]?.handle ?? "";
+  const handle = showingGroupOverview
+    ? room.room_id
+    : profile
+      ? "carbon_id" in profile
+        ? profile.carbon_id
+        : profile.silicon_id
+      : counterpart?.handle ?? room.peers[0]?.handle ?? "";
   // A saved contact's custom name/photo win over the target's defaults.
-  const displayName = contact?.name?.trim() || profile?.name?.trim() || handle;
-  const photoUrl = contact?.photo_url ?? profile?.profile_photo_url ?? null;
+  const displayName = showingGroupOverview
+    ? room.name?.trim() || room.topic?.trim() || "group"
+    : contact?.name?.trim() || profile?.name?.trim() || handle;
+  const photoUrl = showingGroupOverview
+    ? room.profile_photo_url ?? null
+    : contact?.photo_url ?? profile?.profile_photo_url ?? null;
   // §0a — prefer the ASCII treatment unless the user set a custom contact photo.
-  const asciiUrl = contact?.photo_url ? null : (profile?.profile_ascii_url ?? null);
+  const asciiUrl = showingGroupOverview
+    ? null
+    : contact?.photo_url ? null : (profile?.profile_ascii_url ?? null);
   const bio = profile?.tagline ?? "";
   const username = profile && "username" in profile ? profile.username : "";
   const identityLabel = counterpart?.kind === "silicon" ? "silicon id" : "carbon id";
@@ -368,108 +446,119 @@ export function ProfileDrawer({
           <DialogTitle>{displayName}</DialogTitle>
         </DialogHeader>
 
-        {/* Avatar centered — the IdAvatar already carries its own hairline
-            border. Stacking another bordered card around it was the "two
-            bounding boxes" the user noticed. Single box now. */}
-        <div className="flex flex-col items-center gap-3">
-          {profileLoading && !contact?.photo_url ? (
-            // While the profile (and its photo URL) is in flight, say so —
-            // don't render the seed glyph only to swap it for the photo.
-            <div
-              style={{ width: 132, height: 132 }}
-              className="grid shrink-0 animate-pulse place-items-center border bg-muted"
-              role="status"
-              aria-label="loading profile"
-            >
-              <span className="label-mono text-[10px] text-muted-foreground">loading…</span>
-            </div>
-          ) : (
-            <IdAvatar seed={handle || "?"} src={photoUrl} asciiSrc={asciiUrl} size={132} family={counterpart?.kind ?? "carbon"} />
-          )}
-          <div className="text-center">
-            <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
-            {profile && (
-              <p className="text-xs text-muted-foreground">
-                {counterpart?.kind === "silicon" ? "Silicon" : "Carbon"}
-              </p>
-            )}
-            {contact?.custom_photo && (
-              <p className="label-mono mt-1 text-center text-[10px] text-muted-foreground">
-                Picture set by you
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Copyable identity chips. Each chip is a click-to-copy button. */}
-        <div className="mt-3 space-y-1.5">
-          {handle && (
-            <CopyChip
-              label={identityLabel}
-              value={handle}
-              onCopy={() => copy(identityCopyLabel, handle)}
-            />
-          )}
-          {username && username !== handle && (
-            <CopyChip
-              label="username"
-              value={`@${username}`}
-              onCopy={() => copy("Username", username)}
-            />
-          )}
-        </div>
-
-        {bio && (
-          <p className="mt-4 px-1 text-center text-sm text-muted-foreground">{bio}</p>
-        )}
-
-        {counterpart && onMessage && (
-          <div className="mt-4 flex justify-center">
-            <Button size="sm" onClick={() => void message()} disabled={messageOpening} className="gap-1.5">
-              <ChatCircleText className="h-3.5 w-3.5" />
-              {messageOpening ? "opening…" : "Message"}
-            </Button>
-          </div>
-        )}
-
-        {/* Saved-contact note (private to you) + edit. */}
-        {contact && (
-          <div className="mt-4 space-y-1.5 border-t pt-3">
-            <div className="flex items-center justify-between">
-              <h3 className="label-mono text-[10px] opacity-60">your note</h3>
-              {onEditContact && (
-                <button
-                  type="button"
-                  onClick={onEditContact}
-                  className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        {showingGroupOverview ? (
+          <GroupOverview
+            room={room}
+            displayName={displayName}
+            photoUrl={photoUrl}
+            members={groupMembers}
+          />
+        ) : (
+          <>
+          {/* Avatar centered — the IdAvatar already carries its own hairline
+              border. Stacking another bordered card around it was the "two
+              bounding boxes" the user noticed. Single box now. */}
+            <div className="flex flex-col items-center gap-3">
+              {profileLoading && !contact?.photo_url ? (
+                // While the profile (and its photo URL) is in flight, say so —
+                // don't render the seed glyph only to swap it for the photo.
+                <div
+                  style={{ width: 132, height: 132 }}
+                  className="grid shrink-0 animate-pulse place-items-center border bg-muted"
+                  role="status"
+                  aria-label="loading profile"
                 >
-                  <NotePencil className="h-3 w-3" /> edit
-                </button>
+                  <span className="label-mono text-[10px] text-muted-foreground">loading…</span>
+                </div>
+              ) : (
+                <IdAvatar seed={handle || "?"} src={photoUrl} asciiSrc={asciiUrl} size={132} family={counterpart?.kind ?? "carbon"} />
+              )}
+              <div className="text-center">
+                <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
+                {profile && (
+                  <p className="text-xs text-muted-foreground">
+                    {counterpart?.kind === "silicon" ? "Silicon" : "Carbon"}
+                  </p>
+                )}
+                {contact?.custom_photo && (
+                  <p className="label-mono mt-1 text-center text-[10px] text-muted-foreground">
+                    Picture set by you
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Copyable identity chips. Each chip is a click-to-copy button. */}
+            <div className="mt-3 space-y-1.5">
+              {handle && (
+                <CopyChip
+                  label={identityLabel}
+                  value={handle}
+                  onCopy={() => copy(identityCopyLabel, handle)}
+                />
+              )}
+              {username && username !== handle && (
+                <CopyChip
+                  label="username"
+                  value={`@${username}`}
+                  onCopy={() => copy("Username", username)}
+                />
               )}
             </div>
-            <p className="whitespace-pre-wrap text-sm text-foreground/90">
-              {contact.note || <span className="text-muted-foreground">-</span>}
-            </p>
-          </div>
-        )}
-        {(onEditContact || canInviteToSilicon) && (
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 border-t pt-3">
-            {!contact && onEditContact && (
-              <Button size="sm" onClick={onEditContact} className="gap-1.5">
-                <NotePencil className="h-3.5 w-3.5" /> Save contact
-              </Button>
+
+            {bio && (
+              <p className="mt-4 px-1 text-center text-sm text-muted-foreground">{bio}</p>
             )}
-            {canInviteToSilicon && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setInviteOpen(true)}
-                className="gap-1.5"
-              >
-                <UserPlus className="h-3.5 w-3.5" /> Invite people
-              </Button>
+
+            {counterpart && onMessage && (
+              <div className="mt-4 flex justify-center">
+                <Button size="sm" onClick={() => void message()} disabled={messageOpening} className="gap-1.5">
+                  <ChatCircleText className="h-3.5 w-3.5" />
+                  {messageOpening ? "opening…" : "Message"}
+                </Button>
+              </div>
             )}
-          </div>
+
+            {/* Saved-contact note (private to you) + edit. */}
+            {contact && (
+              <div className="mt-4 space-y-1.5 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="label-mono text-[10px] opacity-60">your note</h3>
+                  {onEditContact && (
+                    <button
+                      type="button"
+                      onClick={onEditContact}
+                      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      <NotePencil className="h-3 w-3" /> edit
+                    </button>
+                  )}
+                </div>
+                <p className="whitespace-pre-wrap text-sm text-foreground/90">
+                  {contact.note || <span className="text-muted-foreground">-</span>}
+                </p>
+              </div>
+            )}
+            {(onEditContact || canInviteToSilicon) && (
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2 border-t pt-3">
+                {!contact && onEditContact && (
+                  <Button size="sm" onClick={onEditContact} className="gap-1.5">
+                    <NotePencil className="h-3.5 w-3.5" /> Save contact
+                  </Button>
+                )}
+                {canInviteToSilicon && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setInviteOpen(true)}
+                    className="gap-1.5"
+                  >
+                    <UserPlus className="h-3.5 w-3.5" /> Invite people
+                  </Button>
+                )}
+              </div>
+            )}
+          </>
         )}
 
         {/* Attachment tabs */}
@@ -583,6 +672,77 @@ export function ProfileDrawer({
 // ---------------------------------------------------------------------------
 // Bits & pieces
 // ---------------------------------------------------------------------------
+
+function GroupOverview({
+  room,
+  displayName,
+  photoUrl,
+  members,
+}: {
+  room: Room;
+  displayName: string;
+  photoUrl: string | null;
+  members: GroupProfileMember[];
+}) {
+  return (
+    <div>
+      <div className="flex flex-col items-center gap-3">
+        <IdAvatar
+          seed={`group:${room.room_id}`}
+          src={photoUrl}
+          size={132}
+          family="carbon"
+        />
+        <div className="text-center">
+          <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
+          <p className="text-xs text-muted-foreground">
+            {members.length} member{members.length === 1 ? "" : "s"}
+          </p>
+        </div>
+      </div>
+
+      {room.topic?.trim() && room.topic.trim() !== displayName ? (
+        <p className="mt-4 px-1 text-center text-sm text-muted-foreground">
+          {room.topic.trim()}
+        </p>
+      ) : null}
+
+      <div className="mt-5 border-t pt-4">
+        <h3 className="label-mono mb-2 text-[10px] text-muted-foreground">
+          members · {members.length}
+        </h3>
+        <ul className="max-h-72 divide-y overflow-y-auto border">
+          {members.map((member) => {
+            const display = member.name?.trim() || member.handle || member.id;
+            return (
+              <li
+                key={`${member.kind}:${member.id || member.handle}`}
+                className="flex items-center gap-3 px-3 py-2.5 text-sm"
+              >
+                <IdAvatar
+                  seed={`${member.kind}:${member.id || member.handle}`}
+                  src={member.photoUrl}
+                  asciiSrc={member.asciiUrl}
+                  size={34}
+                  family={member.kind}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{display}</span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    @{member.id || member.handle}
+                  </span>
+                </span>
+                <span className="label-mono shrink-0 text-[10px] text-muted-foreground">
+                  {member.isCurrentUser ? "you" : member.kind}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </div>
+  );
+}
 
 function CopyChip({
   label,

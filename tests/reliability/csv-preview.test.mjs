@@ -21,7 +21,8 @@ test("historical CSV previews use the stable authenticated media route", async (
     readFile(new URL("../../src/lib/api.ts", import.meta.url), "utf8"),
   ]);
   assert.match(previewSource, /api\.mediaTextPreview\(mediaId/);
-  assert.match(apiSource, /\/content\?head=\$\{bounded\}/);
+  assert.match(apiSource, /mediaReadPath\(media_id, "\/content"\)/);
+  assert.match(apiSource, /\?head=\$\{bounded\}/);
   assert.match(previewSource, /\.catch\(directHead\)/);
 });
 

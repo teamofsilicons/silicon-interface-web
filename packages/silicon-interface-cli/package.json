@@ -1,6 +1,6 @@
 {
   "name": "@teamofsilicons/silicon-interface-cli",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "Glass-native CLI for complete, durable Silicon Interface conversations.",
   "type": "module",
   "bin": {

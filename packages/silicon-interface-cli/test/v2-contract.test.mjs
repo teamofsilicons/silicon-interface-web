@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
+import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -68,6 +69,24 @@ function runCli(args, cwd, env = {}) {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+}
+
+function daemonRpc(socketPath, request) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => { response += chunk; });
+    socket.once("connect", () => socket.end(`${JSON.stringify(request)}\n`));
+    socket.once("close", () => {
+      try {
+        resolve(JSON.parse(response.trim()));
+      } catch (error) {
+        reject(error);
+      }
+    });
   });
 }
 
@@ -176,6 +195,29 @@ test("Silicon authentication automatically starts and clears the live inbox daem
       const firstDaemon = JSON.parse(firstStatus.stdout);
       assert.equal(firstDaemon.running, true);
       assert.equal(Number.isSafeInteger(firstDaemon.pid), true);
+      const rpcDiscovery = JSON.parse(
+        await fs.readFile(path.join(tempDir, ".silicon-interface", "daemon-rpc.json"), "utf8"),
+      );
+      const socketPath = rpcDiscovery.socket;
+      const socketMode = (await fs.stat(socketPath)).mode & 0o777;
+      assert.equal(socketMode, 0o600);
+      const rpcStatus = await daemonRpc(socketPath, {
+        version: 1,
+        id: "status-one",
+        command: "daemon",
+        args: ["status"],
+      });
+      assert.equal(rpcStatus.ok, true);
+      assert.equal(rpcStatus.result.running, true);
+      assert.equal(rpcStatus.result.pid, firstDaemon.pid);
+      const unsupported = await daemonRpc(socketPath, {
+        version: 1,
+        id: "stop-one",
+        command: "daemon",
+        args: ["stop"],
+      });
+      assert.equal(unsupported.ok, false);
+      assert.equal(unsupported.error.code, "UNSUPPORTED_COMMAND");
 
       const rotated = await runCli(
         ["--api", apiBase, "--ws", wsBase, "auth", "set-key", "silicon-key-two"],
@@ -365,7 +407,7 @@ test("v2 sends protocol metadata and reuses a pending client id after failure", 
       assert.equal(requests[1].payload.content.client_id, requests[0].payload.content.client_id);
       assert.equal(requests[0].headers["x-chat-protocol"], "1");
       assert.equal(requests[0].headers["x-silicon-key"], "test-key");
-      assert.match(requests[0].headers["user-agent"], /silicon-interface-cli\/2\.0\.3/);
+      assert.match(requests[0].headers["user-agent"], /silicon-interface-cli\/2\.0\.4/);
       assert.match(requests[0].headers.traceparent, /^00-[a-f0-9]{32}-[a-f0-9]{16}-01$/);
     } finally {
       await closeServer(mock.server);
@@ -1508,7 +1550,7 @@ test("Carbon registration completes both verified channels and binds a CLI devic
         carbon: { carbon_id: "carbon-1", username: "new-carbon" },
         device_id: "cli-device",
       });
-      assert.deepEqual(calls.map((call) => call.path), [
+      assert.deepEqual(calls.map((call) => call.path).filter((value) => value !== "/api/v1/ws/ticket"), [
         "/api/v1/auth/carbon-id/available",
         "/api/v1/auth/register/email/start",
         "/api/v1/auth/register/email/verify",

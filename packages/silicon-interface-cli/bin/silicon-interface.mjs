@@ -8,6 +8,7 @@ import { Buffer } from "node:buffer";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
+import { createServer } from "node:net";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -17,7 +18,7 @@ const CONFIG_DIR = path.join(
   process.env.SILICON_INTERFACE_HOME || path.join(os.homedir(), ".silicon-interface"),
 );
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const VERSION = "2.0.3";
+const VERSION = "2.0.4";
 const CHAT_PROTOCOL = 1;
 const PING_INTERVAL_MS = 25_000;
 const PING_TIMEOUT_MS = 62_500;
@@ -34,6 +35,10 @@ const VOICE_JOB_DEFAULT_TIMEOUT_MS = 300_000;
 const VOICE_JOB_DEFAULT_POLL_MS = 1_000;
 const STREAM_STATE_VERSION = 2;
 const OPERATION_JOURNAL_VERSION = 1;
+const DAEMON_RPC_VERSION = 1;
+const DAEMON_RPC_MAX_REQUEST_BYTES = 1024 * 1024;
+const DAEMON_RPC_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const DAEMON_RPC_MAX_IN_FLIGHT = 8;
 
 class UsageError extends Error {}
 
@@ -900,7 +905,8 @@ function printJson(value, compact = false) {
 }
 
 function printResult(ctx, value, renderHuman) {
-  if (ctx.config.json) printJson(value);
+  if (typeof ctx.rpcResult === "function") ctx.rpcResult(value);
+  else if (ctx.config.json) printJson(value);
   else if (ctx.config.jsonl) {
     const rows = Array.isArray(value) ? value : [value];
     for (const row of rows) printJson(row, true);
@@ -3802,21 +3808,250 @@ async function startDaemonProcess(
   fs.closeSync(stdout);
   fs.closeSync(stderr);
   fs.writeFileSync(pidPath(root), `${child.pid}\n`, { mode: 0o600 });
+  const readyDeadline = Date.now() + 2_000;
+  while (Date.now() < readyDeadline) {
+    if (!isProcessAlive(child.pid)) {
+      let detail = "";
+      try {
+        detail = fs.readFileSync(logPath("err.log", root), "utf8").trim().slice(-2_000);
+      } catch {
+        // The child may have exited before opening its log.
+      }
+      throw new Error(
+        `Silicon Interface daemon exited before its RPC socket was ready${detail ? `: ${detail}` : ""}`,
+      );
+    }
+    try {
+      if (fs.lstatSync(daemonRpcPath(root)).isSocket()) break;
+    } catch {
+      // The daemon creates the socket after loading its durable state.
+    }
+    await sleep(25);
+  }
+  try {
+    if (!fs.lstatSync(daemonRpcPath(root)).isSocket()) {
+      throw new Error("Silicon Interface daemon RPC socket did not become ready");
+    }
+  } catch (error) {
+    await stopDaemonProcess({ root });
+    throw error;
+  }
   return { started: true, alreadyRunning: false, pid: child.pid };
+}
+
+function daemonRpcPath(root = interfaceRoot()) {
+  if (process.env.SILICON_INTERFACE_RPC_SOCKET) return process.env.SILICON_INTERFACE_RPC_SOCKET;
+  const preferred = path.join(stateDir(root), "daemon.sock");
+  if (Buffer.byteLength(preferred, "utf8") <= 96) return preferred;
+  const identity = createHash("sha256").update(path.resolve(root)).digest("hex").slice(0, 24);
+  return path.join(os.tmpdir(), `silicon-interface-${identity}.sock`);
+}
+
+function daemonRpcDiscoveryPath(root = interfaceRoot()) {
+  return path.join(stateDir(root), "daemon-rpc.json");
+}
+
+const DAEMON_RPC_COMMANDS = new Set([
+  "me",
+  "rooms",
+  "send",
+  "send-file",
+  "tts",
+  "read",
+  "media",
+  "stt",
+  "progress",
+  "work",
+  "remote-browser",
+  "remote_browser",
+  "take-back",
+  "takeback",
+  "crons",
+  "cron",
+  "daemon",
+]);
+
+function rpcError(error) {
+  if (error instanceof UsageError) {
+    return { code: "USAGE", message: String(error.message || "invalid request").slice(0, 2_000) };
+  }
+  if (error instanceof ApiError) {
+    return {
+      code: "API_ERROR",
+      message: String(error.message || "API request failed").slice(0, 2_000),
+      status: Number(error.status) || 0,
+      ...(error.body == null ? {} : { body: error.body }),
+    };
+  }
+  return { code: "INTERNAL", message: String(error?.message || error || "RPC failed").slice(0, 2_000) };
+}
+
+function writeRpcResponse(socket, response) {
+  let wire = Buffer.from(`${JSON.stringify(response)}\n`, "utf8");
+  if (wire.length > DAEMON_RPC_MAX_RESPONSE_BYTES) {
+    wire = Buffer.from(`${JSON.stringify({
+      version: DAEMON_RPC_VERSION,
+      id: response.id || "",
+      ok: false,
+      error: { code: "RESPONSE_TOO_LARGE", message: "RPC response exceeded its safe limit" },
+    })}\n`, "utf8");
+  }
+  socket.end(wire);
+}
+
+function startDaemonRpcServer(ctx, { root = interfaceRoot() } = {}) {
+  const socketPath = daemonRpcPath(root);
+  const recordedPid = readPid(root);
+  if (recordedPid && recordedPid !== process.pid && isProcessAlive(recordedPid)) {
+    throw new Error(`another Silicon Interface daemon is already running (PID ${recordedPid})`);
+  }
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(path.dirname(socketPath), 0o700);
+  } catch {
+    // Best effort on filesystems without POSIX modes.
+  }
+  try {
+    const existing = fs.lstatSync(socketPath);
+    if (!existing.isSocket()) throw new Error(`refusing to replace non-socket RPC path: ${socketPath}`);
+    fs.rmSync(socketPath, { force: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+
+  let inFlight = 0;
+  const server = createServer((socket) => {
+    let buffered = Buffer.alloc(0);
+    let handled = false;
+    socket.setTimeout(30_000, () => socket.destroy());
+    socket.on("data", async (chunk) => {
+      if (handled) return;
+      buffered = Buffer.concat([buffered, chunk]);
+      if (buffered.length > DAEMON_RPC_MAX_REQUEST_BYTES) {
+        handled = true;
+        writeRpcResponse(socket, {
+          version: DAEMON_RPC_VERSION,
+          id: "",
+          ok: false,
+          error: { code: "REQUEST_TOO_LARGE", message: "RPC request exceeded its safe limit" },
+        });
+        return;
+      }
+      const newline = buffered.indexOf(0x0a);
+      if (newline < 0) return;
+      handled = true;
+      let request;
+      try {
+        request = JSON.parse(buffered.subarray(0, newline).toString("utf8"));
+      } catch {
+        writeRpcResponse(socket, {
+          version: DAEMON_RPC_VERSION,
+          id: "",
+          ok: false,
+          error: { code: "INVALID_REQUEST", message: "RPC request was not valid JSON" },
+        });
+        return;
+      }
+      const id = typeof request?.id === "string" ? request.id.slice(0, 128) : "";
+      const command = typeof request?.command === "string" ? request.command : "";
+      const args = Array.isArray(request?.args) && request.args.every((value) => typeof value === "string")
+        ? request.args
+        : null;
+      if (request?.version !== DAEMON_RPC_VERSION || !id || !command || args === null) {
+        writeRpcResponse(socket, {
+          version: DAEMON_RPC_VERSION,
+          id,
+          ok: false,
+          error: { code: "INVALID_REQUEST", message: "RPC request contract is invalid" },
+        });
+        return;
+      }
+      if (!DAEMON_RPC_COMMANDS.has(command) || (command === "daemon" && (args[0] || "status") !== "status")) {
+        writeRpcResponse(socket, {
+          version: DAEMON_RPC_VERSION,
+          id,
+          ok: false,
+          error: { code: "UNSUPPORTED_COMMAND", message: `command '${command}' is not available over daemon RPC` },
+        });
+        return;
+      }
+      if (inFlight >= DAEMON_RPC_MAX_IN_FLIGHT) {
+        writeRpcResponse(socket, {
+          version: DAEMON_RPC_VERSION,
+          id,
+          ok: false,
+          error: { code: "BUSY", message: "daemon RPC concurrency limit reached" },
+        });
+        return;
+      }
+      inFlight += 1;
+      let result;
+      let resultSet = false;
+      const rpcCtx = {
+        ...ctx,
+        config: { ...ctx.config, json: true, jsonl: false },
+        rpcResult(value) {
+          result = value;
+          resultSet = true;
+        },
+      };
+      try {
+        await dispatch(rpcCtx, command, args);
+        if (!resultSet) throw new Error(`command '${command}' did not produce an RPC result`);
+        writeRpcResponse(socket, { version: DAEMON_RPC_VERSION, id, ok: true, result });
+      } catch (error) {
+        writeRpcResponse(socket, { version: DAEMON_RPC_VERSION, id, ok: false, error: rpcError(error) });
+      } finally {
+        inFlight -= 1;
+      }
+    });
+    socket.on("error", () => {});
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.removeListener("error", reject);
+      try {
+        fs.chmodSync(socketPath, 0o600);
+      } catch {
+        // Best effort on filesystems without POSIX modes.
+      }
+      atomicWriteJson(daemonRpcDiscoveryPath(root), {
+        version: DAEMON_RPC_VERSION,
+        socket: socketPath,
+        pid: process.pid,
+      });
+      resolve({
+        server,
+        socketPath,
+        async close() {
+          await new Promise((done) => server.close(() => done()));
+          fs.rmSync(socketPath, { force: true });
+          fs.rmSync(daemonRpcDiscoveryPath(root), { force: true });
+        },
+      });
+    });
+  });
 }
 
 async function cmdDaemon(ctx, args) {
   const [sub = "status", ...rest] = args;
   if (sub === "run") {
     const { options } = parseOptions(rest, ["noSync", "noSpool", "once", "quiet"]);
-    await runDurableListen(ctx, {
-      target: "all",
-      print: !options.quiet,
-      spool: !options.noSpool,
-      once: Boolean(options.once),
-      sync: !options.noSync,
-      syncLimit: numberOption(options.syncLimit, 200, { min: 1, max: 500 }),
-    });
+    const rpc = await startDaemonRpcServer(ctx);
+    try {
+      await runDurableListen(ctx, {
+        target: "all",
+        print: !options.quiet,
+        spool: !options.noSpool,
+        once: Boolean(options.once),
+        sync: !options.noSync,
+        syncLimit: numberOption(options.syncLimit, 200, { min: 1, max: 500 }),
+      });
+    } finally {
+      await rpc.close();
+    }
     return;
   }
 

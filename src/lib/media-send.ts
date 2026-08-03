@@ -451,33 +451,33 @@ export async function prepareMediaOutboxPayload(
   }
   const uploadedPayload = preparedUploadedMediaPayload(entry);
   const uploadedMediaId = uploadedPayload?.content.media_id;
-  if (
+  const canResumeUploadedMedia =
     uploadedPayload &&
     typeof uploadedMediaId === "string" &&
     stored.mediaId === uploadedMediaId &&
-    (stored.state === "completed" || stored.state === "cleanup")
-  ) {
-    return uploadedPayload;
-  }
-  const mediaId = await dependencies.upload({
-    clientId: spec.uploadClientId ?? entry.clientId,
-    outboxClientId: entry.clientId,
-    sourceClientId,
-    file: stored.blob ?? undefined,
-    filename: spec.filename,
-    mime: spec.mime,
-    kind: spec.kind,
-    roomId: entry.roomId,
-    meta: spec.completionMeta,
-    retainSourceUntilEventAck: true,
-    onProgress,
-    xhrRef,
-    signal,
-  });
-  // Voice delivery is authoritative once its bytes reach Glass. Older durable
-  // outbox rows may still carry the retired `transcribe: true` flag; ignore it
-  // for voice so retrying a pre-release failure cannot be blocked by STT.
-  const transcript = spec.transcribe && spec.kind !== "voice"
+    (stored.state === "completed" || stored.state === "cleanup");
+  const mediaId = canResumeUploadedMedia
+    ? uploadedMediaId
+    : await dependencies.upload({
+        clientId: spec.uploadClientId ?? entry.clientId,
+        outboxClientId: entry.clientId,
+        sourceClientId,
+        file: stored.blob ?? undefined,
+        filename: spec.filename,
+        mime: spec.mime,
+        kind: spec.kind,
+        roomId: entry.roomId,
+        meta: spec.completionMeta,
+        retainSourceUntilEventAck: true,
+        onProgress,
+        xhrRef,
+        signal,
+      });
+  // A direct Carbon ↔ Silicon voice intent deliberately carries
+  // `transcribe: true`. This gate is replay-safe: after a crash, a completed
+  // upload resumes from its stable media id and requests/reads the same
+  // authoritative transcript before the event is released.
+  const transcript = spec.transcribe
     ? await dependencies.transcribe(mediaId)
     : null;
   return {

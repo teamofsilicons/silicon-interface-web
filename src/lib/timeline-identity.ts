@@ -360,6 +360,21 @@ export function applyTimelineIdentity<T extends Event>(
   } as T & TimelineEvent;
 }
 
+/** Decorate the HTTP response for one exact client intent before it enters
+ * shared persistence or websocket-style fan-out. Recovery-owned media sends
+ * do not have a mounted composer callback, so delaying this binding until the
+ * outbox acknowledgement would briefly append a second timeline row. */
+export function decorateDirectAcceptedTimelineEvent<T extends Event>(
+  ownerId: string,
+  clientId: string,
+  event: T,
+): T & TimelineEvent {
+  const identity =
+    bindAcceptedTimelineEvent(ownerId, clientId, event) ??
+    readTimelineIdentity(ownerId, clientId);
+  return identity ? applyTimelineIdentity(event, identity, true) : (event as T & TimelineEvent);
+}
+
 /** Decorate a history/socket event only from Glass' device-scoped, top-level
  * transaction_id. content.client_id is deliberately never inspected. */
 export function decorateAuthoritativeTimelineEvent<T extends Event>(

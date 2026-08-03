@@ -5,6 +5,7 @@ import {
   ArrowClockwise,
   ArrowBendUpLeft,
   Check,
+  CircleNotch,
   Clock,
   Copy,
   DotsThree,
@@ -1326,6 +1327,26 @@ function VoiceTranscript({ text }: { text: string }) {
   );
 }
 
+function VoiceTranscriptionPending({
+  waitsForSilicon,
+}: {
+  waitsForSilicon: boolean;
+}) {
+  return (
+    <div
+      className="flex items-center gap-1.5 text-xs italic opacity-70"
+      role="status"
+      aria-live="polite"
+    >
+      <CircleNotch className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+      <span>
+        Transcription in progress…
+        {waitsForSilicon ? " Will send to Silicon once done." : ""}
+      </span>
+    </div>
+  );
+}
+
 function replyVoiceLabel(ev: Event): string {
   const c = ev.content as Record<string, unknown>;
   const duration = typeof c.duration_ms === "number" ? Math.round(c.duration_ms / 1000) : null;
@@ -1733,7 +1754,13 @@ function BodyContent({
           ) : (
             <DurableVoiceAttachment event={event} peaks={localPeaks} />
           )}
-          {c.transcript ? <VoiceTranscript text={String(c.transcript)} /> : null}
+          {c.transcript ? (
+            <VoiceTranscript text={String(c.transcript)} />
+          ) : c.transcription_status === "pending" ? (
+            <VoiceTranscriptionPending
+              waitsForSilicon={c.transcription_delivery_gate === "silicon"}
+            />
+          ) : null}
         </div>
       );
     }

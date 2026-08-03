@@ -20,21 +20,28 @@ test("a paused voice recording exposes a playable encoded snapshot", async () =>
   assert.match(recorder, /<SiliconAudio[\s\S]*peaks=\{waveform\}/);
 });
 
-test("voice audio sends independently of optional transcription", async () => {
+test("voice transcription state is visible and only direct Silicon delivery waits", async () => {
   const composer = await source("src/components/chat/composer.tsx");
   const mediaSend = await source("src/lib/media-send.ts");
+  const room = await source("src/components/chat/room-view.tsx");
+  const bubble = await source("src/components/chat/message-bubble.tsx");
 
-  assert.match(composer, /transcribe: false/);
-  assert.doesNotMatch(
-    composer,
-    /stageMediaSendIntent\(\{[\s\S]{0,1000}kind: "voice"[\s\S]{0,1000}transcribe: true/,
+  assert.match(composer, /transcription_status: "pending"/);
+  assert.match(composer, /transcribe: voiceTranscriptionDeliveryGate/);
+  assert.match(composer, /completionMeta,\s*\/\/ Direct Carbon/);
+  assert.match(
+    room,
+    /voiceTranscriptionDeliveryGate=\{[\s\S]*room\.kind === "direct" && peer\?\.kind === "silicon"/,
   );
-  assert.match(mediaSend, /spec\.transcribe && spec\.kind !== "voice"/);
+  assert.match(mediaSend, /const transcript = spec\.transcribe/);
+  assert.match(bubble, /Transcription in progress…/);
+  assert.match(bubble, /Will send to Silicon once done\./);
 });
 
 test("voice sends have one durable network owner and one recovery surface", async () => {
   const composer = await source("src/components/chat/composer.tsx");
   const bubble = await source("src/components/chat/message-bubble.tsx");
+  const page = await source("src/app/chat/page.tsx");
 
   const uploadVoice = composer.slice(
     composer.indexOf("const uploadVoice = async"),
@@ -47,6 +54,10 @@ test("voice sends have one durable network owner and one recovery surface", asyn
   assert.match(composer, /A matching outbox row already renders in the timeline/);
   assert.match(bubble, /function DurableVoiceAttachment/);
   assert.match(bubble, /readMediaUpload\(`carbon:\$\{owner\}`, clientId\)/);
+  assert.match(
+    page,
+    /const accepted = decorateDirectAcceptedTimelineEvent\([\s\S]*?persistEventFrames\([\s\S]*?event: accepted/,
+  );
 });
 
 test("failed local messages never expose a server unsend action", async () => {

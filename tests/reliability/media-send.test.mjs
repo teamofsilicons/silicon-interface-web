@@ -463,7 +463,7 @@ test("GIF sending archives the compact picker rendition", () => {
   assert.doesNotMatch(sender, /sourceUrl: gif\.downloadUrl/);
 });
 
-test("a legacy failed voice retry never waits for transcription", async () => {
+test("a transcription-gated voice retry waits before building the event", async () => {
   await deleteDatabase("silicon-interface-media-outbox");
   installBrowser();
   const owner = "legacy-voice-retry-owner";
@@ -490,11 +490,11 @@ test("a legacy failed voice retry never waits for transcription", async () => {
     upload: async () => "voice-media-id",
     transcribe: async () => {
       transcriptionCalls += 1;
-      throw new Error("retired STT gate must not run");
+      return "authoritative transcript";
     },
   });
 
-  assert.equal(transcriptionCalls, 0);
+  assert.equal(transcriptionCalls, 1);
   assert.deepEqual(payload, {
     type: "m.voice",
     content: {
@@ -502,6 +502,7 @@ test("a legacy failed voice retry never waits for transcription", async () => {
       media_id: "voice-media-id",
       mime: "audio/webm",
       filename: "voice.webm",
+      transcript: "authoritative transcript",
     },
   });
 });

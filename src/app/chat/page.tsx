@@ -258,6 +258,7 @@ import {
   heldSendRequiringAttention,
   isAmbiguousSendFailure,
 } from "@/lib/operation-recovery";
+import { decorateDirectAcceptedTimelineEvent } from "@/lib/timeline-identity";
 import {
   currentStorageIssue,
   STORAGE_HEALTH_EVENT,
@@ -2568,18 +2569,23 @@ function ChatPageInner() {
               expectedDeviceId,
             );
             if (event) {
+              const accepted = decorateDirectAcceptedTimelineEvent(
+                ownerId,
+                it.clientId,
+                event,
+              );
               await persistEventFrames(ownerId, [
-                { type: "event", room_id: it.roomId, event },
+                { type: "event", room_id: it.roomId, event: accepted },
               ]);
               if (it.operation === "media") {
                 await acknowledgeMediaSend(ownerId, it, undefined, {
                   roomId: it.roomId,
-                  event,
+                  event: accepted,
                 });
               } else {
                 await ackOutbox(ownerId, it.clientId, {
                   roomId: it.roomId,
-                  event,
+                  event: accepted,
                 });
               }
               return "accepted";
@@ -2738,19 +2744,24 @@ function ChatPageInner() {
                 current.clientId,
                 control.signal,
               );
+              const accepted = decorateDirectAcceptedTimelineEvent(
+                ownerId,
+                current.clientId,
+                event,
+              );
               await persistEventFrames(
                 ownerId,
-                [{ type: "event", room_id: current.roomId, event }],
+                [{ type: "event", room_id: current.roomId, event: accepted }],
               );
               if (current.operation === "media") {
                 await acknowledgeMediaSend(ownerId, current, undefined, {
                   roomId: current.roomId,
-                  event,
+                  event: accepted,
                 });
               } else {
                 await ackOutbox(ownerId, current.clientId, {
                   roomId: current.roomId,
-                  event,
+                  event: accepted,
                 });
               }
             } finally {

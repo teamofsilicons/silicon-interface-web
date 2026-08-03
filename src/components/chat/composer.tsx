@@ -230,6 +230,9 @@ interface Props {
   onClearReply?: () => void;
   /** Delay text sends in direct silicon chats so nearby follow-ups can merge. */
   delayTextForSilicon?: boolean;
+  /** Direct Silicon chats hold voice delivery until Glass returns the
+   * authoritative transcript. Other rooms transcribe after normal delivery. */
+  voiceTranscriptionDeliveryGate?: boolean;
   /** Fires when a silicon text enters / leaves the held state, so the parent
    *  can reflect "holding the message…" on the progress line. */
   onHoldStateChange?: (holding: boolean) => void;
@@ -802,6 +805,7 @@ export function Composer({
   replyTo,
   onClearReply,
   delayTextForSilicon = false,
+  voiceTranscriptionDeliveryGate = false,
   onHoldStateChange,
   cancelQueuedRef,
   clearHeldClientRef,
@@ -3126,9 +3130,16 @@ export function Composer({
       const filename = `voice-${clientId}.${extension}`;
       const peaks = await computePeaks(blob).catch(() => null);
       const resolvedDuration = peaks?.duration_ms || durationMs;
-      const eventContent = {
+      const completionMeta = {
         duration_ms: resolvedDuration,
         ...(peaks ? { peaks: peaks.peaks } : {}),
+      };
+      const eventContent = {
+        ...completionMeta,
+        transcription_status: "pending",
+        ...(voiceTranscriptionDeliveryGate
+          ? { transcription_delivery_gate: "silicon" }
+          : {}),
       };
       const entry = await stageMediaSendIntent({
         outboxOwnerId: outboxOwner,
@@ -3142,10 +3153,11 @@ export function Composer({
         mime,
         optimisticContent: { ...eventContent, mime },
         eventContent,
-        completionMeta: eventContent,
-        // Glass queues authoritative speech-to-text after accepting the
-        // message. Audio delivery must never wait on an optional STT provider.
-        transcribe: false,
+        completionMeta,
+        // Direct Carbon ↔ Silicon voice notes are not released until Glass
+        // has produced its authoritative transcript. Other rooms keep the
+        // normal post-delivery transcription path.
+        transcribe: voiceTranscriptionDeliveryGate,
         replyTo: replyEventId,
       });
       // The voice draft and media/outbox journals are now strict-commit safe.

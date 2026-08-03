@@ -6224,6 +6224,9 @@ export function RoomView({
             replyTo={replyTo}
             onClearReply={() => updateReplyDraft(null)}
             delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
+            voiceTranscriptionDeliveryGate={
+              room.kind === "direct" && peer?.kind === "silicon"
+            }
             onHoldStateChange={setHoldingMessage}
             cancelQueuedRef={cancelQueuedRef}
             clearHeldClientRef={clearHeldClientRef}

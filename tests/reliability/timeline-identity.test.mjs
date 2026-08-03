@@ -8,6 +8,7 @@ import {
   authoritativeActionId,
   bindAcceptedTimelineEvent,
   canEditAuthoritativeTimelineEvent,
+  decorateDirectAcceptedTimelineEvent,
   hasAuthoritativeEventId,
   identityFromPersistedFields,
   readTimelineIdentity,
@@ -171,6 +172,33 @@ test("socket-before-response aliases collapse without a remount", async () => {
   assert.equal(afterHttp.length, 1);
   assert.equal(timelineRenderKey(afterHttp[0]), keyAfterSocket);
   assert.equal(afterHttp[0].content.body, "http");
+});
+
+test("a recovery-owned direct response replaces its pending timeline row", async () => {
+  installBrowser();
+  const owner = "timeline-recovery-owner";
+  const identity = await allocateTimelineIdentity(owner, "voice-client", "web-a", 4_000);
+  const local = localEvent(identity, "voice pending");
+  const response = serverEvent(
+    "event-voice",
+    "2035-02-03T04:05:06.000Z",
+    "voice accepted",
+    null,
+  );
+  const accepted = decorateDirectAcceptedTimelineEvent(
+    owner,
+    "voice-client",
+    response,
+  );
+
+  const rows = reconcileTimelineEvents([local], [accepted], {
+    ownerId: owner,
+    currentDevice: "web-a",
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event_id, "event-voice");
+  assert.equal(rows[0]._clientId, "voice-client");
+  assert.equal(timelineRenderKey(rows[0]), identity.localKey);
 });
 
 test("snippet reload retains identity and exact transaction dedupes history", async () => {

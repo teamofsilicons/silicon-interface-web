@@ -92,3 +92,55 @@
 - `git diff --check`: passed.
 
 final result: passed
+
+---
+
+# Design QA Addendum — Voice Transcription Pending State
+
+## Comparison target
+
+- Source visual truth: `/var/folders/cr/4xxx8tw93k50dllp_gz65rdm0000gn/T/TemporaryItems/NSIRD_screencaptureui_HF0nIm/Screenshot 2026-08-03 at 3.39.55 AM.png`.
+- Duplicate-state evidence: `/var/folders/cr/4xxx8tw93k50dllp_gz65rdm0000gn/T/TemporaryItems/NSIRD_screencaptureui_cbyrQi/Screenshot 2026-08-03 at 3.48.12 AM.png`.
+- Browser-rendered implementation: `/Users/codanium/Documents/silicon/silicon-interface/design-qa-assets/voice-transcription/pending-full.png`.
+- Focused implementation crop: `/Users/codanium/Documents/silicon/silicon-interface/design-qa-assets/voice-transcription/pending-crop.png`.
+- Combined comparison: `/Users/codanium/Documents/silicon/silicon-interface/design-qa-assets/voice-transcription/reference-vs-pending.png`.
+- Local route: `/dev/work-updates?view=voice-transcription`.
+- Browser viewport: 786 × 420 CSS px at device scale factor 1.
+- Source pixels: 786 × 282 at 2× density, normalized to 393 × 141.
+- Implementation pixels: 786 × 420 full view; focused crop 393 × 141 at 1× density.
+- State: outgoing direct Carbon ↔ Silicon voice note, transcription pending, local delivery waiting.
+
+## Full-view and focused comparison evidence
+
+- The implementation uses the production `MessageBubble`, `SiliconAudio`, receipt, typography, and color tokens. One voice player, one pending-status row, and one waiting receipt are rendered.
+- The focused comparison aligns the same 344 px audio-bubble width and 80 px bubble height as the normalized reference. The source is the completed-transcript state; the implementation intentionally replaces its transcript preview/link with the requested pending copy.
+- A focused comparison was required because the relevant typography and icon spacing are too small to judge reliably in the full 786 × 420 capture.
+
+## Findings
+
+- No actionable P0, P1, or P2 visual mismatch remains.
+- Fonts and typography: the pending copy inherits the reference transcript row's 12 px italic treatment and muted opacity. It remains on one line at the matched bubble width without clipping.
+- Spacing and layout rhythm: player dimensions, bubble padding, transcript-row gap, metadata placement, and square bubble treatment match the existing voice-note composition.
+- Colors and tokens: the existing sent-bubble, muted text, background, and receipt tokens are unchanged.
+- Image and icon fidelity: the existing Phosphor loading glyph and production audio controls are used; no custom-drawn substitute was introduced.
+- Copy and content: every pending transcription shows `Transcription in progress…`; only direct Carbon ↔ Silicon chats add `Will send to Silicon once done.`
+- Accessibility: the pending line is a polite live status, its spinner is hidden from assistive technology, and the voice player retains its semantic controls.
+- Duplicate-row fix: recovery-owned HTTP acceptances are bound to the original local timeline identity before persistence/fan-out, so the accepted voice event replaces the clock row instead of appending a second check-mark row.
+
+## Comparison history
+
+- Initial product evidence showed the same recording twice: one local pending row and one server-accepted row.
+- Fix: decorate the exact recovery response with the durable client timeline identity before dispatching it to the open room and before acknowledging the media outbox.
+- Post-fix evidence: the browser renders exactly one `play` control, one transcription status, and no console warning/error. The reconciliation test confirms one row survives after the direct response.
+
+## Verification
+
+- Focused reliability tests: 41/41 passed.
+- Full reliability suite: 537/537 passed.
+- Production Next.js build and TypeScript: passed.
+- Browser-rendered voice controls: 1.
+- Browser-rendered pending status rows: 1.
+- Browser console errors/warnings: none.
+- `git diff --check`: passed.
+
+final result: passed

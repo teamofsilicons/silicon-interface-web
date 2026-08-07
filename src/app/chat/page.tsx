@@ -1351,6 +1351,12 @@ function ChatPageInner() {
       setRefreshing(true);
       try {
         await refreshRoomsAuthoritatively();
+        // Only an authoritative room projection may arm the cache writer. A
+        // failed refresh leaves `rooms` holding what the cache itself produced,
+        // so writing it back would renew the cache's own write time and let a
+        // stale sidebar report itself as freshly saved on every failure.
+        roomsCacheOwnerRef.current = ownerId;
+        roomsCacheReadyRef.current = true;
         if (ownerId) void reportSyncRecovered(ownerId, undefined, ["account"]);
       } catch (e) {
         if (!(e instanceof DOMException && e.name === "AbortError") && ownerId) {
@@ -1363,8 +1369,8 @@ function ChatPageInner() {
           });
         }
       } finally {
-        roomsCacheOwnerRef.current = ownerId;
-        roomsCacheReadyRef.current = true;
+        // Never leave the shell spinning: the owner is reading cached rooms
+        // whether or not the authoritative refresh answered.
         setLoading(false);
         setRefreshing(false);
       }

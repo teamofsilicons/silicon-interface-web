@@ -689,6 +689,21 @@ export function RoomView({
   React.useLayoutEffect(() => {
     socketStateRef.current = socketState;
   }, [socketState]);
+  // Read by the room-open effect, which must not take `socketReady` as a
+  // dependency: reopening the room on every connect would discard the reader's
+  // scroll position.
+  const socketReadyRef = React.useRef(socketReady);
+  React.useLayoutEffect(() => {
+    socketReadyRef.current = socketReady;
+  }, [socketReady]);
+  // The initial window load for the currently open room, and whether a ready
+  // edge has already been observed for it. Together these let the reconnect
+  // catch-up skip the one edge whose work the initial load already did.
+  const initialWindowRef = React.useRef<{
+    roomId: string;
+    settled: Promise<boolean | undefined>;
+  } | null>(null);
+  const sawSocketReadyForRoomRef = React.useRef(false);
   // Device registration can rotate the access token immediately after boot.
   // That must not reopen the room or reclaim the reader's scroll position.
   const timelineDeviceRef = React.useRef(timelineDevice);
@@ -2132,7 +2147,12 @@ export function RoomView({
         });
       });
     };
-    loadTimelineWindow(roomId)
+    // The reconnect catch-up below also fires on the FIRST ready edge of a cold
+    // load, re-fetching the very window this call is already fetching. Publish
+    // whether this window actually landed so that one edge — and only one — can
+    // be skipped. Anything other than a proven success leaves the catch-up in
+    // place: missing frames after a drop is far worse than one extra request.
+    const initialWindow = loadTimelineWindow(roomId)
       .then(async ({ events: evs, hasMore, cursor, boundaryEventId }) => {
         if (!mounted) return;
         reportHistoryHealthy();
@@ -2148,16 +2168,22 @@ export function RoomView({
         setHydrated(true); // §2.5 — live data is in; auto-read may now run
         setLoading(false);
         finishInitialBottomPosition();
+        return true;
       })
       .catch((e) => {
-        if (!mounted) return;
+        if (!mounted) return false;
         reportHistoryFailure(e);
         if (!cachedEvents.some(isTimelineEvent) && !durableCacheAvailable) {
           toast.error(e instanceof ApiError ? e.message : String(e));
         }
         setLoading(false);
         finishInitialBottomPosition();
+        return false;
       });
+    initialWindowRef.current = { roomId, settled: initialWindow };
+    // A socket that is already live at room open has no missed window to
+    // recover, so its next ready edge is a genuine reconnect.
+    sawSocketReadyForRoomRef.current = socketReadyRef.current;
     return () => {
       mounted = false;
       cancelPendingBottomScroll();
@@ -2247,30 +2273,47 @@ export function RoomView({
       // reflow the just-rendered list ("loads again a few seconds in"). A
       // PAGE_SIZE window merges near-identically and still recovers frames
       // missed during a short drop.
-      loadTimelineWindow(room.room_id)
-        .then(({ events: evs }) => {
-          reportHistoryHealthy();
-          void persistHistoryEvents(evs).catch(() => undefined);
-          setEvents((prev) =>
-            mergeServerEvents(
-              prev,
-              evs,
-              room.room_id,
-              myUsername,
-              timelineOwner,
-              timelineDevice,
-            ),
-          );
-          // §1.7 — after a (re)connect, resync the Stemcell progress line from
-          // the cache. If the task finished, the cache was cleared by a final
-          // message; a done run without a final message retains its expandable
-          // activity history.
-          setManagerActivityState(getManagerActivityState());
-          setActiveProgress(
-            getRoomProgress(room.room_id) ?? cachedManagerProgress(room.room_id),
-          );
-        })
-        .catch((error) => reportHistoryFailure(error));
+      const pull = () => {
+        loadTimelineWindow(room.room_id)
+          .then(({ events: evs }) => {
+            reportHistoryHealthy();
+            void persistHistoryEvents(evs).catch(() => undefined);
+            setEvents((prev) =>
+              mergeServerEvents(
+                prev,
+                evs,
+                room.room_id,
+                myUsername,
+                timelineOwner,
+                timelineDevice,
+              ),
+            );
+            // §1.7 — after a (re)connect, resync the Stemcell progress line from
+            // the cache. If the task finished, the cache was cleared by a final
+            // message; a done run without a final message retains its expandable
+            // activity history.
+            setManagerActivityState(getManagerActivityState());
+            setActiveProgress(
+              getRoomProgress(room.room_id) ?? cachedManagerProgress(room.room_id),
+            );
+          })
+          .catch((error) => reportHistoryFailure(error));
+      };
+      const initial = initialWindowRef.current;
+      const firstEdgeForThisRoom = !sawSocketReadyForRoomRef.current;
+      sawSocketReadyForRoomRef.current = true;
+      if (firstEdgeForThisRoom && initial?.roomId === room.room_id) {
+        // A cold load opens the room and connects the socket at nearly the same
+        // moment, so this edge is not a reconnect: nothing was missed, and the
+        // initial window is already fetching the identical page. Wait for it and
+        // pull only if it did not actually land — an in-flight load that later
+        // fails, or one that failed already, still needs this recovery.
+        void initial.settled.then((loaded) => {
+          if (!loaded) pull();
+        }).catch(() => pull());
+      } else {
+        pull();
+      }
     }
     prevReadyRef.current = socketReady;
   }, [

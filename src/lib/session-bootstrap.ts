@@ -35,6 +35,28 @@ export function canPaintRetainedSession(
   return !explicitlyLoggedOut && (hasInMemoryAuthority || hasKnownOwner);
 }
 
+/**
+ * Whether the landing page may send this browser straight into the app.
+ *
+ * The renewable credential is an HttpOnly cookie, so the landing page cannot
+ * inspect it — it can only ask Glass, and waiting for that answer is what made
+ * a returning owner watch a marketing page before their chats. Every input here
+ * is a synchronous local read, so the common case routes on the first frame.
+ * `sessionExpired` must be proof (see `renewableSessionExpired`), never a
+ * guess: an unknown answer keeps the owner in the app, where a failed restore
+ * is recoverable, rather than stranding them on a page they did not ask for.
+ */
+export function canEnterAppFromLanding(
+  hasInMemoryAuthority: boolean,
+  hasKnownOwner: boolean,
+  explicitlyLoggedOut: boolean,
+  sessionExpired: boolean,
+): boolean {
+  if (explicitlyLoggedOut) return false;
+  if (hasInMemoryAuthority) return true;
+  return hasKnownOwner && !sessionExpired;
+}
+
 /** Only an explicit client/auth rejection proves that browser authority ended. */
 export function isAuthoritativeSessionRevocation(
   status: number | null,

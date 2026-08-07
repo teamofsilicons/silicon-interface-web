@@ -21,6 +21,77 @@ const carbon = {
   created_at: "",
 };
 
+test("protected calls wait for browser restoration before attaching credentials", async () => {
+  const previousFetch = globalThis.fetch;
+  let releaseRefresh;
+  let markRefreshStarted;
+  const refreshStarted = new Promise((resolve) => { markRefreshStarted = resolve; });
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  let protectedRequests = 0;
+
+  authStore.clear("revoked");
+  authStore.setCarbon(carbon);
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/auth/refresh")) {
+      markRefreshStarted();
+      await refreshGate;
+      return Response.json({ access: "restored-access" });
+    }
+    if (url.endsWith("/api/v1/carbons/me")) {
+      protectedRequests += 1;
+      assert.equal(
+        new Headers(init.headers).get("authorization"),
+        "Bearer restored-access",
+      );
+      return Response.json(carbon);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    const request = api.me();
+    await refreshStarted;
+    await Promise.resolve();
+    assert.equal(protectedRequests, 0);
+    releaseRefresh();
+    await request;
+    assert.equal(protectedRequests, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    authStore.clear("revoked");
+  }
+});
+
+test("missing browser authority logs out before a protected request is sent", async () => {
+  const previousFetch = globalThis.fetch;
+  let protectedRequests = 0;
+
+  authStore.clear("revoked");
+  authStore.setCarbon(carbon);
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/auth/refresh")) {
+      return Response.json(
+        { detail: "Browser session is missing.", code: "web_session_missing" },
+        { status: 401 },
+      );
+    }
+    protectedRequests += 1;
+    throw new Error(`protected request should not be sent: ${url}`);
+  };
+
+  try {
+    await assert.rejects(api.me(), (error) => error.status === 401);
+    assert.equal(protectedRequests, 0);
+    assert.equal(authStore.getAccess(), null);
+    assert.equal(authStore.getCarbon(), null);
+  } finally {
+    globalThis.fetch = previousFetch;
+    authStore.clear("revoked");
+  }
+});
+
 test("late 401 responses reuse a concurrently refreshed access token", async () => {
   const previousFetch = globalThis.fetch;
   let releaseLate401;
@@ -93,7 +164,7 @@ test("an in-flight refresh cannot sign the user back in after logout", async () 
   }
 });
 
-test("a rejected access token is dropped without deleting the known owner", async () => {
+test("a confirmed anonymous refresh clears the stale local owner", async () => {
   const previousFetch = globalThis.fetch;
   authStore.setTokens("expired-access", "expired-refresh", carbon);
   globalThis.fetch = async (input) => {
@@ -109,7 +180,7 @@ test("a rejected access token is dropped without deleting the known owner", asyn
   try {
     await assert.rejects(api.me(), (error) => error.status === 401);
     assert.equal(authStore.getAccess(), null);
-    assert.equal(authStore.getCarbon().carbon_id, carbon.carbon_id);
+    assert.equal(authStore.getCarbon(), null);
     assert.equal(authStore.wasExplicitlyLoggedOut(), false);
   } finally {
     globalThis.fetch = previousFetch;

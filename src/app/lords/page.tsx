@@ -10,10 +10,17 @@ import {
   MagnifyingGlass,
 } from "@phosphor-icons/react/dist/ssr";
 
+import ChatPage from "@/app/chat/page";
 import { ObservedChatTimeline } from "@/components/chat/observed-chat-timeline";
+import { LordsSidebarAddonProvider } from "@/components/chat/lords-sidebar-addon";
 import { RoomList } from "@/components/chat/room-list";
 import { IdAvatar } from "@/components/profile/id-avatar";
-import { TeamFilterBar, TeamSlider, type ChatFilters } from "@/components/teams/team-filter-bar";
+import {
+  OTHERS_TAB,
+  TeamFilterBar,
+  TeamSlider,
+  type ChatFilters,
+} from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -21,11 +28,75 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useLordSocket } from "@/lib/lords-ws";
 import { roomDisplay } from "@/lib/peers";
-import type { Event, LordIdentity, LordTeam, Room, RoomPeer } from "@/lib/types";
+import { normalizeRooms } from "@/lib/room-shape";
+import {
+  loadCachedMemberships,
+  saveCachedMemberships,
+} from "@/lib/sidebar-cache";
+import type {
+  Carbon,
+  Event,
+  LordIdentity,
+  LordTeam,
+  Room,
+  RoomPeer,
+  TeamMembership,
+} from "@/lib/types";
+import { useContacts } from "@/lib/use-contacts";
 import { cn } from "@/lib/utils";
 
 const NORMAL_INTERFACE = "https://interface.teamofsilicons.com";
 const INITIAL_FILTERS: ChatFilters = { unread: false, kinds: [], teams: [] };
+const LORD_EVENT_BATCH = 200;
+const SIDEBAR_DEFAULT = 320;
+const SIDEBAR_MIN = 240;
+const SIDEBAR_MAX = 560;
+const SIDEBAR_STORAGE = "silicon-interface:sidebar-width";
+
+function loadSidebarWidth(): number {
+  if (typeof window === "undefined") return SIDEBAR_DEFAULT;
+  try {
+    const value = Number(window.localStorage.getItem(SIDEBAR_STORAGE));
+    return Number.isFinite(value) && value >= SIDEBAR_MIN && value <= SIDEBAR_MAX
+      ? value
+      : SIDEBAR_DEFAULT;
+  } catch {
+    return SIDEBAR_DEFAULT;
+  }
+}
+
+function isLoggedInIdentity(
+  identity: LordIdentity | null | undefined,
+  carbon: Carbon | null | undefined,
+): boolean {
+  return Boolean(
+    identity &&
+    carbon &&
+    identity.kind === "carbon" &&
+    identity.id === carbon.carbon_id,
+  );
+}
+
+function selfIdentity(carbon: Carbon): LordIdentity {
+  return {
+    kind: "carbon",
+    id: carbon.carbon_id,
+    handle: carbon.username,
+    name: carbon.name || carbon.username,
+    profile_photo_url: carbon.profile_photo_url,
+    profile_ascii_url: carbon.profile_ascii_url ?? null,
+    is_lord: carbon.is_lord,
+    team_slugs: [],
+  };
+}
+
+function mergeObservedEvents(current: readonly Event[], incoming: readonly Event[]): Event[] {
+  const byId = new Map(current.map((event) => [event.event_id, event]));
+  for (const event of incoming) byId.set(event.event_id, event);
+  return [...byId.values()].sort((left, right) =>
+    left.event_id.localeCompare(right.event_id),
+  );
+}
 
 function IdentityAvatar({ identity, size = 34 }: { identity: LordIdentity; size?: number }) {
   return (
@@ -67,6 +138,7 @@ function IdentityPicker({
   loading,
   teamName,
   connected,
+  selfId,
   onSelect,
 }: {
   identities: LordIdentity[];
@@ -74,6 +146,7 @@ function IdentityPicker({
   loading: boolean;
   teamName: string;
   connected: boolean;
+  selfId: string | null;
   onSelect: (identity: LordIdentity) => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -85,6 +158,7 @@ function IdentityPicker({
       .toLowerCase()
       .includes(normalized),
   );
+  const viewingSelf = identity?.kind === "carbon" && identity.id === selfId;
 
   return (
     <Popover
@@ -115,9 +189,13 @@ function IdentityPicker({
             {identity?.name ?? "No identities"}
           </span>
           <span className="flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground">
-            <Eye className="h-3 w-3 shrink-0" />
+            {viewingSelf ? null : <Eye className="h-3 w-3 shrink-0" />}
             <span className="truncate">
-              {identity ? `${identity.kind} · ${teamName} · read-only` : teamName}
+              {identity
+                ? viewingSelf
+                  ? `you · ${teamName}`
+                  : `${identity.kind} · ${teamName} · read-only`
+                : teamName}
             </span>
           </span>
         </span>
@@ -144,6 +222,7 @@ function IdentityPicker({
         <div className="max-h-80 overflow-y-auto py-1">
           {filtered.map((candidate) => {
             const active = identity?.kind === candidate.kind && identity.id === candidate.id;
+            const candidateIsSelf = candidate.kind === "carbon" && candidate.id === selfId;
             return (
               <button
                 key={`${candidate.kind}:${candidate.id}`}
@@ -162,9 +241,12 @@ function IdentityPicker({
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium">{candidate.name}</span>
                   <span className="block truncate font-mono text-[10px] text-muted-foreground">
-                    {candidate.kind} · @{candidate.handle}
+                    {candidateIsSelf ? "you · " : `${candidate.kind} · `}@{candidate.handle}
                   </span>
                 </span>
+                {candidateIsSelf ? (
+                  <span className="label-mono border px-1.5 py-0.5 text-[9px]">you</span>
+                ) : null}
                 {candidate.kind === "silicon" ? (
                   <span
                     className={cn(
@@ -192,7 +274,9 @@ export default function LordsPage() {
   const [teams, setTeams] = React.useState<LordTeam[]>([]);
   const [filters, setFilters] = React.useState<ChatFilters>(INITIAL_FILTERS);
   const [identities, setIdentities] = React.useState<LordIdentity[]>([]);
-  const [identity, setIdentity] = React.useState<LordIdentity | null>(null);
+  const [identity, setIdentity] = React.useState<LordIdentity | null>(
+    () => carbon ? selfIdentity(carbon) : null,
+  );
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [room, setRoom] = React.useState<Room | null>(null);
   const [viewedTeamSlug, setViewedTeamSlug] = React.useState<string | null>(null);
@@ -201,9 +285,26 @@ export default function LordsPage() {
   const [loadingIdentities, setLoadingIdentities] = React.useState(true);
   const [loadingRooms, setLoadingRooms] = React.useState(false);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
+  const [hasOlderEvents, setHasOlderEvents] = React.useState(false);
+  const [loadingOlderEvents, setLoadingOlderEvents] = React.useState(false);
+  const [sidebarW, setSidebarW] = React.useState(loadSidebarWidth);
   const [error, setError] = React.useState("");
 
-  const team = filters.teams[0] ?? "all";
+  const viewingSelf = isLoggedInIdentity(identity, carbon);
+  const ownerId = carbon?.carbon_id ?? null;
+  const contacts = useContacts(ownerId);
+  const [peerTeams, setPeerTeams] = React.useState<Map<string, Set<string>>>(
+    () => loadCachedMemberships(ownerId) ?? new Map(),
+  );
+  const activeRoomIdRef = React.useRef<string | null>(room?.room_id ?? null);
+  const loadingOlderEventsRef = React.useRef(false);
+  const filtersRef = React.useRef(filters);
+  React.useLayoutEffect(() => {
+    activeRoomIdRef.current = room?.room_id ?? null;
+  }, [room?.room_id]);
+  React.useLayoutEffect(() => {
+    filtersRef.current = filters;
+  }, [filters]);
 
   React.useEffect(() => {
     if (!carbon?.is_lord) return;
@@ -216,84 +317,277 @@ export default function LordsPage() {
     return () => { alive = false; };
   }, [carbon?.is_lord]);
 
+  // Match normal Interface team filtering: direct rooms often have no
+  // `team_slug`, so infer every room's teams from the public ids of its peers.
+  // Seed from the shared sidebar cache to avoid flashing unrelated rooms while
+  // fresh rosters load.
+  React.useEffect(() => {
+    let alive = true;
+    const cached = loadCachedMemberships(ownerId);
+    if (cached) {
+      queueMicrotask(() => {
+        if (alive) setPeerTeams(cached);
+      });
+    }
+    if (teams.length === 0) {
+      if (!cached) {
+        queueMicrotask(() => {
+          if (alive) setPeerTeams(new Map());
+        });
+      }
+      return () => {
+        alive = false;
+      };
+    }
+    Promise.all(
+      teams.map((candidate) =>
+        api.teamMembers(candidate.slug)
+          .then((rows) => ({ slug: candidate.slug, rows }))
+          .catch(() => ({ slug: candidate.slug, rows: [] as TeamMembership[] })),
+      ),
+    ).then((results) => {
+      if (!alive) return;
+      const next = new Map<string, Set<string>>();
+      for (const { slug, rows } of results) {
+        for (const membership of rows) {
+          if (!membership.member_public_id) continue;
+          const key = `${membership.member_kind}:${membership.member_public_id}`;
+          const slugs = next.get(key) ?? new Set<string>();
+          slugs.add(slug);
+          next.set(key, slugs);
+        }
+      }
+      setPeerTeams(next);
+      saveCachedMemberships(ownerId, next);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [ownerId, teams]);
+
+  // Lords identities carry the owning-team projection directly. Keep it as a
+  // fallback for Silicons whose public membership row is absent or stale, and
+  // for observed rooms where the selected Silicon is intentionally removed
+  // from `peers` to render the chat from that Silicon's perspective.
+  const identityTeams = React.useMemo(() => {
+    const next = new Map<string, Set<string>>();
+    for (const candidate of identities) {
+      next.set(`${candidate.kind}:${candidate.id}`, new Set(candidate.team_slugs));
+    }
+    return next;
+  }, [identities]);
+
+  const roomTeamSlugs = React.useCallback((candidate: Room): Set<string> => {
+    const slugs = new Set<string>();
+    if (candidate.team_slug) slugs.add(candidate.team_slug);
+    for (const peer of candidate.peers ?? []) {
+      for (const slug of peerTeams.get(`${peer.kind}:${peer.id}`) ?? []) slugs.add(slug);
+      for (const slug of identityTeams.get(`${peer.kind}:${peer.id}`) ?? []) slugs.add(slug);
+    }
+    // The selected Silicon is removed from observed room peers. Its owner-team
+    // projection is therefore the only authoritative team for some direct
+    // rooms; Carbon identities continue to match Interface by the other peer.
+    if (identity?.kind === "silicon") {
+      for (const slug of identity.team_slugs) slugs.add(slug);
+    }
+    return slugs;
+  }, [identity, identityTeams, peerTeams]);
+
+  const roomMatchesFilters = React.useCallback((
+    candidate: Room,
+    selectedFilters: ChatFilters,
+  ): boolean => {
+    const selectedTeams = selectedFilters.teams.filter((slug) =>
+      teams.some((candidateTeam) => candidateTeam.slug === slug),
+    );
+    const wantOthers = selectedFilters.teams.includes(OTHERS_TAB);
+    if (selectedTeams.length === 0 && !wantOthers) return true;
+    const slugs = roomTeamSlugs(candidate);
+    return selectedTeams.some((slug) => slugs.has(slug)) || (wantOthers && slugs.size === 0);
+  }, [roomTeamSlugs, teams]);
+
+  const roomMatchesSelectedTeam = React.useCallback(
+    (candidate: Room): boolean => roomMatchesFilters(candidate, filters),
+    [filters, roomMatchesFilters],
+  );
+
   React.useEffect(() => {
     if (!carbon?.is_lord) return;
     let alive = true;
-    api.lordIdentities(team)
+    api.lordIdentities("all")
       .then((value) => {
         if (!alive) return;
-        setIdentities(value.identities);
-        setLoadingRooms(value.identities.length > 0);
+        const projectedSelf =
+          value.identities.find((candidate) => isLoggedInIdentity(candidate, carbon)) ??
+          selfIdentity(carbon);
+        const ordered = [
+          projectedSelf,
+          ...value.identities.filter((candidate) => !isLoggedInIdentity(candidate, carbon)),
+        ];
+        setIdentities(ordered);
+        setLoadingRooms(ordered.length > 0);
         setIdentity((current) =>
-          current && value.identities.some(
+          current && ordered.some(
             (candidate) => candidate.kind === current.kind && candidate.id === current.id,
           )
             ? current
-            : (value.identities[0] ?? null),
+            : projectedSelf,
         );
         setError("");
       })
       .catch((reason: Error) => alive && setError(reason.message))
       .finally(() => alive && setLoadingIdentities(false));
     return () => { alive = false; };
-  }, [carbon?.is_lord, team]);
+  }, [carbon]);
+
+  const loadRoomsForIdentity = React.useCallback(async (target: LordIdentity) => {
+    const value = await api.lordIdentityRooms(target.kind, target.id);
+    return normalizeRooms(value.rooms)
+      .map((candidate) => projectRoomForIdentity(candidate, target));
+  }, []);
 
   const refreshRooms = React.useCallback(async (target = identity) => {
-    if (!target) return;
-    const value = await api.lordIdentityRooms(target.kind, target.id);
-    const observed = value.rooms.map((candidate) => projectRoomForIdentity(candidate, target));
-    setRooms(observed);
+    if (!target || isLoggedInIdentity(target, carbon)) return;
+    const nextRooms = await loadRoomsForIdentity(target);
+    const visibleRooms = nextRooms.filter(roomMatchesSelectedTeam);
+    setRooms(nextRooms);
     setRoom((current) => {
       const retained = current
-        ? observed.find((candidate) => candidate.room_id === current.room_id)
+        ? nextRooms.find((candidate) => candidate.room_id === current.room_id)
         : null;
-      return retained ?? observed.find((candidate) => candidate.last_event !== null) ?? observed[0] ?? null;
+      const activeRooms = visibleRooms.filter(
+        (candidate) => candidate.lord_access_state !== "revoked",
+      );
+      return retained
+        ?? activeRooms.find((candidate) => candidate.last_event !== null)
+        ?? activeRooms[0]
+        ?? visibleRooms.find((candidate) => candidate.last_event !== null)
+        ?? visibleRooms[0]
+        ?? null;
     });
-  }, [identity]);
+  }, [carbon, identity, loadRoomsForIdentity, roomMatchesSelectedTeam]);
 
   React.useEffect(() => {
-    if (!identity) return;
+    if (!identity || isLoggedInIdentity(identity, carbon)) return;
     let alive = true;
-    api.lordIdentityRooms(identity.kind, identity.id)
-      .then((value) => {
+    loadRoomsForIdentity(identity)
+      .then((nextRooms) => {
         if (!alive) return;
-        const observed = value.rooms.map((candidate) => projectRoomForIdentity(candidate, identity));
-        const initialRoom = observed.find((candidate) => candidate.last_event !== null) ?? observed[0] ?? null;
-        setRooms(observed);
+        const visibleRooms = nextRooms.filter((candidate) =>
+          roomMatchesFilters(candidate, filtersRef.current),
+        );
+        const activeRooms = visibleRooms.filter(
+          (candidate) => candidate.lord_access_state !== "revoked",
+        );
+        const initialRoom =
+          activeRooms.find((candidate) => candidate.last_event !== null)
+          ?? activeRooms[0]
+          ?? visibleRooms.find((candidate) => candidate.last_event !== null)
+          ?? visibleRooms[0]
+          ?? null;
+        setRooms(nextRooms);
         setRoom(initialRoom);
+        setEvents([]);
+        setHasOlderEvents(false);
+        setLoadingOlderEvents(false);
         setLoadingEvents(initialRoom !== null);
         setError("");
       })
       .catch((reason: Error) => alive && setError(reason.message))
       .finally(() => alive && setLoadingRooms(false));
     return () => { alive = false; };
-  }, [identity]);
+  }, [carbon, identity, loadRoomsForIdentity, roomMatchesFilters]);
 
   const refreshEvents = React.useCallback(async (target = room) => {
-    if (!target) return;
-    const value = await api.lordRoomEvents(target.room_id, { limit: 200 });
-    setEvents(value.events);
-  }, [room]);
+    if (!target || viewingSelf) return;
+    const value = await api.lordRoomEvents(target.room_id, { limit: LORD_EVENT_BATCH });
+    if (activeRoomIdRef.current !== target.room_id) return;
+    setEvents((current) => mergeObservedEvents(current, value.events));
+  }, [room, viewingSelf]);
 
   React.useEffect(() => {
-    if (!room) return;
+    if (!room || viewingSelf) return;
     let alive = true;
-    api.lordRoomEvents(room.room_id, { limit: 200 })
+    api.lordRoomEvents(room.room_id, { limit: LORD_EVENT_BATCH })
       .then((value) => {
-        if (alive) setEvents(value.events);
+        if (!alive) return;
+        setEvents(value.events);
+        setHasOlderEvents(value.events.length === LORD_EVENT_BATCH);
       })
       .catch((reason: Error) => alive && setError(reason.message))
       .finally(() => alive && setLoadingEvents(false));
     return () => { alive = false; };
-  }, [room]);
+  }, [room, viewingSelf]);
+
+  const loadOlderEvents = React.useCallback(async (): Promise<number> => {
+    const targetRoomId = room?.room_id;
+    const before = events[0]?.event_id;
+    if (
+      viewingSelf ||
+      !targetRoomId ||
+      !before ||
+      !hasOlderEvents ||
+      loadingOlderEventsRef.current
+    ) return 0;
+    loadingOlderEventsRef.current = true;
+    setLoadingOlderEvents(true);
+    try {
+      const value = await api.lordRoomEvents(targetRoomId, {
+        before,
+        limit: LORD_EVENT_BATCH,
+      });
+      if (activeRoomIdRef.current !== targetRoomId) return 0;
+      const known = new Set(events.map((event) => event.event_id));
+      const added = value.events.filter((event) => !known.has(event.event_id)).length;
+      setEvents((current) => mergeObservedEvents(current, value.events));
+      setHasOlderEvents(value.events.length === LORD_EVENT_BATCH);
+      return added;
+    } catch (reason) {
+      if (activeRoomIdRef.current === targetRoomId) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
+      return 0;
+    } finally {
+      loadingOlderEventsRef.current = false;
+      if (activeRoomIdRef.current === targetRoomId) setLoadingOlderEvents(false);
+    }
+  }, [events, hasOlderEvents, room?.room_id, viewingSelf]);
 
   const onWake = React.useCallback((wake: { room_id: string }) => {
     void refreshRooms().catch((reason: Error) => setError(reason.message));
-    if (room && wake.room_id === room.room_id) {
+    if (!viewingSelf && room && wake.room_id === room.room_id) {
       void refreshEvents(room).catch((reason: Error) => setError(reason.message));
     }
-  }, [refreshEvents, refreshRooms, room]);
-  const connected = useLordSocket(Boolean(carbon?.is_lord), onWake);
+  }, [refreshEvents, refreshRooms, room, viewingSelf]);
+  const lordConnected = useLordSocket(Boolean(carbon?.is_lord), onWake);
+  const startResize = React.useCallback((event: React.PointerEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startW = sidebarW;
+    let lastW = startW;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (moveEvent: PointerEvent) => {
+      lastW = Math.max(
+        SIDEBAR_MIN,
+        Math.min(SIDEBAR_MAX, startW + (moveEvent.clientX - startX)),
+      );
+      setSidebarW(lastW);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try {
+        window.localStorage.setItem(SIDEBAR_STORAGE, String(lastW));
+      } catch {
+        /* storage may be unavailable; the width remains in React state */
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, [sidebarW]);
 
   if (!carbon?.is_lord) {
     return (
@@ -310,10 +604,19 @@ export default function LordsPage() {
     );
   }
 
-  const selectedTeam = teams.find((candidate) => candidate.slug === team);
-  const selectedTeamName = selectedTeam?.name ?? "All teams";
+  const selectedTeams = teams.filter((candidate) => filters.teams.includes(candidate.slug));
+  const selectedTeamName = selectedTeams.length === 1
+    ? selectedTeams[0].name
+    : selectedTeams.length > 1
+      ? `${selectedTeams.length} teams`
+      : filters.teams.includes(OTHERS_TAB)
+        ? "Others"
+        : "All teams";
+  const hasOtherRooms = rooms.some((candidate) => roomTeamSlugs(candidate).size === 0);
   const normalizedQuery = sidebarQuery.trim().toLowerCase();
   const filteredRooms = rooms.filter((candidate) => {
+    if (!roomMatchesSelectedTeam(candidate)) return false;
+    if (filters.unread && !candidate.unread) return false;
     if (
       filters.kinds.length > 0 &&
       !filters.kinds.some((kind) => candidate.peer_kinds.includes(kind))
@@ -329,8 +632,14 @@ export default function LordsPage() {
       ...candidate.peers.flatMap((peer) => [peer.name, peer.handle, peer.id]),
     ].join(" ").toLowerCase().includes(normalizedQuery);
   });
-  const conversationRooms = filteredRooms.filter((candidate) => candidate.last_event !== null);
-  const noConnectionRooms = filteredRooms.filter((candidate) => candidate.last_event === null);
+  const activeRooms = filteredRooms.filter(
+    (candidate) => candidate.lord_access_state !== "revoked",
+  );
+  const revokedRooms = filteredRooms.filter(
+    (candidate) => candidate.lord_access_state === "revoked",
+  );
+  const conversationRooms = activeRooms.filter((candidate) => candidate.last_event !== null);
+  const noConnectionRooms = activeRooms.filter((candidate) => candidate.last_event === null);
 
   const identityBySender = new Map<string, LordIdentity>();
   for (const candidate of identities) {
@@ -359,6 +668,9 @@ export default function LordsPage() {
 
   const chooseIdentity = (candidate: LordIdentity) => {
     if (identity?.kind === candidate.kind && identity.id === candidate.id) return;
+    if (!isLoggedInIdentity(candidate, carbon)) {
+      setFilters((current) => ({ ...current, unread: false }));
+    }
     setIdentity(candidate);
     setRooms([]);
     setRoom(null);
@@ -366,27 +678,32 @@ export default function LordsPage() {
     setEvents([]);
     setLoadingRooms(true);
     setLoadingEvents(false);
+    setHasOlderEvents(false);
+    setLoadingOlderEvents(false);
     setSidebarQuery("");
   };
 
-  const changeTeam = (next: ChatFilters) => {
-    const currentTeam = team === "all" ? null : team;
-    const nextTeam = next.teams.find((slug) => slug !== currentTeam) ?? next.teams[0] ?? null;
-    setFilters((current) => ({
-      ...current,
-      teams: nextTeam ? [nextTeam] : [],
-    }));
-    setLoadingIdentities(true);
-    setLoadingRooms(false);
-    setLoadingEvents(false);
-    setIdentities([]);
-    setIdentity(null);
-    setRooms([]);
-    setRoom(null);
-    setViewedTeamSlug(null);
-    setEvents([]);
-    setSidebarQuery("");
-  };
+  if (viewingSelf && identity) {
+    return (
+      <LordsSidebarAddonProvider
+        addon={(
+          <IdentityPicker
+            identities={identities}
+            identity={identity}
+            loading={loadingIdentities}
+            teamName="Lord oversight"
+            connected={lordConnected}
+            selfId={carbon.carbon_id}
+            onSelect={chooseIdentity}
+          />
+        )}
+        initialFilters={filters}
+        onFiltersChange={setFilters}
+      >
+        <ChatPage />
+      </LordsSidebarAddonProvider>
+    );
+  }
 
   const selectRoom = (roomId: string) => {
     const candidate = rooms.find((entry) => entry.room_id === roomId);
@@ -394,6 +711,8 @@ export default function LordsPage() {
     setViewedTeamSlug(null);
     setRoom(candidate);
     setEvents([]);
+    setHasOlderEvents(false);
+    setLoadingOlderEvents(false);
     setLoadingEvents(true);
   };
 
@@ -406,20 +725,28 @@ export default function LordsPage() {
       ) : null}
 
       <aside
+        style={{ ["--sidebar-w" as string]: `${sidebarW}px` }}
         className={cn(
-          "relative z-10 min-h-0 w-full shrink-0 flex-col border-r bg-sidebar shadow-[1px_0_14px_-3px_rgba(60,50,36,0.12)] md:flex md:w-[360px]",
+          "relative z-10 min-h-0 w-full shrink-0 flex-col border-r bg-sidebar shadow-[1px_0_14px_-3px_rgba(60,50,36,0.12)] md:flex md:w-[var(--sidebar-w)]",
           room || viewedTeamSlug ? "hidden" : "flex",
         )}
       >
+        <div
+          onPointerDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="resize sidebar"
+          className="absolute right-0 top-0 z-10 hidden h-full w-1.5 cursor-col-resize transition-colors hover:bg-border md:block"
+        />
         <TeamSlider
           filters={filters}
-          onChange={changeTeam}
+          onChange={setFilters}
           teams={teams.map((candidate) => ({
             slug: candidate.slug,
             name: candidate.name,
             logo_url: candidate.logo_url,
           }))}
-          hasOthers={false}
+          hasOthers={hasOtherRooms}
           hasObserving={false}
           onOpenTeamSettings={(slug) => {
             setRoom(null);
@@ -433,7 +760,8 @@ export default function LordsPage() {
           identity={identity}
           loading={loadingIdentities}
           teamName={selectedTeamName}
-          connected={connected}
+          connected={lordConnected}
+          selfId={carbon.carbon_id}
           onSelect={chooseIdentity}
         />
         <div className="flex h-[52px] items-stretch border-b">
@@ -453,8 +781,10 @@ export default function LordsPage() {
           flatSections={[
             { id: "conversations", label: "Conversations", rooms: conversationRooms },
             { id: "no-connection", label: "No connection", rooms: noConnectionRooms },
+            { id: "revoked-access", label: "Revoked access", rooms: revokedRooms },
           ]}
           myHandle={identity?.handle}
+          contacts={contacts.byPeer}
           selectedId={room?.room_id ?? null}
           onSelect={selectRoom}
           loading={loadingIdentities || loadingRooms}
@@ -501,7 +831,9 @@ export default function LordsPage() {
               <h2 className="truncate text-sm font-semibold tracking-tight">{roomTitle.name}</h2>
               <p className="flex items-center gap-1 truncate text-xs text-muted-foreground">
                 <Eye className="h-3 w-3 shrink-0" />
-                observing as {identity.name} · read-only
+                observing as {identity.name}
+                {room.lord_access_state === "revoked" ? " · revoked access" : ""}
+                {" · read-only"}
               </p>
             </div>
           </header>
@@ -513,11 +845,16 @@ export default function LordsPage() {
             identity={identity}
             identityBySender={identityBySender}
             loading={loadingEvents}
+            hasMore={hasOlderEvents}
+            loadingOlder={loadingOlderEvents}
+            onLoadOlder={loadOlderEvents}
           />
 
           <div className="flex items-center justify-center gap-2 border-t bg-muted/40 px-6 py-4 text-xs text-muted-foreground">
             <Eye className="h-3.5 w-3.5" />
-            Oversight mode is read-only. No messages, receipts, or presence are emitted.
+            {room.lord_access_state === "revoked"
+              ? "Access was revoked. The retained history remains available only in Lords."
+              : "Oversight mode is read-only. No messages, receipts, or presence are emitted."}
           </div>
         </section>
       ) : (
@@ -526,7 +863,8 @@ export default function LordsPage() {
             <Crown className="mx-auto h-7 w-7" />
             <h2 className="text-2xl font-bold tracking-tight">Lords oversight</h2>
             <p className="text-sm text-muted-foreground">
-              Pick an identity and a conversation to view Interface from their perspective.
+              Use your own identity to message normally, or pick another identity to observe
+              Interface from their perspective.
             </p>
           </div>
         </section>

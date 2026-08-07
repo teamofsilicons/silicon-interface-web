@@ -461,13 +461,109 @@ test("initial draft manifest clears only clean server-synced copies", async () =
   }));
   const drafts = await import("../../src/lib/drafts.ts");
   assert.equal(
-    await drafts.reconcileServerDraftManifest([], ["synced-room", "unsynced-room"]),
+    await drafts.reconcileServerDraftManifest(
+      [],
+      ["synced-room", "unsynced-room"],
+      { authoritativeAbsence: true },
+    ),
     true,
   );
   assert.equal(drafts.getDraft("synced-room"), "");
   assert.equal(drafts.getDraft("unsynced-room"), "never uploaded");
-  assert.equal(JSON.parse(storage.getItem(`${prefix}synced-room`)).localClearedAt > 0, true);
+  const cleared = JSON.parse(storage.getItem(`${prefix}synced-room`));
+  assert.equal(cleared.localClearedAt, 0);
+  assert.equal(cleared.manifestAbsentThroughVersion, 4);
   assert.equal(JSON.parse(storage.getItem(`${prefix}unsynced-room`)).dirty, true);
+});
+
+test("cached initial draft absence cannot wipe a later clean draft", async () => {
+  const storage = new MemoryStorage();
+  installBrowser(storage);
+  const owner = `cached-draft-manifest-${Date.now()}`;
+  const roomId = "cached-manifest-room";
+  storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: owner }));
+  const key = `silicon-interface:draft-v2:carbon:${owner}:${roomId}`;
+  const active = {
+    room_id: roomId,
+    text: "survive reload",
+    attachments: [],
+    reply_to_event_id: "",
+    reply_to_snapshot: {},
+    version: 4,
+    updated_at: "2026-08-03T00:00:00Z",
+    content_updated_at: "2026-08-03T00:00:00Z",
+    origin_device: "reload-device",
+  };
+  storage.setItem(key, JSON.stringify({
+    ...active,
+    dirty: false,
+    focused: false,
+    lastLocalEditAt: Date.parse(active.content_updated_at),
+    lastServerSyncAt: Date.now(),
+  }));
+
+  const drafts = await import("../../src/lib/drafts.ts");
+  await drafts.reconcileServerDraftManifest(
+    [],
+    [roomId],
+    { authoritativeAbsence: false },
+  );
+
+  assert.equal(drafts.getDraft(roomId), "survive reload");
+  assert.equal(JSON.parse(storage.getItem(key)).text, "survive reload");
+});
+
+test("manifest-owned absence ignores an equal-version replay without issuing DELETE", async () => {
+  const storage = new MemoryStorage();
+  installBrowser(storage);
+  const owner = `manifest-delete-guard-${Date.now()}`;
+  const roomId = "manifest-delete-guard-room";
+  storage.setItem("silicon-interface:carbon", JSON.stringify({ carbon_id: owner }));
+  const key = `silicon-interface:draft-v2:carbon:${owner}:${roomId}`;
+  const active = {
+    room_id: roomId,
+    text: "stale positive replay",
+    attachments: [],
+    reply_to_event_id: "",
+    reply_to_snapshot: {},
+    version: 7,
+    updated_at: "2026-08-03T00:00:00Z",
+    content_updated_at: "2026-08-03T00:00:00Z",
+    origin_device: "older-connection",
+  };
+  storage.setItem(key, JSON.stringify({
+    ...active,
+    dirty: false,
+    focused: false,
+    lastLocalEditAt: Date.parse(active.content_updated_at),
+    lastServerSyncAt: Date.now(),
+  }));
+
+  const { api } = await import("../../src/lib/api.ts");
+  const drafts = await import("../../src/lib/drafts.ts");
+  const originalDelete = api.deleteDraft;
+  let deletes = 0;
+  api.deleteDraft = async () => {
+    deletes += 1;
+    throw new Error("manifest absence must never authorize DELETE");
+  };
+  try {
+    await drafts.reconcileServerDraftManifest(
+      [],
+      [roomId],
+      { authoritativeAbsence: true },
+    );
+    await drafts.applyServerDraft(active);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(drafts.getDraft(roomId), "");
+    assert.equal(deletes, 0);
+    const saved = JSON.parse(storage.getItem(key));
+    assert.equal(saved.localClearedAt, 0);
+    assert.equal(saved.manifestAbsentThroughVersion, 7);
+  } finally {
+    api.deleteDraft = originalDelete;
+  }
 });
 
 test("a superseded connection cannot commit its late page over a new generation", async () => {

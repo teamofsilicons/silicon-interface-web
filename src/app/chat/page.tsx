@@ -87,7 +87,7 @@ import {
   loadCachedMemberships,
   saveCachedMemberships,
 } from "@/lib/sidebar-cache";
-import { dropPendingPreview } from "@/lib/pending-preview";
+import { supersedeFailedPendingPreview } from "@/lib/pending-preview";
 import {
   allowDraftNavigation,
   applyServerDraft,
@@ -380,6 +380,8 @@ import {
 } from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
 import { PaymentBanner } from "@/components/teams/payment-banner";
+import { useLordsSidebarBridge } from "@/components/chat/lords-sidebar-addon";
+import { roomVisibleInSidebar } from "@/lib/sidebar-room-visibility";
 
 // Resizable sidebar bounds + storage. Width persists across reloads.
 const SB_DEFAULT = 320;
@@ -458,6 +460,9 @@ export default function ChatPage() {
 }
 
 function ChatPageInner() {
+  const lordsSidebarBridge = useLordsSidebarBridge();
+  const sidebarAddon = lordsSidebarBridge?.addon ?? null;
+  const onLordsFiltersChange = lordsSidebarBridge?.onFiltersChange;
   React.useEffect(() => {
     startClientReliabilityTelemetry();
   }, []);
@@ -622,7 +627,9 @@ function ChatPageInner() {
     [peerActivity],
   );
   const [dialogOpen, setDialogOpen] = React.useState(false);
-  const [filters, setFilters] = React.useState<ChatFilters>(loadFilters);
+  const [filters, setFilters] = React.useState<ChatFilters>(
+    () => lordsSidebarBridge?.initialFilters ?? loadFilters(),
+  );
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
   // Sidebar search — filters the conversation list by display name, handle,
   // or last message body.
@@ -962,8 +969,12 @@ function ChatPageInner() {
   const contacts = useContacts(ownerId);
   const myUsername = carbon?.username ?? null;
   const selectedRoom = rooms.find((r) => r.room_id === selected);
+  const sidebarRooms = React.useMemo(
+    () => rooms.filter(roomVisibleInSidebar),
+    [rooms],
+  );
   const [roomDetailRefreshing, setRoomDetailRefreshing] = React.useState<string | null>(null);
-  const hasObservedRooms = rooms.some((r) => r.observed);
+  const hasObservedRooms = sidebarRooms.some((r) => r.observed);
 
   // A direct chat started by id carries no team_slug from the backend, so it
   // would land in "Others" even when its peer is on one of my teams. Load each
@@ -1052,7 +1063,7 @@ function ChatPageInner() {
   // order, after the active ones. ISO timestamps sort lexicographically.
   const orderedTeams = React.useMemo(() => {
     const latestByTeam = new Map<string, string>();
-    for (const r of rooms) {
+    for (const r of sidebarRooms) {
       const at = r.last_event?.at ?? r.updated_at ?? "";
       if (!at) continue;
       for (const slug of roomTeams(r.room_id)) {
@@ -1064,11 +1075,13 @@ function ChatPageInner() {
       .map((t, i) => ({ t, i, at: latestByTeam.get(t.slug) ?? "" }))
       .sort((a, b) => (a.at === b.at ? a.i - b.i : b.at.localeCompare(a.at)))
       .map((x) => x.t);
-  }, [teams, rooms, roomTeams]);
+  }, [teams, sidebarRooms, roomTeams]);
 
   // A non-observed room that belongs to no team is an "Other"; observed rooms
   // are a separate "Observing" filter regardless of team.
-  const hasOtherRooms = rooms.some((r) => !r.observed && roomTeams(r.room_id).size === 0);
+  const hasOtherRooms = sidebarRooms.some(
+    (r) => !r.observed && roomTeams(r.room_id).size === 0,
+  );
 
   // Teams are a multi-select FILTER (not sections): none selected → show all.
   // Folders/grouping only make sense for a single team, so a single team chip
@@ -1092,7 +1105,7 @@ function ChatPageInner() {
     const teamsMap: Record<string, number> = {};
     let others = 0;
     let observing = 0;
-    for (const r of rooms) {
+    for (const r of sidebarRooms) {
       const n = r.unread_count ?? (r.unread ? 1 : 0);
       if (n <= 0) continue;
       if (r.observed) {
@@ -1107,7 +1120,7 @@ function ChatPageInner() {
       }
     }
     return { teams: teamsMap, others, observing };
-  }, [rooms, roomTeams]);
+  }, [sidebarRooms, roomTeams]);
 
   // Deep-link: `/chat?teams=slug1,slug2` pre-selects those team filter chips
   // (used by the invite page's "View team"). Applied once per distinct param.
@@ -1139,6 +1152,9 @@ function ChatPageInner() {
       /* quota / unavailable — non-fatal */
     }
   }, [filters]);
+  React.useEffect(() => {
+    onLordsFiltersChange?.(filters);
+  }, [filters, onLordsFiltersChange]);
 
   // Refs so the WS frame handler can read the latest rooms/selection without
   // re-subscribing the effect (which would risk re-processing the same frame).
@@ -1782,6 +1798,7 @@ function ChatPageInner() {
     owner: string;
     completedAt: number;
     accountPosition: number;
+    authoritativeDraftAbsence: boolean;
   } | null>(null);
   const accountProjectionHydrationRef = React.useRef<{
     owner: string;
@@ -1812,13 +1829,19 @@ function ChatPageInner() {
     accountProjectionHydrationRef.current = { owner, run };
     return run;
   }, [applyAccountUpdate, refresh, withAccountProjectionLock]);
-  const hydrateInitialSyncBundle = React.useCallback(async (owner: string): Promise<boolean> => {
+  const hydrateInitialSyncBundle = React.useCallback(async (
+    owner: string,
+    options: { authoritativeDraftAbsence?: boolean } = {},
+  ): Promise<boolean> => {
     return withAccountProjectionLock(owner, async () => {
       const bundle = await readInitialSyncBundle(owner);
       if (!bundle) return false;
+      const authoritativeDraftAbsence = options.authoritativeDraftAbsence === true;
       if (
         hydratedInitialBundleRef.current?.owner === owner &&
-        hydratedInitialBundleRef.current.completedAt === bundle.completedAt
+        hydratedInitialBundleRef.current.completedAt === bundle.completedAt &&
+        (!authoritativeDraftAbsence ||
+          hydratedInitialBundleRef.current.authoritativeDraftAbsence)
       ) {
         return true;
       }
@@ -1833,6 +1856,7 @@ function ChatPageInner() {
       const draftDurable = await reconcileServerDraftManifest(
         bundle.accountData.drafts,
         normalized.map((room) => room.room_id),
+        { authoritativeAbsence: authoritativeDraftAbsence },
       );
       if (!draftDurable) {
         throw new Error("Initial draft manifest could not be projected durably");
@@ -1847,6 +1871,11 @@ function ChatPageInner() {
         owner,
         completedAt: bundle.completedAt,
         accountPosition: bundle.checkpoint.accountPosition,
+        authoritativeDraftAbsence:
+          authoritativeDraftAbsence ||
+          (hydratedInitialBundleRef.current?.owner === owner &&
+            hydratedInitialBundleRef.current.completedAt === bundle.completedAt &&
+            hydratedInitialBundleRef.current.authoritativeDraftAbsence),
       };
       setLoading(false);
       return true;
@@ -2050,7 +2079,7 @@ function ChatPageInner() {
     // reread the snippet above. This mirrors the reference clients' durable
     // get-difference -> visible projection handoff without weakening barriers.
     for (const frame of snapshotFrames) dispatchFrame(frame, { quiet: true });
-    await hydrateInitialSyncBundle(owner);
+    await hydrateInitialSyncBundle(owner, { authoritativeDraftAbsence: true });
   }, [dispatchFrame, hydrateInitialSyncBundle]);
   const initialSnapshot = React.useCallback((
     owner: string,
@@ -3200,9 +3229,12 @@ function ChatPageInner() {
             : projected;
         }),
       );
-      // A real event landed for this room — clear any "waiting" sidebar
-      // preview so it doesn't linger beside the now-current last message.
-      if (preview !== null && !updatesExistingEvent) dropPendingPreview(rid);
+      // A committed event supersedes only failed local intents that are older
+      // than it. A blanket clear here used to erase a newer in-flight message
+      // when an earlier send's socket echo arrived out of order.
+      if (preview !== null && !updatesExistingEvent) {
+        supersedeFailedPendingPreview(rid, ev.created_at);
+      }
     } else if (f.type === "presence") {
       setRooms((prev) => prev.map((candidate) => {
         if (f.room_id && candidate.room_id !== f.room_id) return candidate;
@@ -3695,7 +3727,7 @@ function ChatPageInner() {
     const teamSlugs = filters.teams.filter((t) => t !== OTHERS_TAB && t !== OBSERVING_TAB);
     const wantOth = filters.teams.includes(OTHERS_TAB);
     const wantObs = filters.teams.includes(OBSERVING_TAB);
-    const list = rooms.filter((r) => {
+    const list = sidebarRooms.filter((r) => {
       if (!roomVisibleInArchiveView(r, showArchivedRooms, Boolean(q))) return false;
       if (r.observed) {
         if (!wantObs) return false; // observed rooms gated behind the chip
@@ -3736,11 +3768,11 @@ function ChatPageInner() {
     // bumps to the top of the list. ISO timestamps sort lexicographically.
     list.sort(compareRoomListRows);
     return list;
-  }, [rooms, filters, sidebarQuery, roomTeams, showArchivedRooms]);
+  }, [sidebarRooms, filters, sidebarQuery, roomTeams, showArchivedRooms]);
 
   const archivedRoomEntry = React.useMemo(
-    () => projectArchivedRoomListEntry(rooms),
-    [rooms],
+    () => projectArchivedRoomListEntry(sidebarRooms),
+    [sidebarRooms],
   );
   const updateRoomListPreference = React.useCallback(async (
     roomId: string,
@@ -3762,7 +3794,7 @@ function ChatPageInner() {
       loading ||
       sidebarQuery.trim() ||
       !filtersActive ||
-      rooms.length === 0 ||
+      sidebarRooms.length === 0 ||
       filtered.length !== 0
     ) return;
     let alive = true;
@@ -3774,7 +3806,14 @@ function ChatPageInner() {
     return () => {
       alive = false;
     };
-  }, [filtered.length, filters, filtersActive, loading, rooms.length, sidebarQuery]);
+  }, [
+    filtered.length,
+    filters,
+    filtersActive,
+    loading,
+    sidebarQuery,
+    sidebarRooms.length,
+  ]);
 
   // Folders aggregate across the teams currently in view: the selected teams,
   // or — when no team is selected — ALL teams (so folders still show by
@@ -4056,6 +4095,7 @@ function ChatPageInner() {
           unread={unreadByTab}
           onOpenTeamSettings={(slug) => navigate(`/chat?team=${encodeURIComponent(slug)}`)}
         />
+        {sidebarAddon}
         {/* Search + new chat. */}
         <div className="flex h-[52px] items-stretch border-b">
           <div className="flex flex-1 items-center gap-2 pl-6 pr-3 transition-colors focus-within:bg-accent/30">

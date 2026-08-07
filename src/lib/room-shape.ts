@@ -225,6 +225,9 @@ export function normalizeRoom(value: unknown): Room | null {
     unread_count: typeof raw.unread_count === "number" ? raw.unread_count : undefined,
     unread_boundary: normalizeUnreadBoundary(raw.unread_boundary),
     observed: Boolean(raw.observed),
+    ...(raw.lord_access_state === "active" || raw.lord_access_state === "revoked"
+      ? { lord_access_state: raw.lord_access_state }
+      : {}),
     last_event: lastEvent,
     list_preferences: normalizeListPreferences(raw.list_preferences),
     list_projection: normalizeListProjection(raw.list_projection, lastEvent),
@@ -250,7 +253,32 @@ export function normalizeRoom(value: unknown): Room | null {
 
 export function normalizeRooms(value: unknown): Room[] {
   if (!Array.isArray(value)) return [];
-  return value.map(normalizeRoom).filter((room): room is Room => room !== null);
+  const normalized = value.map(normalizeRoom).filter((room): room is Room => room !== null);
+  const directByPeer = new Map<string, Room>();
+  const result: Room[] = [];
+  for (const room of normalized) {
+    // A normal direct-room projection contains exactly the other principal.
+    // During a rolling deploy or cache recovery, collapse legacy duplicate
+    // room ids for that peer to the oldest ULID—the same canonical choice as
+    // the server migration. Malformed/observer projections stay untouched.
+    const peer = room.kind === "direct" && room.peers.length === 1 ? room.peers[0] : null;
+    if (!peer) {
+      result.push(room);
+      continue;
+    }
+    const key = `${peer.kind}:${peer.id}`;
+    const existing = directByPeer.get(key);
+    if (!existing) {
+      directByPeer.set(key, room);
+      result.push(room);
+      continue;
+    }
+    if (room.room_id >= existing.room_id) continue;
+    directByPeer.set(key, room);
+    const index = result.findIndex((candidate) => candidate.room_id === existing.room_id);
+    if (index !== -1) result[index] = room;
+  }
+  return result;
 }
 
 function roomActivityAt(room: Room): string {

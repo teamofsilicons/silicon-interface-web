@@ -13,6 +13,9 @@ export interface PendingPreview {
   clientId: string;
   text: string;
   status: "waiting" | "failed" | "accepted";
+  /** Local creation/retry time used to keep an older durable outbox replay
+   * from replacing a newer sidebar state. */
+  at: number;
   /** The accepted preview stays authoritative until the room list projects
    * this exact event (or a genuinely newer event) into `last_event`. */
   acceptedEventId?: string;
@@ -21,10 +24,20 @@ export interface PendingPreview {
 
 const cache = new Map<string, PendingPreview | null>();
 const acceptedClients = new Map<string, Set<string>>();
+const failedSupersededThrough = new Map<string, number>();
 const listeners = new Set<() => void>();
 
 function emit() {
   for (const fn of listeners) fn();
+}
+
+export function pendingPreviewCandidateWins(
+  current: PendingPreview | null,
+  candidate: PendingPreview,
+  failedThrough = Number.NEGATIVE_INFINITY,
+): boolean {
+  if (candidate.status === "failed" && candidate.at <= failedThrough) return false;
+  return !current || current.clientId === candidate.clientId || candidate.at >= current.at;
 }
 
 export function setPendingPreview(roomId: string, entry: PendingPreview): void {
@@ -33,11 +46,21 @@ export function setPendingPreview(roomId: string, entry: PendingPreview): void {
   // resurrect it as waiting/failed in the sidebar.
   if (acceptedClients.get(roomId)?.has(entry.clientId)) return;
   const prev = cache.get(roomId) ?? null;
+  // A slower IndexedDB restore may finish after the room list/timeline has
+  // already observed later authoritative activity. Keep the failed bubble in
+  // the timeline for recovery, but never resurrect it as the room's latest
+  // sidebar state.
+  const failedThrough = failedSupersededThrough.get(roomId) ?? Number.NEGATIVE_INFINITY;
+  // Outbox restoration is oldest-first, but it races live sends and held-send
+  // frames. The latest intent owns the one sidebar slot regardless of which
+  // asynchronous read finishes last.
+  if (!pendingPreviewCandidateWins(prev, entry, failedThrough)) return;
   if (
     prev &&
     prev.clientId === entry.clientId &&
     prev.text === entry.text &&
-    prev.status === entry.status
+    prev.status === entry.status &&
+    prev.at === entry.at
   ) {
     return;
   }
@@ -97,6 +120,34 @@ export function acceptedPendingPreviewCovered(
   const acceptedAt = Date.parse(pending.acceptedAt);
   const lastAt = Date.parse(lastEvent.at);
   return Number.isFinite(acceptedAt) && Number.isFinite(lastAt) && lastAt >= acceptedAt;
+}
+
+/** Whether a failed local intent has already been overtaken by a committed
+ * room event. Failed rows remain actionable in the open timeline, but they are
+ * no longer the conversation's latest state and must not own its sidebar row. */
+export function failedPendingPreviewSuperseded(
+  pending: PendingPreview | null,
+  lastEvent: { at?: string | null } | null | undefined,
+): boolean {
+  if (pending?.status !== "failed" || !lastEvent?.at) return false;
+  const lastAt = Date.parse(lastEvent.at);
+  return Number.isFinite(lastAt) && lastAt >= pending.at;
+}
+
+/** Record a committed room tail so late durable restores cannot bring an old
+ * failure back. This is monotonic for the lifetime of the client session. */
+export function supersedeFailedPendingPreview(roomId: string, at: string): void {
+  const observedAt = Date.parse(at);
+  if (!Number.isFinite(observedAt)) return;
+  failedSupersededThrough.set(
+    roomId,
+    Math.max(failedSupersededThrough.get(roomId) ?? Number.NEGATIVE_INFINITY, observedAt),
+  );
+  const pending = cache.get(roomId) ?? null;
+  if (pending?.status === "failed" && pending.at <= observedAt) {
+    cache.set(roomId, null);
+    emit();
+  }
 }
 
 /** Update the preview text for a still-pending message (e.g. held-queue merge),

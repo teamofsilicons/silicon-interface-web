@@ -27,6 +27,7 @@ export function AttachmentCard({
   textPreviewLoading = false,
   loading = false,
   sizeLabel,
+  footerTone = "default",
   tilt,
   onClick,
   className,
@@ -45,6 +46,8 @@ export function AttachmentCard({
   /** Shows transport/detail loading without changing the card geometry. */
   loading?: boolean;
   sizeLabel?: string | null;
+  /** Pins can match their filename footer to the message bubble they sit on. */
+  footerTone?: "default" | "sent" | "received";
   /** Degrees of rotation (pins only). Omit for a flat standalone card. */
   tilt?: number;
   onClick?: (e: React.MouseEvent) => void;
@@ -120,11 +123,29 @@ export function AttachmentCard({
         ) : null}
       </div>
       {/* Footer: small type-glyph + middle-truncated filename (+ optional size). */}
-      <div className="flex items-center gap-1 border-t px-2 py-1.5">
-        <Glyph className="h-3 w-3 shrink-0 text-muted-foreground" weight="regular" />
+      <div
+        data-attachment-footer-tone={footerTone}
+        className={cn(
+          "flex items-center gap-1 border-t px-2 py-1.5",
+          footerTone === "sent" && "bg-primary text-primary-foreground",
+          footerTone === "received" && "bg-bubble-received text-foreground",
+        )}
+      >
+        <Glyph
+          className={cn(
+            "h-3 w-3 shrink-0",
+            footerTone === "sent" ? "text-primary-foreground/75" : "text-muted-foreground",
+          )}
+          weight="regular"
+        />
         <FileName name={filename} head={4} tail={8} className="text-[11px]" />
         {sizeLabel ? (
-          <span className="label-mono ml-auto shrink-0 text-[9px] text-muted-foreground">
+          <span
+            className={cn(
+              "label-mono ml-auto shrink-0 text-[9px]",
+              footerTone === "sent" ? "text-primary-foreground/75" : "text-muted-foreground",
+            )}
+          >
             {sizeLabel}
           </span>
         ) : null}

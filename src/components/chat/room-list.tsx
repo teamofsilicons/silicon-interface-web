@@ -29,6 +29,8 @@ import { useVoiceDraftListPreview } from "@/lib/voice-drafts";
 import {
   acceptedPendingPreviewCovered,
   clearPendingPreview,
+  failedPendingPreviewSuperseded,
+  supersedeFailedPendingPreview,
   usePendingPreview,
 } from "@/lib/pending-preview";
 import { cn, sidebarTime } from "@/lib/utils";
@@ -651,11 +653,19 @@ function RoomRow({
     pendingSnapshot,
     r.last_event,
   );
+  const failedPreviewSuperseded = failedPendingPreviewSuperseded(
+    pendingSnapshot,
+    r.last_event,
+  );
   React.useEffect(() => {
-    if (!acceptedPreviewCovered || !pendingSnapshot) return;
-    clearPendingPreview(r.room_id, pendingSnapshot.clientId);
-  }, [acceptedPreviewCovered, pendingSnapshot, r.room_id]);
-  const pending = acceptedPreviewCovered ? null : pendingSnapshot;
+    if (!pendingSnapshot) return;
+    if (acceptedPreviewCovered) {
+      clearPendingPreview(r.room_id, pendingSnapshot.clientId);
+    } else if (failedPreviewSuperseded && r.last_event?.at) {
+      supersedeFailedPendingPreview(r.room_id, r.last_event.at);
+    }
+  }, [acceptedPreviewCovered, failedPreviewSuperseded, pendingSnapshot, r.last_event?.at, r.room_id]);
+  const pending = acceptedPreviewCovered || failedPreviewSuperseded ? null : pendingSnapshot;
   const serverStatus = serverRoomListStatus(r);
   const currentGroupId = groupControls?.assignmentByRoom[r.room_id];
   const currentGroup = currentGroupId

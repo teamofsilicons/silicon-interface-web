@@ -122,6 +122,7 @@ function pinTilt(key: string): number {
 function AttachmentPin({
   content,
   tilt,
+  isMine,
   replyToEventId,
   roomId,
   annotationSourceEventId,
@@ -130,6 +131,7 @@ function AttachmentPin({
 }: {
   content: Record<string, unknown>;
   tilt: number;
+  isMine: boolean;
   replyToEventId?: string;
   roomId?: string;
   annotationSourceEventId?: string;
@@ -137,8 +139,13 @@ function AttachmentPin({
   onOpenAnnotation?: (request: AnnotationOpenRequest) => void;
 }) {
   const mediaId = String(content.media_id ?? "");
-  const mime = String(content.mime ?? "").toLowerCase();
+  const contentMime = String(content.mime ?? "").toLowerCase();
   const filename = String(content.filename ?? content.caption ?? "file");
+  const seededMedia = getCachedMedia(mediaId);
+  const [resolvedMime, setResolvedMime] = React.useState(
+    () => seededMedia?.media.mime?.toLowerCase() ?? "",
+  );
+  const mime = contentMime || resolvedMime;
   const isImage = mime.startsWith("image/");
   const isVideo = mime.startsWith("video/");
   const isPdf = mime.includes("pdf") || filename.toLowerCase().endsWith(".pdf");
@@ -149,7 +156,7 @@ function AttachmentPin({
   // thumbnail and so a click can preview in place without a fetch round-trip.
   // Seed from the session cache so scrolling back to a pin paints instantly.
   const [url, setUrl] = React.useState<string | null>(
-    () => getCachedMedia(mediaId)?.download_url ?? null,
+    () => seededMedia?.download_url ?? null,
   );
   const [previewOpen, setPreviewOpen] = React.useState(false);
   React.useEffect(() => {
@@ -162,6 +169,7 @@ function AttachmentPin({
         // Cache before the alive check so a fast scroll still warms it.
         setCachedMedia(mediaId, { media: r.media, download_url: r.download_url });
         if (!alive) return;
+        if (r.media.mime) setResolvedMime(r.media.mime.toLowerCase());
         setUrl(r.download_url ?? null);
       })
       .catch(() => {});
@@ -215,6 +223,7 @@ function AttachmentPin({
               : "plain"
         }
         textPreviewLoading={textPreviewLanguage === "csv" && (textPeek.loading || !url)}
+        footerTone={isMine ? "sent" : "received"}
         tilt={tilt}
         onClick={open}
       />
@@ -484,6 +493,18 @@ export function MessageBubble({
     event.type === "m.image" &&
     !redacted &&
     isGifMedia(event.content.mime, event.content.filename);
+  // Albums carry their text as a root caption instead of as a separate
+  // bundle-linked m.text event. Keep that protocol shape atomic, but present
+  // its media with the same compact pins used by legacy attachment bundles.
+  const albumPinnedItems =
+    !redacted &&
+    event.type === "m.album" &&
+    typeof event.content.caption === "string" &&
+    event.content.caption.trim()
+      ? albumMediaItems(event)
+      : [];
+  const bundledPinnedAttachments = pinnedAttachments ?? [];
+  const pinnedAttachmentCount = bundledPinnedAttachments.length + albumPinnedItems.length;
   const holdReleaseAt =
     typeof event.content.hold_release_at === "string"
       ? event.content.hold_release_at
@@ -577,8 +598,11 @@ export function MessageBubble({
         ) : null}
         {/* §2 — attachments sent with this text peek over the bubble's top edge
             as tilted bookmarks; the negative margin tucks them onto the bubble. */}
-        {pinnedAttachments && pinnedAttachments.length > 0 && (
+        {pinnedAttachmentCount > 0 && (
           <div
+            data-attachment-pins="true"
+            role="group"
+            aria-label={`${pinnedAttachmentCount} attachments`}
             className={cn(
               "relative z-10 -mb-2 flex flex-wrap gap-1.5 px-1",
               isMine ? "justify-end" : "justify-start",
@@ -588,14 +612,32 @@ export function MessageBubble({
               inSelect && "pointer-events-none",
             )}
           >
-            {pinnedAttachments.map((att, idx) => (
+            {bundledPinnedAttachments.map((att, idx) => (
               <AttachmentPin
                 key={att.event_id || idx}
                 content={att.content as Record<string, unknown>}
                 tilt={pinTilt(att.event_id || String(idx))}
+                isMine={isMine}
                 replyToEventId={event.event_id}
                 roomId={roomId}
                 annotationSourceEventId={att.event_id}
+                onAttachAnnotations={onAttachAnnotations}
+                onOpenAnnotation={onOpenAnnotation}
+              />
+            ))}
+            {albumPinnedItems.map((item) => (
+              <AttachmentPin
+                key={`album:${item.position}:${item.media_id}`}
+                content={{
+                  media_id: item.media_id,
+                  filename: item.filename,
+                  mime: item.mime,
+                }}
+                tilt={pinTilt(`${event.event_id}:${item.position}:${item.media_id}`)}
+                isMine={isMine}
+                replyToEventId={event.event_id}
+                roomId={roomId}
+                annotationSourceEventId={event.event_id}
                 onAttachAnnotations={onAttachAnnotations}
                 onOpenAnnotation={onOpenAnnotation}
               />
@@ -1695,6 +1737,16 @@ function BodyContent({
       );
     case "m.album": {
       const items = albumMediaItems(event);
+      // A caption is the album's message body. Its attachments are rendered as
+      // compact pins above the bubble by MessageBubble, matching the older
+      // text + attachment bundle presentation without splitting the album.
+      if (typeof c.caption === "string" && c.caption.trim()) {
+        return (
+          <div className="whitespace-pre-wrap break-words text-sm">
+            {renderMarkdown(String(c.caption), mentionOptions)}
+          </div>
+        );
+      }
       return (
         <div className="space-y-1.5">
           <div
@@ -1727,11 +1779,6 @@ function BodyContent({
               </div>
             ))}
           </div>
-          {c.caption ? (
-            <div className="whitespace-pre-wrap break-words text-sm">
-              {renderMarkdown(String(c.caption), mentionOptions)}
-            </div>
-          ) : null}
         </div>
       );
     }

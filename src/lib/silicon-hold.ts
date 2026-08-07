@@ -1,17 +1,11 @@
-/**
- * Canonical quiet window for text sent to a Silicon.
- *
- * Keep this in a dependency-free module so the composer, recovery paths, and
- * reliability tests all consume one contract instead of copying durations.
- */
+/** Legacy quiet-window timing retained only for already-staged held sends. */
 export const SILICON_TEXT_HOLD_MS = 5_000;
 export const SILICON_TEXT_HOLD_SECONDS = SILICON_TEXT_HOLD_MS / 1_000;
 
-/**
- * New sends always use the five-second contract. Recovery may encounter a
- * durable intent written by the former ten-second client, so callers must
- * preserve its recorded deadline rather than silently sending it early.
- */
+/** New Silicon text messages use the normal immediate-send path. */
+export const DELAY_NEW_SILICON_TEXT_SENDS = false;
+
+/** Recovery can also encounter a durable intent from the former ten-second client. */
 export const LEGACY_SILICON_TEXT_HOLD_SECONDS = 10;
 
 export function siliconHoldReleaseAt(nowMs: number): string {

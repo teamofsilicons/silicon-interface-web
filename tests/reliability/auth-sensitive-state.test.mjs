@@ -55,6 +55,20 @@ test("only user logout persists a reload-proof logout decision", () => {
   assert.equal(authStore.wasExplicitlyLoggedOut(), false);
   assert.equal(localStorage.getItem("silicon-interface:explicit-logout"), null);
 
+  authStore.setTokens("expired-session", null, {
+    carbon_id: "expired-owner",
+    username: "expired-owner",
+    name: "Expired Owner",
+    tagline: "",
+    timezone: "UTC",
+    is_staff: false,
+    is_lord: false,
+  }, "interactive");
+  authStore.clear("expired");
+  assert.equal(authStore.getCarbon(), null);
+  assert.equal(authStore.wasExplicitlyLoggedOut(), false);
+  assert.equal(localStorage.getItem("silicon-interface:explicit-logout"), null);
+
   authStore.setTokens("second-tab-access");
   localStorage.setItem("silicon-interface:explicit-logout", "1");
   handleAuthStorageChange("silicon-interface:explicit-logout", "1");

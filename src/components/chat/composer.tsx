@@ -228,7 +228,7 @@ interface Props {
   /** When set, the next send will carry reply_to_event_id. */
   replyTo?: Event | null;
   onClearReply?: () => void;
-  /** Delay text sends in direct silicon chats so nearby follow-ups can merge. */
+  /** Legacy held-send switch; current callers keep this disabled. */
   delayTextForSilicon?: boolean;
   /** Direct Silicon chats hold voice delivery until Glass returns the
    * authoritative transcript. Other rooms transcribe after normal delivery. */
@@ -276,7 +276,7 @@ const MAX_ROWS = 12;
 // Emoji quick-picker is a fixed grid so keyboard nav is true 2-D: ←/→ move one
 // cell, ↑/↓ move a whole row (EMOJI_COLS cells).
 const EMOJI_COLS = 8; // minimum / fallback column count; actual count tracks bar width
-// Once a held silicon message is paused (you kept typing past the 5s mark),
+// Once a legacy held silicon message is paused (you kept typing past its deadline),
 // emptying the input must NOT fire the send instantly — wait at least this long
 // after the box goes empty, so a quick clear/send of a follow-up doesn't
 // prematurely flush the held message.

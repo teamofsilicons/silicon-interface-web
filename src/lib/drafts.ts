@@ -61,6 +61,9 @@ type LocalDraft = {
   lastLocalEditAt: number;
   lastJournalAt: number;
   localClearedAt: number;
+  /** Highest local draft version proven absent by a complete server manifest.
+   * This is server-owned negative knowledge, not a user-authored clear. */
+  manifestAbsentThroughVersion: number;
   lastServerSyncAt: number;
   pendingRemote?: DraftState | null;
   pendingClearAfterSend?: PendingClearAfterSend | null;
@@ -169,6 +172,7 @@ function blank(roomId: string): LocalDraft {
     lastLocalEditAt: 0,
     lastJournalAt: 0,
     localClearedAt: 0,
+    manifestAbsentThroughVersion: 0,
     lastServerSyncAt: 0,
     syncAttempts: 0,
     nextSyncAt: 0,
@@ -325,6 +329,7 @@ function normalizeDraft(roomId: string, raw: Partial<LocalDraft>): LocalDraft {
     lastLocalEditAt: finiteTimestamp(raw.lastLocalEditAt),
     lastJournalAt: finiteTimestamp(raw.lastJournalAt),
     localClearedAt: finiteTimestamp(raw.localClearedAt),
+    manifestAbsentThroughVersion: finiteTimestamp(raw.manifestAbsentThroughVersion),
     lastServerSyncAt: finiteTimestamp(raw.lastServerSyncAt),
     pendingClearAfterSend: normalizePendingClearAfterSend(raw.pendingClearAfterSend),
     syncAttempts: finiteTimestamp(raw.syncAttempts),
@@ -935,6 +940,9 @@ function scheduleServer(roomId: string) {
 function markDirty(roomId: string): Promise<boolean> {
   const draft = readLocal(roomId);
   draft.dirty = true;
+  // A new local edit supersedes a previous complete-manifest absence. Its PUT
+  // will rebase normally if Glass has advanced the tombstone version.
+  draft.manifestAbsentThroughVersion = 0;
   draft.lastLocalEditAt = Date.now();
   draft.content_updated_at = new Date(draft.lastLocalEditAt).toISOString();
   draft.origin_device = deviceId();
@@ -1232,6 +1240,7 @@ export function clearDraftAfterSend(roomId: string): Promise<boolean> {
   draft.reply_to_event_id = "";
   draft.reply_to_snapshot = {};
   draft.dirty = false;
+  draft.manifestAbsentThroughVersion = 0;
   draft.pendingRemote = null;
   draft.syncError = undefined;
   draft.syncAttempts = 0;
@@ -1466,6 +1475,7 @@ function rebaseLocalOverRemote(draft: LocalDraft, server: DraftState): Promise<b
   draft.version = Math.max(draft.version, server.version);
   draft.updated_at = server.updated_at;
   draft.origin_device = deviceId();
+  draft.manifestAbsentThroughVersion = 0;
   draft.lastServerSyncAt = Date.now();
   draft.pendingRemote = null;
   resetDraftSyncState(draft);
@@ -1491,6 +1501,9 @@ function adoptServerProjection(draft: LocalDraft, server: DraftState): Promise<b
   draft.lastLocalEditAt = remoteContentTimestamp(server);
   draft.lastServerSyncAt = Date.now();
   draft.origin_device = server.origin_device ?? "";
+  draft.manifestAbsentThroughVersion = serverDraftIsCleared(server)
+    ? Math.max(draft.manifestAbsentThroughVersion, server.version)
+    : 0;
   draft.dirty = false;
   draft.pendingRemote = null;
   draft.pendingClearAfterSend = null;
@@ -1527,6 +1540,7 @@ function reassertNewerLocalClear(draft: LocalDraft, server: DraftState): Promise
   draft.version = Math.max(draft.version, server.version);
   draft.updated_at = server.updated_at;
   draft.origin_device = deviceId();
+  draft.manifestAbsentThroughVersion = 0;
   draft.pendingRemote = null;
   draft.pendingClearAfterSend = {
     text: server.text || "",
@@ -1660,6 +1674,9 @@ export function applyServerDraft(
       draft.origin_device = server.origin_device ?? "";
       draft.lastServerSyncAt = Date.now();
     }
+    draft.manifestAbsentThroughVersion = serverDraftIsCleared(server)
+      ? Math.max(draft.manifestAbsentThroughVersion, server.version)
+      : 0;
     if (
       matchesServer &&
       server.version >= localVersion &&
@@ -1676,6 +1693,17 @@ export function applyServerDraft(
     return saved;
   }
 
+  // A complete manifest can prove that the cached clean draft at a known
+  // version was absent without supplying a tombstone row. Ignore a delayed
+  // positive replay at or below that version. Crucially, do not turn this
+  // server-owned absence into a local clear intent or issue DELETE for it.
+  if (
+    !serverDraftIsCleared(server) &&
+    server.version <= draft.manifestAbsentThroughVersion
+  ) {
+    return Promise.resolve(true);
+  }
+
   // A complete matching snapshot is an idempotent delivery acknowledgement,
   // regardless of which connection delivered it. Do not resolve an already
   // known newer conflict with an older matching replay.
@@ -1688,6 +1716,9 @@ export function applyServerDraft(
     draft.updated_at = server.updated_at;
     draft.content_updated_at = server.content_updated_at ?? draft.content_updated_at;
     draft.origin_device = server.origin_device ?? "";
+    draft.manifestAbsentThroughVersion = serverDraftIsCleared(server)
+      ? Math.max(draft.manifestAbsentThroughVersion, server.version)
+      : 0;
     draft.lastServerSyncAt = Date.now();
     draft.dirty = false;
     draft.pendingRemote = null;
@@ -1709,6 +1740,7 @@ export function applyServerDraft(
     draft.version = server.version;
     draft.updated_at = server.updated_at;
     draft.origin_device = server.origin_device ?? "";
+    draft.manifestAbsentThroughVersion = 0;
     draft.lastServerSyncAt = Date.now();
     draft.pendingRemote = null;
     resetDraftSyncState(draft);
@@ -1749,17 +1781,30 @@ export function applyServerDraft(
   return adoptServerProjection(draft, server);
 }
 
-/** Replace the server-synced draft projection from an authoritative initial
- * manifest. Absence clears only a previously synced clean copy; local edits,
+/** Reconcile a server draft manifest. Positive entries are always safe to
+ * merge by version. Absence clears a previously synced clean copy only when
+ * the caller has a freshly fetched complete account barrier; local edits,
  * queued persistence, and post-send clear recovery remain intact. */
 export async function reconcileServerDraftManifest(
   activeDrafts: DraftState[],
   visibleRoomIds: string[] = [],
+  options: { authoritativeAbsence: boolean } = { authoritativeAbsence: false },
 ): Promise<boolean> {
   if (typeof window === "undefined") return false;
   const owner = ownerKey();
   if (!owner) return false;
   const activeByRoom = new Map(activeDrafts.map((draft) => [draft.room_id, draft]));
+  let durable = true;
+  for (const server of activeByRoom.values()) {
+    durable = (await applyServerDraft(server)) && durable;
+  }
+  // Cached initial bundles are instant-paint projections, not current negative
+  // manifests. Their listed drafts are useful, but an omitted room may have
+  // gained a draft after the bundle's account barrier was committed.
+  if (!options?.authoritativeAbsence) {
+    emit();
+    return durable;
+  }
   const roomIds = new Set<string>([
     ...visibleRoomIds,
     ...activeByRoom.keys(),
@@ -1776,11 +1821,7 @@ export async function reconcileServerDraftManifest(
     // IndexedDB + the in-memory cache still cover storage-restricted profiles.
   }
 
-  let durable = true;
-  for (const [roomId, server] of activeByRoom) {
-    durable = (await applyServerDraft(server)) && durable;
-    roomIds.delete(roomId);
-  }
+  for (const roomId of activeByRoom.keys()) roomIds.delete(roomId);
   for (const roomId of roomIds) {
     await hydrateDraftJournal(roomId);
     const draft = readLocal(roomId);
@@ -1809,12 +1850,19 @@ export async function reconcileServerDraftManifest(
     draft.reply_to_snapshot = {};
     draft.content_updated_at = "";
     draft.dirty = false;
+    draft.manifestAbsentThroughVersion = Math.max(
+      draft.manifestAbsentThroughVersion,
+      draft.version,
+    );
     draft.pendingRemote = null;
     draft.syncError = undefined;
     draft.syncAttempts = 0;
     draft.nextSyncAt = 0;
     draft.syncBlocked = false;
-    draft.localClearedAt = Math.max(Date.now(), draft.localClearedAt + 1);
+    // Manifest absence is server-owned negative knowledge. Recording it as a
+    // freshly authored local clear made a delayed active replay call DELETE.
+    draft.localClearedAt = 0;
+    draft.lastServerSyncAt = Date.now();
     cancelRetry(roomId);
     cancelServerSchedule(roomId);
     durable = (await saveLocal(draft)) && durable;

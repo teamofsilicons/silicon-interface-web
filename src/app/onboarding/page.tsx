@@ -279,6 +279,11 @@ function OnboardingInner() {
       try {
         const session = await api.registerUsername(flowId, cid);
         authStore.setSession(session);
+        const browserSession = await api.confirmWebSessionAfterLogin();
+        if (browserSession === "anonymous" || browserSession === "revoked") {
+          authStore.clear(browserSession === "revoked" ? "revoked" : "expired");
+          throw new Error("We couldn’t establish a browser session. Please try again.");
+        }
         track.signedUp({ method: "onboarding" });
         // Apply name + bio in the background; failures are non-fatal.
         if (name && name !== session.carbon.name) {

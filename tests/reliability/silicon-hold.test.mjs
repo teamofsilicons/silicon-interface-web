@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DELAY_NEW_SILICON_TEXT_SENDS,
   LEGACY_SILICON_TEXT_HOLD_SECONDS,
   SILICON_TEXT_HOLD_MS,
   SILICON_TEXT_HOLD_SECONDS,
@@ -13,7 +14,11 @@ import {
   heldSendScheduleSignature,
 } from "../../src/lib/held-send-state.ts";
 
-test("new Silicon text sends share one exact five-second hold contract", () => {
+test("new Silicon text sends do not enter the legacy hold path", () => {
+  assert.equal(DELAY_NEW_SILICON_TEXT_SENDS, false);
+});
+
+test("legacy Silicon hold timing remains available for recovery", () => {
   const now = Date.parse("2026-07-13T12:00:00.000Z");
   assert.equal(SILICON_TEXT_HOLD_MS, 5_000);
   assert.equal(SILICON_TEXT_HOLD_SECONDS, 5);

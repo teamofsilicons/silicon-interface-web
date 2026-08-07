@@ -36,6 +36,14 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     let running = false;
     let anonymousConfirmations = 0;
     let retryDelay = RESTORE_RETRY_MS;
+    const unsubscribe = authStore.subscribe((change) => {
+      if (!alive || change !== "cleared") return;
+      // API-level expiry/revocation can happen long after the initial boot.
+      // Remove the protected shell immediately instead of leaving mounted
+      // children to repeat unauthenticated requests until the next reload.
+      setOk(false);
+      router.replace("/auth/login");
+    });
 
     const schedule = (delay: number) => {
       if (!alive) return;
@@ -75,9 +83,11 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         );
         if (decision === "login") {
           // A retained shell may already be visible while restoration runs.
-          // Cover it before an authoritative revocation redirects the page.
+          // Cover it and discard the stale owner before redirecting. Both an
+          // explicit revocation and a confirmed absent session are
+          // authoritative responses from the reachable refresh endpoint.
           setOk(false);
-          if (state === "revoked") authStore.clear("revoked");
+          authStore.clear(state === "revoked" ? "revoked" : "expired");
           router.replace("/auth/login");
           return;
         }
@@ -163,6 +173,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     window.addEventListener("online", onOnline);
     return () => {
       alive = false;
+      unsubscribe();
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       if (deviceRetryTimer !== null) window.clearTimeout(deviceRetryTimer);
       window.removeEventListener("online", onOnline);
@@ -210,7 +221,7 @@ export function AuthRouteGuard({ children }: { children: React.ReactNode }) {
         if (decision === "enter" || decision === "enter-and-retry") {
           router.replace("/chat");
         } else if (decision === "login") {
-          if (state === "revoked") authStore.clear("revoked");
+          authStore.clear(state === "revoked" ? "revoked" : "expired");
           setAnonymous(true);
         } else {
           schedule(decision === "confirm-anonymous" ? ANONYMOUS_CONFIRM_MS : RESTORE_RETRY_MS);

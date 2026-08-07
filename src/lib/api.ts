@@ -68,6 +68,7 @@ import type {
   ToolSetupStartPayload,
   ToolSetupStartResponse,
 } from "./tool-setup";
+import { withWebSessionAuthority } from "./web-session-authority";
 
 export interface WorkTaskPage {
   tasks: WorkTaskSnapshot[];
@@ -251,22 +252,60 @@ async function tryRefresh(): Promise<WebSessionRestoreState> {
       );
     }
   };
-  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-  // The HttpOnly refresh cookie is shared across tabs and rotates on use.
-  // Serialize refreshes across tabs so one reload cannot invalidate the cookie
-  // another reload is about to submit.
-  const coordinated: Promise<WebSessionRestoreState> = locks?.request
-    ? (async () => await locks.request(
-        "silicon-interface:web-session-refresh",
-        { mode: "exclusive" },
-        async () => await refreshOnce(),
-      ))()
-    : refreshOnce();
+  // Every response that can set/delete the shared HttpOnly cookie uses one
+  // cross-tab authority lane. This prevents late logout/registration responses
+  // from overwriting a newer login.
+  const coordinated = withWebSessionAuthority(refreshOnce);
   const inflight = coordinated.finally(() => {
     refreshInflight = null;
   });
   refreshInflight = inflight;
   return inflight;
+}
+
+async function confirmWebSessionAfterLogin(): Promise<WebSessionRestoreState> {
+  // AuthRouteGuard may have started a no-cookie probe while the user was
+  // entering their OTP. Let that old probe settle, then perform a fresh check
+  // that must observe the cookie from the successful login response.
+  if (refreshInflight) await refreshInflight;
+  return tryRefresh();
+}
+
+async function ensureRequestAuthority(): Promise<void> {
+  if (authStore.getAccess() || authStore.getSiliconKey()) return;
+  if (authStore.wasExplicitlyLoggedOut()) {
+    throw new ApiError(
+      401,
+      { code: "web_session_logged_out" },
+      "Please log in to continue.",
+    );
+  }
+
+  // AuthGuard deliberately paints owner-scoped offline state before the
+  // cookie restoration round trip finishes. Protected child effects can mount
+  // during that window, but they must join the restoration rather than emit a
+  // burst of guaranteed unauthenticated requests.
+  const state = await tryRefresh();
+  if (state === "restored" && authStore.getAccess()) return;
+
+  if (authStore.wasExplicitlyLoggedOut()) {
+    throw new ApiError(
+      401,
+      { code: "web_session_logged_out" },
+      "Please log in to continue.",
+    );
+  }
+  if (state === "revoked") authStore.clear("revoked");
+  else if (state === "anonymous" || state === "restored") authStore.clear("expired");
+
+  const unavailable = state === "unavailable";
+  throw new ApiError(
+    unavailable ? 503 : 401,
+    { code: unavailable ? "web_session_unavailable" : `web_session_${state}` },
+    unavailable
+      ? "We couldn’t restore your browser session yet."
+      : "Your session has expired. Please log in again.",
+  );
 }
 
 async function call<T>(
@@ -280,8 +319,17 @@ async function call<T>(
     signal?: AbortSignal;
     traceparent?: string;
     includeDeviceId?: boolean;
+    suppressAuthRefresh?: boolean;
   } = {},
 ): Promise<T> {
+  if (
+    opts.auth !== false &&
+    !opts.suppressAuthRefresh &&
+    !authStore.getAccess() &&
+    !authStore.getSiliconKey()
+  ) {
+    await ensureRequestAuthority();
+  }
   const traceparent = validTraceparent(opts.traceparent) || newTraceparent();
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -317,6 +365,7 @@ async function call<T>(
   if (
     resp.status === 401 &&
     opts.auth !== false &&
+    !opts.suppressAuthRefresh &&
     !authStore.getSiliconKey()
   ) {
     const currentAccess = authStore.getAccess();
@@ -341,6 +390,7 @@ async function call<T>(
         return call<T>(method, path, body, { ...opts, _retried: true, traceparent });
       }
       if (refreshState === "revoked") authStore.clear("revoked");
+      else if (refreshState === "anonymous") authStore.clear("expired");
       else authStore.expireAccess();
     }
   }
@@ -368,6 +418,9 @@ async function callBlob(
   retried = false,
   staleTokenRetried = false,
 ): Promise<Blob> {
+  if (!authStore.getAccess() && !authStore.getSiliconKey()) {
+    await ensureRequestAuthority();
+  }
   const headers: Record<string, string> = {
     "X-Chat-Protocol": "1",
     "X-Silicon-Web-Session": "1",
@@ -387,6 +440,7 @@ async function callBlob(
     const refreshState = await tryRefresh();
     if (refreshState === "restored") return callBlob(path, true);
     if (refreshState === "revoked") authStore.clear("revoked");
+    else if (refreshState === "anonymous") authStore.clear("expired");
     else authStore.expireAccess();
   }
   if (!resp.ok) {
@@ -443,12 +497,12 @@ export const api = {
     name?: string;
     app_version?: string;
     capabilities?: Record<string, unknown>;
-  }) =>
+  }) => withWebSessionAuthority(() =>
     call<{
       device: { device_id: string };
       access: string;
       refresh?: string;
-    }>("POST", "/api/v1/devices", payload),
+    }>("POST", "/api/v1/devices", payload, { suppressAuthRefresh: true })),
   chatPreferences: () =>
     call<ChatPreferences>("GET", "/api/v1/chat/preferences"),
   updateChatPreferences: (payload: {
@@ -530,7 +584,13 @@ export const api = {
   registerEmailVerify: (flow_id: string, email: string, code: string) =>
     call<{ verified: boolean }>("POST", "/api/v1/auth/register/email/verify", { flow_id, email, code }, { auth: false }),
   registerUsername: (flow_id: string, username?: string) =>
-    call<AuthSession>("POST", "/api/v1/auth/register/username", { flow_id, username }, { auth: false }),
+    withWebSessionAuthority(() =>
+      call<AuthSession>(
+        "POST",
+        "/api/v1/auth/register/username",
+        { flow_id, username },
+        { auth: false },
+      )),
   carbonIdAvailable: (value: string) =>
     call<{ available: boolean; valid: boolean; reason: string }>(
       "GET",
@@ -550,12 +610,20 @@ export const api = {
       { auth: false },
     ),
   loginVerify: (challenge_id: string, code: string) =>
-    call<JwtPair>("POST", "/api/v1/auth/login/verify", { challenge_id, code }, { auth: false }),
+    withWebSessionAuthority(() =>
+      call<JwtPair>(
+        "POST",
+        "/api/v1/auth/login/verify",
+        { challenge_id, code },
+        { auth: false },
+      )),
   refresh: (refresh?: string) =>
-    call<{ access: string; refresh?: string }>(
-      "POST", "/api/v1/auth/refresh", refresh ? { refresh } : {}, { auth: false },
-    ),
+    withWebSessionAuthority(() =>
+      call<{ access: string; refresh?: string }>(
+        "POST", "/api/v1/auth/refresh", refresh ? { refresh } : {}, { auth: false },
+      )),
   restoreWebSessionState: () => tryRefresh(),
+  confirmWebSessionAfterLogin,
   // Compatibility for non-guard entry points. Known owners retain offline and
   // transient-failure access; only an authoritative anonymous result is false.
   restoreWebSession: async () => {
@@ -997,17 +1065,6 @@ export const api = {
     { emoji, active, ...(client_id ? { client_id } : {}) },
   ),
 
-  /** Global ULID-cursor backfill across all visible rooms — replays events
-   *  created after `after` as WS-shaped frames, for reconnect resync. */
-  eventsSync: (after: string, limit = 200) =>
-    call<{
-      frames: { type: "event"; room_id: string; event: Event }[];
-      next: string | null;
-      has_more: boolean;
-    }>(
-      "GET",
-      `/api/v1/events/sync?after=${encodeURIComponent(after)}&limit=${limit}`,
-    ),
 
   initialSync: (cursor = "", limit = 50, timelineLimit = 20, signal?: AbortSignal) => {
     const query = new URLSearchParams({

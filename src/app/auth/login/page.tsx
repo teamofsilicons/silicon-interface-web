@@ -255,11 +255,21 @@ function LoginPageInner() {
     return wrap(async () => {
       try {
         const r = await api.loginVerify(challengeId, value);
-        // Tokens are persisted here — the user IS logged in now. P0-5: a failure
-        // of the follow-up profile fetch must never strand them on the login
-        // screen with a valid session. Fetching `me` is a nicety; AuthGuard
-        // backfills the carbon on /chat if it's missing, so we always navigate.
+        // Keep the short-lived access grant in memory, then prove Safari kept
+        // the renewable HttpOnly cookie before entering protected UI. A
+        // failure of the later profile fetch remains non-fatal; AuthGuard can
+        // backfill that profile once the browser session itself is confirmed.
         authStore.setTokens(r.access, r.refresh ?? null, undefined, "interactive");
+        const browserSession = await api.confirmWebSessionAfterLogin();
+        if (browserSession === "anonymous" || browserSession === "revoked") {
+          authStore.clear(browserSession === "revoked" ? "revoked" : "expired");
+          reset();
+          throw new ApiError(
+            401,
+            { code: "web_session_missing" },
+            "We couldn’t establish a browser session. Please log in again.",
+          );
+        }
         track.loggedIn({ method: "otp" });
         try {
           const me = await api.me();

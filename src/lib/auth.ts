@@ -5,6 +5,7 @@ import * as React from "react";
 import { identifyCarbon, resetAnalytics } from "./analytics";
 import { env } from "./env";
 import type { AuthSession, Carbon } from "./types";
+import { withWebSessionAuthority } from "./web-session-authority";
 
 const CARBON_KEY = "silicon-interface:carbon";
 const EXPLICIT_LOGOUT_KEY = "silicon-interface:explicit-logout";
@@ -12,6 +13,8 @@ let accessToken: string | null = null;
 let refreshToken: string | null = null;
 let siliconKey: string | null = null;
 let explicitlyLoggedOut = false;
+let logoutInflight: Promise<void> | null = null;
+const LOGOUT_REQUEST_TIMEOUT_MS = 5_000;
 // The full Carbon profile is intentionally memory-only. In particular,
 // profile_photo_url is a short-lived bearer grant and must not be written to
 // localStorage, but live subscribers still need the complete object returned by
@@ -238,7 +241,7 @@ export const authStore = {
     refreshToken = null;
     emit("access-expired");
   },
-  clear(reason: "user" | "revoked" = "user") {
+  clear(reason: "user" | "revoked" | "expired" = "user") {
     explicitlyLoggedOut = reason === "user";
     if (reason === "user") safeSet(EXPLICIT_LOGOUT_KEY, "1");
     const current = authStore.getCarbon();
@@ -249,15 +252,33 @@ export const authStore = {
         }),
       );
     }
-    // Revoke/delete the HttpOnly refresh cookie. This is intentionally
-    // fire-and-forget so logout never waits on a network path before clearing
-    // the in-memory authority and protected local state.
-    if (reason === "user" && typeof window !== "undefined") {
-      void fetch(`${env.apiBase}/api/v1/auth/logout`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "X-Silicon-Web-Session": "1" },
-      }).catch(() => undefined);
+    // Clear local authority immediately, but serialize the server-side cookie
+    // deletion with login/refresh/device cookie writes. Otherwise a slow
+    // logout response can arrive after a new OTP login and erase its cookie.
+    if (reason === "user" && typeof window !== "undefined" && !logoutInflight) {
+      const run = withWebSessionAuthority(async () => {
+        const controller = new AbortController();
+        const timer = globalThis.setTimeout(
+          () => controller.abort(),
+          LOGOUT_REQUEST_TIMEOUT_MS,
+        );
+        try {
+          await fetch(`${env.apiBase}/api/v1/auth/logout`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "X-Silicon-Web-Session": "1" },
+            signal: controller.signal,
+          });
+        } catch {
+          // The explicit-logout marker still keeps protected routes closed.
+        } finally {
+          globalThis.clearTimeout(timer);
+        }
+      });
+      const tracked = run.finally(() => {
+        logoutInflight = null;
+      });
+      logoutInflight = tracked;
     }
     accessToken = null;
     refreshToken = null;

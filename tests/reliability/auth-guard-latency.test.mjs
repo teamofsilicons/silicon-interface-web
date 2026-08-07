@@ -28,3 +28,14 @@ test("returning owners are released before network restoration settles", () => {
     /authStore\.hasPersistedOwner\(\)/,
   );
 });
+
+test("a cleared session removes the mounted protected shell", () => {
+  const subscription = source.indexOf("authStore.subscribe((change)");
+  const cleared = source.indexOf('change !== "cleared"', subscription);
+  const cover = source.indexOf("setOk(false);", cleared);
+  const redirect = source.indexOf('router.replace("/auth/login")', cover);
+  assert.ok(subscription >= 0);
+  assert.ok(cleared > subscription);
+  assert.ok(cover > cleared);
+  assert.ok(redirect > cover);
+});

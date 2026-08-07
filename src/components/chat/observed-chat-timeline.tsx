@@ -38,6 +38,9 @@ interface Props {
   identity: LordIdentity;
   identityBySender: Map<string, LordIdentity>;
   loading: boolean;
+  hasMore: boolean;
+  loadingOlder: boolean;
+  onLoadOlder: () => Promise<number>;
 }
 
 type TimelineItem =
@@ -303,6 +306,9 @@ export function ObservedChatTimeline({
   identity,
   identityBySender,
   loading,
+  hasMore,
+  loadingOlder,
+  onLoadOlder,
 }: Props) {
   const presentation = React.useMemo(
     () => buildPresentation(events, room),
@@ -310,7 +316,13 @@ export function ObservedChatTimeline({
   );
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const followBottomRef = React.useRef(true);
+  const requestingOlderRef = React.useRef(false);
+  const prependAnchorRef = React.useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const [atBottom, setAtBottom] = React.useState(true);
+  const oldestEventId = events[0]?.event_id ?? null;
 
   const scrollToBottom = React.useCallback((behavior: ScrollBehavior = "auto") => {
     const scroller = scrollerRef.current;
@@ -320,10 +332,52 @@ export function ObservedChatTimeline({
     setAtBottom(true);
   }, []);
 
+  const requestOlder = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (
+      !scroller ||
+      !hasMore ||
+      loadingOlder ||
+      requestingOlderRef.current
+    ) return;
+    requestingOlderRef.current = true;
+    prependAnchorRef.current = {
+      scrollHeight: scroller.scrollHeight,
+      scrollTop: scroller.scrollTop,
+    };
+    void onLoadOlder()
+      .then((added) => {
+        if (added <= 0) prependAnchorRef.current = null;
+      })
+      .finally(() => {
+        requestingOlderRef.current = false;
+      });
+  }, [hasMore, loadingOlder, onLoadOlder]);
+
+  // Preserve the exact viewport after older rows are prepended. Native scroll
+  // anchoring is intentionally disabled because it fights the bottom-follow
+  // behavior used by both normal Interface and this oversight timeline.
+  React.useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    const scroller = scrollerRef.current;
+    if (!anchor || !scroller) return;
+    scroller.scrollTop = anchor.scrollTop + (scroller.scrollHeight - anchor.scrollHeight);
+    prependAnchorRef.current = null;
+  }, [oldestEventId]);
+
   React.useLayoutEffect(() => {
     if (!followBottomRef.current || loading) return;
     scrollToBottom();
   }, [loading, presentation.items, scrollToBottom]);
+
+  // If the initial page is shorter than the viewport, there may be no scroll
+  // event to request the next page. Keep filling until the reader has an
+  // actual scrollable history or the server reports the beginning.
+  React.useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (loading || !scroller || scroller.scrollTop > 64) return;
+    requestOlder();
+  }, [hasMore, loading, loadingOlder, oldestEventId, requestOlder]);
 
   const senderFor = (event: Event) =>
     identityBySender.get(senderKey(event)) ??
@@ -466,7 +520,7 @@ export function ObservedChatTimeline({
     return <div className="flex-1 px-6 py-4 text-sm text-muted-foreground">Loading…</div>;
   }
 
-  if (presentation.visibleCount === 0) {
+  if (presentation.visibleCount === 0 && !hasMore) {
     return (
       <div className="flex-1 px-6 py-4">
         <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
@@ -489,6 +543,7 @@ export function ObservedChatTimeline({
           const bottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2;
           followBottomRef.current = bottom;
           setAtBottom(bottom);
+          if (scroller.scrollTop <= 64) requestOlder();
         }}
       >
         <div className="flex min-h-full flex-col justify-end">
@@ -501,6 +556,20 @@ export function ObservedChatTimeline({
           </div>
           <div data-timeline-tail className="h-4 shrink-0" />
         </div>
+      </div>
+
+      <div
+        role="status"
+        aria-live="polite"
+        aria-hidden={!loadingOlder}
+        className={cn(
+          "pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2 border bg-background/95 px-3 py-1.5 shadow-sm backdrop-blur-sm transition-opacity",
+          loadingOlder ? "opacity-100" : "opacity-0",
+        )}
+      >
+        <span className="label-mono whitespace-nowrap text-[11px] text-muted-foreground">
+          Loading older messages…
+        </span>
       </div>
 
       <div

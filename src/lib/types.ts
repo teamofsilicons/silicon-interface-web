@@ -302,6 +302,9 @@ export interface Room {
    *  in the backend SILICON_OBSERVER_CARBON_IDS allowlist and this is a
    *  silicon↔silicon room). Drives the read-only sidebar/room treatment. */
   observed?: boolean;
+  /** Lords-only historical access state. Revoked rooms remain inspectable but
+   *  are separated from the identity's current conversation list. */
+  lord_access_state?: "active" | "revoked";
   notification_preferences?: {
     mode: "all" | "mentions" | "mute";
     mute_until: string;

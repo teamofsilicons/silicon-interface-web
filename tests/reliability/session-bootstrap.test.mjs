@@ -35,11 +35,11 @@ test("transient restoration failures never redirect a known owner to login", () 
   assert.equal(sessionBootDecision("restored", false, 0), "enter");
 });
 
-test("anonymous restoration is confirmed before showing login", () => {
-  assert.equal(sessionBootDecision("anonymous", true, 1), "enter-and-retry");
+test("anonymous restoration logs out cached and uncached owners after confirmation", () => {
+  assert.equal(sessionBootDecision("anonymous", true, 1), "confirm-anonymous");
   assert.equal(sessionBootDecision("anonymous", false, 1), "confirm-anonymous");
-  assert.equal(sessionBootDecision("anonymous", true, 2), "enter-and-retry");
-  assert.equal(sessionBootDecision("anonymous", true, 200), "enter-and-retry");
+  assert.equal(sessionBootDecision("anonymous", true, 2), "login");
+  assert.equal(sessionBootDecision("anonymous", true, 200), "login");
   assert.equal(sessionBootDecision("anonymous", false, 2), "login");
   assert.equal(sessionBootDecision("revoked", true, 0), "login");
 });
@@ -47,6 +47,6 @@ test("anonymous restoration is confirmed before showing login", () => {
 test("compatibility entry points retain a known offline owner", () => {
   assert.equal(compatibilityRestoreAllowsEntry("restored", false), true);
   assert.equal(compatibilityRestoreAllowsEntry("unavailable", true), true);
-  assert.equal(compatibilityRestoreAllowsEntry("anonymous", true), true);
+  assert.equal(compatibilityRestoreAllowsEntry("anonymous", true), false);
   assert.equal(compatibilityRestoreAllowsEntry("anonymous", false), false);
 });

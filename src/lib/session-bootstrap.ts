@@ -49,10 +49,9 @@ export function classifySessionRestoreFailure(
 }
 
 /**
- * A transient refresh failure must never be presented as logout. A browser
- * with a known owner may stay in its offline-capable session while the server
- * is unavailable. A confirmed anonymous response is different: it proves the
- * renewable credential is no longer valid and must end the local session.
+ * A transport failure may retain a known owner's offline-capable shell. An
+ * anonymous response is different: the dedicated refresh endpoint was
+ * reachable and confirmed that no renewable browser authority exists.
  */
 export function sessionBootDecision(
   state: WebSessionRestoreState,
@@ -62,11 +61,8 @@ export function sessionBootDecision(
   if (state === "restored") return "enter";
   if (state === "unavailable") return hasKnownOwner ? "enter-and-retry" : "retry";
   if (state === "revoked") return "login";
-  // A missing/expired browser cookie alone is not logout evidence when the
-  // browser still owns durable local state. This covers cookie eviction,
-  // browser privacy races, and temporarily inconsistent intermediaries. Only
-  // an explicit backend revocation may discard that known owner automatically.
-  if (hasKnownOwner) return "enter-and-retry";
+  // Confirm once to absorb a single inconsistent intermediary response, then
+  // end the stale local session regardless of whether an owner cache remains.
   return anonymousConfirmations >= 2 ? "login" : "confirm-anonymous";
 }
 
@@ -75,5 +71,5 @@ export function compatibilityRestoreAllowsEntry(
   hasKnownOwner: boolean,
 ): boolean {
   return state === "restored" ||
-    ((state === "unavailable" || state === "anonymous") && hasKnownOwner);
+    (state === "unavailable" && hasKnownOwner);
 }

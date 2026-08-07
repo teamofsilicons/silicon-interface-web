@@ -57,7 +57,10 @@ test("a cold snapshot projects durable recovered messages into an already-open r
     "for (const frame of snapshotFrames) dispatchFrame(frame, { quiet: true });",
     committed,
   );
-  const hydrated = chatPageSource.indexOf("await hydrateInitialSyncBundle(owner);", committed);
+  const hydrated = chatPageSource.indexOf(
+    "await hydrateInitialSyncBundle(owner, { authoritativeDraftAbsence: true });",
+    committed,
+  );
 
   assert.ok(snapshot >= 0 && committed > snapshot && projected > committed && hydrated > projected);
 });

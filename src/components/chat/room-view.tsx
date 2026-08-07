@@ -3,7 +3,7 @@
 import * as React from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { ArrowDown, Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
+import { ArrowDown, CaretLeft, Clock, Eye, MagnifyingGlass, Microphone, WarningCircle, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -161,7 +161,10 @@ import {
   statusAfterSendTimeout,
 } from "@/lib/outbox-ui-state";
 import { editableTextForEvent, withEditedText } from "@/lib/event-edit";
-import { SILICON_TEXT_HOLD_MS } from "@/lib/silicon-hold";
+import {
+  DELAY_NEW_SILICON_TEXT_SENDS,
+  SILICON_TEXT_HOLD_MS,
+} from "@/lib/silicon-hold";
 import { isGifMedia } from "@/lib/media-meta";
 import { anchorPixelCorrection } from "@/lib/virtualization-anchor";
 import { countNovelHistoryRows, hasNovelHistoryRows } from "@/lib/history-window";
@@ -297,6 +300,9 @@ interface Props {
   onSendIntent?: () => void;
   /** Flushes delivery acknowledgements after a history page is durably stored. */
   onHistoryStored?: () => void;
+  /** Optional mobile-only return action for shells that embed RoomView outside
+   * the normal /chat route, such as the Lords identity switcher. */
+  onBack?: () => void;
 }
 
 type LocalEvent = TimelineEvent & {
@@ -666,6 +672,7 @@ export function RoomView({
   onEventAccepted,
   onSendIntent,
   onHistoryStored,
+  onBack,
 }: Props) {
   "use no memo";
   // RoomView intentionally coordinates multiple durable journals, websocket
@@ -2090,6 +2097,7 @@ export function RoomView({
               row._status === "failed" || row._status === "challenge"
                 ? "failed"
                 : "waiting",
+            at: Date.parse(row.created_at),
           });
         }
         setEvents((prev) =>
@@ -2451,6 +2459,9 @@ export function RoomView({
         clientId,
         text: body || "Message pending",
         status: uiState === "failed" || uiState === "challenge" ? "failed" : "waiting",
+        at: Number.isFinite(Date.parse(held.created_at))
+          ? Date.parse(held.created_at)
+          : Date.now(),
       });
     }
   };
@@ -3915,6 +3926,7 @@ export function RoomView({
         clientId,
         text: outgoingPreviewText(payload),
         status: "waiting",
+        at: nowMs,
       });
       // No progress is synthesized here. The activity row appears only after
       // an actual Stemcell progress frame arrives.
@@ -4345,6 +4357,7 @@ export function RoomView({
           clientId,
           text: outgoingPreviewText(payload),
           status: "waiting",
+          at: Date.now(),
         });
         if (preparedOperation === "held" || preparedOperation === "media") {
           // prepareManualOutboxRetry woke the central durable flusher. It will
@@ -4409,6 +4422,7 @@ export function RoomView({
           reply_to_event_id: row.replyTo,
         }),
         status: row.state === "blocked" || row.state === "challenge" ? "failed" : "waiting",
+        at: row.at,
       });
     },
     [room.room_id, setEvents],
@@ -5790,7 +5804,22 @@ export function RoomView({
       {/* Header — clicking anywhere on the left side opens the profile. */}
       {/* Header — fixed height so clicking search doesn't shift the row when
           the search field swaps in for the icon button. */}
-      <header className="group/header relative z-10 flex h-[68px] items-center gap-3 border-b bg-elevated pl-6 pr-6 shadow-[0_2px_12px_-6px_rgba(60,50,36,0.14)]">
+      <header
+        className={cn(
+          "group/header relative z-10 flex h-[68px] items-center gap-3 border-b bg-elevated pr-6 shadow-[0_2px_12px_-6px_rgba(60,50,36,0.14)]",
+          onBack ? "pl-3 md:pl-6" : "pl-6",
+        )}
+      >
+        {onBack ? (
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-9 w-9 shrink-0 place-items-center transition-colors hover:bg-accent md:hidden"
+            aria-label="back to conversations"
+          >
+            <CaretLeft className="h-4 w-4" weight="bold" />
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -6223,7 +6252,11 @@ export function RoomView({
             onAnnotationDraftConsumed={() => setPendingAnnotationDraft(null)}
             replyTo={replyTo}
             onClearReply={() => updateReplyDraft(null)}
-            delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
+            delayTextForSilicon={
+              DELAY_NEW_SILICON_TEXT_SENDS &&
+              room.kind === "direct" &&
+              peer?.kind === "silicon"
+            }
             voiceTranscriptionDeliveryGate={
               room.kind === "direct" && peer?.kind === "silicon"
             }

@@ -699,9 +699,12 @@ export function RoomView({
   // The initial window load for the currently open room, and whether a ready
   // edge has already been observed for it. Together these let the reconnect
   // catch-up skip the one edge whose work the initial load already did.
+  // `hasSettled` is what makes the skip safe rather than merely plausible: it
+  // says whether the response had already landed when the edge arrived.
   const initialWindowRef = React.useRef<{
     roomId: string;
     settled: Promise<boolean | undefined>;
+    hasSettled: boolean;
   } | null>(null);
   const sawSocketReadyForRoomRef = React.useRef(false);
   // Device registration can rotate the access token immediately after boot.
@@ -2180,7 +2183,11 @@ export function RoomView({
         finishInitialBottomPosition();
         return false;
       });
-    initialWindowRef.current = { roomId, settled: initialWindow };
+    const initialWindowRecord = { roomId, settled: initialWindow, hasSettled: false };
+    initialWindowRef.current = initialWindowRecord;
+    void initialWindow.then(() => {
+      initialWindowRecord.hasSettled = true;
+    });
     // A socket that is already live at room open has no missed window to
     // recover, so its next ready edge is a genuine reconnect.
     sawSocketReadyForRoomRef.current = socketReadyRef.current;
@@ -2302,12 +2309,23 @@ export function RoomView({
       const initial = initialWindowRef.current;
       const firstEdgeForThisRoom = !sawSocketReadyForRoomRef.current;
       sawSocketReadyForRoomRef.current = true;
-      if (firstEdgeForThisRoom && initial?.roomId === room.room_id) {
+      if (
+        firstEdgeForThisRoom &&
+        initial?.roomId === room.room_id &&
+        !initial.hasSettled
+      ) {
         // A cold load opens the room and connects the socket at nearly the same
-        // moment, so this edge is not a reconnect: nothing was missed, and the
-        // initial window is already fetching the identical page. Wait for it and
-        // pull only if it did not actually land — an in-flight load that later
-        // fails, or one that failed already, still needs this recovery.
+        // moment, so this edge is not a reconnect: the initial window is still
+        // in flight and is fetching the identical page. Being still in flight is
+        // the part that makes skipping safe — the live stream starts no later
+        // than the snapshot the window returns, so no frame falls between them.
+        // Wait for it and pull only if it did not actually land: an in-flight
+        // load that later fails still needs this recovery.
+        //
+        // A window that had ALREADY landed is the opposite case and must pull.
+        // A slow socket handshake (token rotation, device registration) can put
+        // seconds between the response and this connect, and anything created in
+        // that gap arrived on neither path.
         void initial.settled.then((loaded) => {
           if (!loaded) pull();
         }).catch(() => pull());

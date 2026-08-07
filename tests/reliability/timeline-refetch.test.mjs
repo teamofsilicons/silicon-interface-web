@@ -14,16 +14,35 @@ const chatPageSource = await readFile(
 test("the reconnect catch-up defaults to pulling, and skips only a proven duplicate", () => {
   const edge = roomViewSource.indexOf("const firstEdgeForThisRoom");
   assert.ok(edge > 0);
-  const branch = roomViewSource.slice(edge, edge + 1200);
+  const branch = roomViewSource.slice(edge, edge + 1800);
 
-  // Skipping requires BOTH that this is the first ready edge for this room open
-  // and that the initial window for this same room actually landed.
-  assert.match(branch, /firstEdgeForThisRoom && initial\?\.roomId === room\.room_id/);
+  // Skipping requires ALL THREE: the first ready edge for this room open, the
+  // initial window for this same room, and that window still being in flight
+  // when the edge arrived. The last one is what makes the skip safe rather than
+  // merely plausible — see the in-flight test below.
+  assert.match(branch, /firstEdgeForThisRoom &&\s*initial\?\.roomId === room\.room_id &&\s*!initial\.hasSettled/);
   // Everything else pulls. Missing frames after a drop is far worse than one
   // extra request, so every uncertain path resolves toward the network.
   assert.match(branch, /\} else \{\s*pull\(\);/);
   assert.match(branch, /if \(!loaded\) pull\(\);/);
   assert.match(branch, /\.catch\(\(\) => pull\(\)\)/);
+});
+
+test("a window that already landed before the socket connected is still pulled", () => {
+  // The gap this closes: a slow handshake (token rotation, device registration)
+  // can put seconds between the window response and the first ready edge, and
+  // anything created in that gap arrives on neither path. Only an edge that
+  // arrives while the window is STILL IN FLIGHT proves there is no gap, because
+  // the live stream then starts no later than the snapshot the window returns.
+  assert.match(roomViewSource, /hasSettled: false/);
+  // The flag flips when the window settles, so it describes the moment the edge
+  // is read rather than the eventual outcome.
+  assert.match(
+    roomViewSource,
+    /void initialWindow\.then\(\(\) => \{\s*initialWindowRecord\.hasSettled = true;/,
+  );
+  const edge = roomViewSource.indexOf("const firstEdgeForThisRoom");
+  assert.match(roomViewSource.slice(edge, edge + 400), /!initial\.hasSettled/);
 });
 
 test("a genuine reconnect always re-pulls the open room", () => {

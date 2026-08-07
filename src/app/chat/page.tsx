@@ -85,6 +85,7 @@ import {
   loadCachedRooms,
   saveCachedRooms,
   loadCachedMemberships,
+  purgeForeignSidebarCaches,
   saveCachedMemberships,
 } from "@/lib/sidebar-cache";
 import { dropPendingPreview } from "@/lib/pending-preview";
@@ -104,6 +105,7 @@ import {
   readInitialSyncBundle,
   readPendingAccountReplay,
   pruneReachableTimelineCache,
+  purgeForeignChatCaches,
   rebuildReachableChatCache,
   storeEvents,
   loadStoredRoomEvents,
@@ -867,6 +869,20 @@ function ChatPageInner() {
       window.clearTimeout(timer);
     };
   }, [ownerId, socket.state]);
+  const sweptForeignOwnerRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    // Retire every other owner's cached projections once per signed-in owner.
+    // Logout already clears the owner who left, but a browser that was closed
+    // mid-logout, upgraded from a build without that listener, or whose purge
+    // failed would otherwise keep that history forever: both single-owner
+    // cleanup paths only ever reach the *current* owner, so nothing else can.
+    if (!ownerId || sweptForeignOwnerRef.current === ownerId) return;
+    sweptForeignOwnerRef.current = ownerId;
+    purgeForeignSidebarCaches(ownerId);
+    void purgeForeignChatCaches(ownerId).catch(() => {
+      // Reclaiming space is best-effort and always safe to retry next sign-in.
+    });
+  }, [ownerId]);
   const globalNotificationsRef = React.useRef<GlobalNotificationPreferences>(
     DEFAULT_GLOBAL_NOTIFICATIONS,
   );

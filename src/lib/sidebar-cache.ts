@@ -184,3 +184,50 @@ export function saveCachedTeamRoster(
   const current = read(ownerId)?.teamRosters ?? {};
   write(ownerId, { teamRosters: { ...current, [teamSlug]: rows } });
 }
+
+/** Owners holding a sidebar cache in this browser profile. */
+export function listCachedSidebarOwners(): string[] {
+  if (typeof window === "undefined") return [];
+  const owners: string[] = [];
+  try {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const storageKey = window.localStorage.key(index);
+      if (!storageKey?.startsWith(`${PREFIX}:`)) continue;
+      try {
+        owners.push(decodeURIComponent(storageKey.slice(PREFIX.length + 1)));
+      } catch {
+        // A key we cannot decode is not one we wrote; leave it untouched.
+      }
+    }
+  } catch {
+    return [];
+  }
+  return owners;
+}
+
+export function clearCachedSidebar(ownerId: string | null | undefined): void {
+  if (typeof window === "undefined" || !ownerId) return;
+  try {
+    window.localStorage.removeItem(key(ownerId));
+  } catch {
+    /* storage unavailable — nothing retained to clear */
+  }
+}
+
+/** Retire every sidebar cache except the owner signing in. */
+export function purgeForeignSidebarCaches(currentOwnerId: string): string[] {
+  if (!currentOwnerId) return [];
+  const foreign = listCachedSidebarOwners().filter((ownerId) => ownerId !== currentOwnerId);
+  for (const ownerId of foreign) clearCachedSidebar(ownerId);
+  return foreign;
+}
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  // The room list, contacts, and rosters are replaceable Glass projections. An
+  // authoritative end of session must not leave them readable on a shared
+  // device; everything here is re-downloaded on the next sign-in.
+  window.addEventListener("silicon-interface:auth-clear", (event) => {
+    const ownerKey = (event as CustomEvent<{ ownerKey?: string | null }>).detail?.ownerKey;
+    if (ownerKey?.startsWith("carbon:")) clearCachedSidebar(ownerKey.slice("carbon:".length));
+  });
+}

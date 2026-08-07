@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { identifyCarbon, resetAnalytics } from "./analytics";
 import { env } from "./env";
+import { clearSessionIssue } from "./session-health";
 import type { AuthSession, Carbon } from "./types";
 
 const CARBON_KEY = "silicon-interface:carbon";
@@ -186,6 +187,7 @@ export const authStore = {
   setSession(session: AuthSession) {
     explicitlyLoggedOut = false;
     safeSet(EXPLICIT_LOGOUT_KEY, null);
+    clearSessionIssue();
     accessToken = session.access;
     refreshToken = session.refresh ?? null;
     currentCarbon = session.carbon;
@@ -204,6 +206,8 @@ export const authStore = {
     if (source === "automatic" && authStore.wasExplicitlyLoggedOut()) return;
     explicitlyLoggedOut = false;
     if (source === "interactive") safeSet(EXPLICIT_LOGOUT_KEY, null);
+    // Renewed request authority retires any "sign in to sync" prompt.
+    clearSessionIssue();
     accessToken = access;
     refreshToken = refresh ?? null;
     if (carbon) {
@@ -241,8 +245,15 @@ export const authStore = {
   clear(reason: "user" | "revoked" = "user") {
     explicitlyLoggedOut = reason === "user";
     if (reason === "user") safeSet(EXPLICIT_LOGOUT_KEY, "1");
+    clearSessionIssue();
+    // getCarbon() falls back to the persisted identity, so an expired session
+    // whose in-memory profile is gone still resolves the owner to clear.
     const current = authStore.getCarbon();
     if (typeof window !== "undefined") {
+      // Listeners clear this owner's replaceable local state. Both reasons are
+      // authoritative ends of session, so neither may leave Glass projections
+      // readable on a shared device; listeners holding work that has never
+      // reached Glass (outbox, drafts) deliberately keep it either way.
       window.dispatchEvent(
         new CustomEvent("silicon-interface:auth-clear", {
           detail: { ownerKey: current?.carbon_id ? `carbon:${current.carbon_id}` : null },

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { CircleNotch, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
@@ -265,6 +265,11 @@ import {
   type StorageHealthIssue,
 } from "@/lib/storage-health";
 import {
+  currentSessionIssue,
+  SESSION_HEALTH_EVENT,
+  type SessionHealthIssue,
+} from "@/lib/session-health";
+import {
   createPersonalFolder,
   deletePersonalFolder,
   loadGroupStore,
@@ -508,6 +513,17 @@ function ChatPageInner() {
     window.addEventListener(STORAGE_HEALTH_EVENT, onIssue);
     return () => window.removeEventListener(STORAGE_HEALTH_EVENT, onIssue);
   }, []);
+  const [sessionIssue, setSessionIssue] = React.useState<SessionHealthIssue | null>(
+    () => currentSessionIssue(),
+  );
+  React.useEffect(() => {
+    const onSession = (event: globalThis.Event) => {
+      setSessionIssue((event as CustomEvent<SessionHealthIssue | null>).detail);
+    };
+    window.addEventListener(SESSION_HEALTH_EVENT, onSession);
+    return () => window.removeEventListener(SESSION_HEALTH_EVENT, onSession);
+  }, []);
+  const router = useRouter();
   const search = useSearchParams();
   const selected = search.get("room");
   const callbackSetupRequestId = isToolSetupRequestId(search.get("extend_request"))
@@ -907,6 +923,20 @@ function ChatPageInner() {
     };
   }, [ownerId]);
   React.useEffect(() => {
+    // An ended session is the only condition here that no amount of waiting or
+    // retrying resolves, so it outranks storage and sync copy. Nothing local is
+    // deleted and the composer keeps queueing — the owner is simply told which
+    // action restores sync.
+    if (sessionIssue) {
+      setGlobalIssue({
+        kind: "session",
+        message: "Your session expired. Sign in to sync new messages.",
+        retry: () => router.push("/auth/login"),
+        retryLabel: "Sign in",
+        assertive: true,
+      });
+      return;
+    }
     // Durable outbox/media/draft degradation is already represented on the
     // affected message or composer and remains safely retryable. A global
     // outage banner for those transient local retries was noisy and misleading.
@@ -951,6 +981,8 @@ function ChatPageInner() {
   }, [
     ownerId,
     rebuildTimelineCache,
+    router,
+    sessionIssue,
     setGlobalIssue,
     socket.reconnect,
     storageIssue,

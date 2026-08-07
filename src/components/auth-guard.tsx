@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { probeApiConnectivity } from "@/lib/connectivity-classifier";
 import { ensureDeviceRegistration } from "@/lib/device-registration";
+import { clearSessionIssue, reportSignInRequired } from "@/lib/session-health";
 import {
   canPaintRetainedSession,
   isAuthoritativeSessionRevocation,
@@ -63,16 +65,38 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       try {
         const state = await restoreBrowserAuthority();
         if (!alive) return;
-        if (state === "restored") retryDelay = RESTORE_RETRY_MS;
+        if (state === "restored") {
+          retryDelay = RESTORE_RETRY_MS;
+          clearSessionIssue();
+        }
         anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
         const hasRetainedOwner = state === "anonymous"
           ? authStore.hasPersistedOwner()
           : Boolean(authStore.getCarbon());
+        // Only an anonymous answer for a retained owner can be an expired
+        // session rather than an unreachable one, so that is the only case
+        // worth spending a probe on. The evidence must describe this attempt:
+        // a reachability result from an earlier retry could mislabel a network
+        // that has since dropped.
+        const glassReachable = state === "anonymous" && hasRetainedOwner
+          ? (await probeApiConnectivity()) === "reachable"
+          : false;
+        if (!alive) return;
         const decision = sessionBootDecision(
           state,
           hasRetainedOwner,
           anonymousConfirmations,
+          glassReachable,
         );
+        if (decision === "enter-and-signin-required") {
+          // Reachable Glass, repeatedly anonymous: the renewable credential is
+          // genuinely gone. Keep the owner's durable history and queued sends
+          // exactly where they are, and surface the one action that fixes it.
+          reportSignInRequired();
+          setOk(true);
+          scheduleRetry();
+          return;
+        }
         if (decision === "login") {
           // A retained shell may already be visible while restoration runs.
           // Cover it before an authoritative revocation redirects the page.
@@ -202,12 +226,22 @@ export function AuthRouteGuard({ children }: { children: React.ReactNode }) {
         const hasRetainedOwner = state === "anonymous"
           ? authStore.hasPersistedOwner()
           : Boolean(authStore.getCarbon());
+        const glassReachable = state === "anonymous" && hasRetainedOwner
+          ? (await probeApiConnectivity()) === "reachable"
+          : false;
+        if (!alive) return;
         const decision = sessionBootDecision(
           state,
           hasRetainedOwner,
           anonymousConfirmations,
+          glassReachable,
         );
-        if (decision === "enter" || decision === "enter-and-retry") {
+        if (decision === "enter-and-signin-required") {
+          // A retained owner whose credential is provably gone must be able to
+          // reach this form. Bouncing them to /chat would strand them behind a
+          // banner whose only action returns here.
+          setAnonymous(true);
+        } else if (decision === "enter" || decision === "enter-and-retry") {
           router.replace("/chat");
         } else if (decision === "login") {
           if (state === "revoked") authStore.clear("revoked");

@@ -18,7 +18,7 @@ type ConnectionBannerValue = {
 };
 
 export type GlobalChatIssue = {
-  kind: "storage" | "catching_up";
+  kind: "session" | "storage" | "catching_up";
   message: string;
   retry?: (() => void) | null;
   retryLabel?: string;
@@ -74,7 +74,9 @@ export function useChatConnectionBanner(): ConnectionBannerValue {
 export function ChatConnectionBanner() {
   const { state, retry, issue } = useChatConnectionBanner();
   const connectionCopy = applicationConnectionStatusCopy(state);
-  const selectedIssue = issue?.kind === "storage"
+  // An ended session outranks every transport message: reconnecting cannot fix
+  // it, and the offline copy would send the owner to wait rather than sign in.
+  const selectedIssue = issue?.kind === "session" || issue?.kind === "storage"
     ? issue
     : connectionCopy
       ? null

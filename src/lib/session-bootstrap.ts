@@ -7,9 +7,19 @@ export type WebSessionRestoreState =
 export type SessionBootDecision =
   | "enter"
   | "enter-and-retry"
+  | "enter-and-signin-required"
   | "confirm-anonymous"
   | "login"
   | "retry";
+
+/** Consecutive anonymous restores that end a session with no durable owner. */
+export const ANONYMOUS_CONFIRMATIONS_BEFORE_LOGIN = 2;
+/**
+ * Consecutive anonymous restores — each one observed while Glass was proved
+ * reachable — before a retained owner is told that signing in is required.
+ * Deliberately never ends the local session; it only stops the silence.
+ */
+export const ANONYMOUS_CONFIRMATIONS_BEFORE_SIGNIN_PROMPT = 2;
 
 /**
  * A returning browser can paint its owner-scoped, durable shell before the
@@ -23,6 +33,28 @@ export function canPaintRetainedSession(
   explicitlyLoggedOut: boolean,
 ): boolean {
   return !explicitlyLoggedOut && (hasInMemoryAuthority || hasKnownOwner);
+}
+
+/**
+ * Whether the landing page may send this browser straight into the app.
+ *
+ * The renewable credential is an HttpOnly cookie, so the landing page cannot
+ * inspect it — it can only ask Glass, and waiting for that answer is what made
+ * a returning owner watch a marketing page before their chats. Every input here
+ * is a synchronous local read, so the common case routes on the first frame.
+ * `sessionExpired` must be proof (see `renewableSessionExpired`), never a
+ * guess: an unknown answer keeps the owner in the app, where a failed restore
+ * is recoverable, rather than stranding them on a page they did not ask for.
+ */
+export function canEnterAppFromLanding(
+  hasInMemoryAuthority: boolean,
+  hasKnownOwner: boolean,
+  explicitlyLoggedOut: boolean,
+  sessionExpired: boolean,
+): boolean {
+  if (explicitlyLoggedOut) return false;
+  if (hasInMemoryAuthority) return true;
+  return hasKnownOwner && !sessionExpired;
 }
 
 /** Only an explicit client/auth rejection proves that browser authority ended. */
@@ -53,11 +85,19 @@ export function classifySessionRestoreFailure(
  * with a known owner may stay in its offline-capable session while the server
  * is unavailable. A confirmed anonymous response is different: it proves the
  * renewable credential is no longer valid and must end the local session.
+ *
+ * `glassReachable` must be exact HTTPS reachability evidence for the moment
+ * this restore answered — never `navigator.onLine`, and never a stale probe
+ * from an earlier attempt. A renewable credential that is merely unreachable
+ * is indistinguishable from cookie eviction, so it stays in the silent retry
+ * path; only a reachable Glass that keeps answering anonymous proves the
+ * session genuinely ended rather than momentarily failing to present itself.
  */
 export function sessionBootDecision(
   state: WebSessionRestoreState,
   hasKnownOwner: boolean,
   anonymousConfirmations: number,
+  glassReachable = false,
 ): SessionBootDecision {
   if (state === "restored") return "enter";
   if (state === "unavailable") return hasKnownOwner ? "enter-and-retry" : "retry";
@@ -66,8 +106,28 @@ export function sessionBootDecision(
   // browser still owns durable local state. This covers cookie eviction,
   // browser privacy races, and temporarily inconsistent intermediaries. Only
   // an explicit backend revocation may discard that known owner automatically.
-  if (hasKnownOwner) return "enter-and-retry";
-  return anonymousConfirmations >= 2 ? "login" : "confirm-anonymous";
+  if (hasKnownOwner) {
+    // Expiry and revocation are indistinguishable at the transport layer: Glass
+    // only types `web_session_revoked` for an explicitly blacklisted refresh
+    // token, so a naturally expired session arrives here as plain "anonymous".
+    // Retaining it silently forever leaves the owner reading cached history
+    // inside an app whose every request is rejected. Keep the session and its
+    // durable history, and say so instead.
+    return glassReachable &&
+        anonymousConfirmations >= ANONYMOUS_CONFIRMATIONS_BEFORE_SIGNIN_PROMPT
+      ? "enter-and-signin-required"
+      : "enter-and-retry";
+  }
+  return anonymousConfirmations >= ANONYMOUS_CONFIRMATIONS_BEFORE_LOGIN
+    ? "login"
+    : "confirm-anonymous";
+}
+
+/** Every decision that keeps the owner inside their offline-capable session. */
+export function bootDecisionEntersApp(decision: SessionBootDecision): boolean {
+  return decision === "enter" ||
+    decision === "enter-and-retry" ||
+    decision === "enter-and-signin-required";
 }
 
 export function compatibilityRestoreAllowsEntry(

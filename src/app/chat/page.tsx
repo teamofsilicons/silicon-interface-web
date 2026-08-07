@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { CircleNotch, MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
@@ -85,6 +85,7 @@ import {
   loadCachedRooms,
   saveCachedRooms,
   loadCachedMemberships,
+  purgeForeignSidebarCaches,
   saveCachedMemberships,
 } from "@/lib/sidebar-cache";
 import { dropPendingPreview } from "@/lib/pending-preview";
@@ -104,6 +105,7 @@ import {
   readInitialSyncBundle,
   readPendingAccountReplay,
   pruneReachableTimelineCache,
+  purgeForeignChatCaches,
   rebuildReachableChatCache,
   storeEvents,
   loadStoredRoomEvents,
@@ -264,6 +266,11 @@ import {
   STORAGE_HEALTH_EVENT,
   type StorageHealthIssue,
 } from "@/lib/storage-health";
+import {
+  currentSessionIssue,
+  SESSION_HEALTH_EVENT,
+  type SessionHealthIssue,
+} from "@/lib/session-health";
 import {
   createPersonalFolder,
   deletePersonalFolder,
@@ -508,6 +515,17 @@ function ChatPageInner() {
     window.addEventListener(STORAGE_HEALTH_EVENT, onIssue);
     return () => window.removeEventListener(STORAGE_HEALTH_EVENT, onIssue);
   }, []);
+  const [sessionIssue, setSessionIssue] = React.useState<SessionHealthIssue | null>(
+    () => currentSessionIssue(),
+  );
+  React.useEffect(() => {
+    const onSession = (event: globalThis.Event) => {
+      setSessionIssue((event as CustomEvent<SessionHealthIssue | null>).detail);
+    };
+    window.addEventListener(SESSION_HEALTH_EVENT, onSession);
+    return () => window.removeEventListener(SESSION_HEALTH_EVENT, onSession);
+  }, []);
+  const router = useRouter();
   const search = useSearchParams();
   const selected = search.get("room");
   const callbackSetupRequestId = isToolSetupRequestId(search.get("extend_request"))
@@ -851,6 +869,20 @@ function ChatPageInner() {
       window.clearTimeout(timer);
     };
   }, [ownerId, socket.state]);
+  const sweptForeignOwnerRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    // Retire every other owner's cached projections once per signed-in owner.
+    // Logout already clears the owner who left, but a browser that was closed
+    // mid-logout, upgraded from a build without that listener, or whose purge
+    // failed would otherwise keep that history forever: both single-owner
+    // cleanup paths only ever reach the *current* owner, so nothing else can.
+    if (!ownerId || sweptForeignOwnerRef.current === ownerId) return;
+    sweptForeignOwnerRef.current = ownerId;
+    purgeForeignSidebarCaches(ownerId);
+    void purgeForeignChatCaches(ownerId).catch(() => {
+      // Reclaiming space is best-effort and always safe to retry next sign-in.
+    });
+  }, [ownerId]);
   const globalNotificationsRef = React.useRef<GlobalNotificationPreferences>(
     DEFAULT_GLOBAL_NOTIFICATIONS,
   );
@@ -907,6 +939,20 @@ function ChatPageInner() {
     };
   }, [ownerId]);
   React.useEffect(() => {
+    // An ended session is the only condition here that no amount of waiting or
+    // retrying resolves, so it outranks storage and sync copy. Nothing local is
+    // deleted and the composer keeps queueing — the owner is simply told which
+    // action restores sync.
+    if (sessionIssue) {
+      setGlobalIssue({
+        kind: "session",
+        message: "Your session expired. Sign in to sync new messages.",
+        retry: () => router.push("/auth/login"),
+        retryLabel: "Sign in",
+        assertive: true,
+      });
+      return;
+    }
     // Durable outbox/media/draft degradation is already represented on the
     // affected message or composer and remains safely retryable. A global
     // outage banner for those transient local retries was noisy and misleading.
@@ -951,6 +997,8 @@ function ChatPageInner() {
   }, [
     ownerId,
     rebuildTimelineCache,
+    router,
+    sessionIssue,
     setGlobalIssue,
     socket.reconnect,
     storageIssue,
@@ -1303,6 +1351,12 @@ function ChatPageInner() {
       setRefreshing(true);
       try {
         await refreshRoomsAuthoritatively();
+        // Only an authoritative room projection may arm the cache writer. A
+        // failed refresh leaves `rooms` holding what the cache itself produced,
+        // so writing it back would renew the cache's own write time and let a
+        // stale sidebar report itself as freshly saved on every failure.
+        roomsCacheOwnerRef.current = ownerId;
+        roomsCacheReadyRef.current = true;
         if (ownerId) void reportSyncRecovered(ownerId, undefined, ["account"]);
       } catch (e) {
         if (!(e instanceof DOMException && e.name === "AbortError") && ownerId) {
@@ -1315,8 +1369,8 @@ function ChatPageInner() {
           });
         }
       } finally {
-        roomsCacheOwnerRef.current = ownerId;
-        roomsCacheReadyRef.current = true;
+        // Never leave the shell spinning: the owner is reading cached rooms
+        // whether or not the authoritative refresh answered.
         setLoading(false);
         setRefreshing(false);
       }

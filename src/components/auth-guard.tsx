@@ -5,7 +5,10 @@ import { useRouter } from "next/navigation";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { probeApiConnectivity } from "@/lib/connectivity-classifier";
 import { ensureDeviceRegistration } from "@/lib/device-registration";
+import { noteSessionExpired, renewableSessionExpired } from "@/lib/session-expiry";
+import { clearSessionIssue, reportSignInRequired } from "@/lib/session-health";
 import {
   canPaintRetainedSession,
   isAuthoritativeSessionRevocation,
@@ -16,6 +19,21 @@ import {
 const RESTORE_RETRY_MS = 1_500;
 const RESTORE_RETRY_MAX_MS = 60_000;
 const ANONYMOUS_CONFIRM_MS = 500;
+
+/**
+ * Consecutive anonymous answers, shared by both guards and deliberately *not*
+ * per-mount. A count that resets on mount can never reach its own threshold
+ * when the guard unmounts on every decision: /auth/login mounted fresh, counted
+ * its first anonymous answer, resolved to `enter-and-retry`, and redirected to
+ * /chat — so the owner it was meant to let sign in was bounced away every time.
+ * Reset by any non-anonymous answer, exactly as before.
+ */
+let anonymousConfirmations = 0;
+
+function countAnonymous(state: WebSessionRestoreState): number {
+  anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
+  return anonymousConfirmations;
+}
 
 async function restoreBrowserAuthority(): Promise<WebSessionRestoreState> {
   // The renewable HttpOnly cookie is the browser session authority. Missing,
@@ -34,8 +52,11 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     let retryTimer: number | null = null;
     let deviceRetryTimer: number | null = null;
     let running = false;
-    let anonymousConfirmations = 0;
     let retryDelay = RESTORE_RETRY_MS;
+    // Whether this page load ever held a working session. It separates "still
+    // loading" from "in use", which is the only thing that decides whether a
+    // proven expiry routes the owner out or is reported in place.
+    let restoredSinceMount = false;
 
     const schedule = (delay: number) => {
       if (!alive) return;
@@ -63,16 +84,51 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       try {
         const state = await restoreBrowserAuthority();
         if (!alive) return;
-        if (state === "restored") retryDelay = RESTORE_RETRY_MS;
-        anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
+        if (state === "restored") {
+          retryDelay = RESTORE_RETRY_MS;
+          restoredSinceMount = true;
+          clearSessionIssue();
+        }
+        const confirmations = countAnonymous(state);
         const hasRetainedOwner = state === "anonymous"
           ? authStore.hasPersistedOwner()
           : Boolean(authStore.getCarbon());
+        // Only an anonymous answer for a retained owner can be an expired
+        // session rather than an unreachable one, so that is the only case
+        // worth spending a probe on. The evidence must describe this attempt:
+        // a reachability result from an earlier retry could mislabel a network
+        // that has since dropped.
+        const glassReachable = state === "anonymous" && hasRetainedOwner
+          ? (await probeApiConnectivity()) === "reachable"
+          : false;
+        if (!alive) return;
         const decision = sessionBootDecision(
           state,
           hasRetainedOwner,
-          anonymousConfirmations,
+          confirmations,
+          glassReachable,
         );
+        if (decision === "enter-and-signin-required") {
+          // Reachable Glass, repeatedly anonymous: the renewable credential is
+          // genuinely gone. Record it so the next cold boot routes on the
+          // record alone, without re-deriving it over the network.
+          noteSessionExpired();
+          if (!restoredSinceMount) {
+            // Still loading. Send them to the landing page, where signing in is
+            // the whole point — nothing local is deleted on the way.
+            setOk(false);
+            router.replace("/");
+            return;
+          }
+          // The owner is already inside and reading. Yanking them out mid-scroll
+          // to say "sign in" is worse than saying it in place: durable history
+          // stays readable, the composer keeps queueing, and the banner offers
+          // the same destination whenever they choose to take it.
+          reportSignInRequired();
+          setOk(true);
+          scheduleRetry();
+          return;
+        }
         if (decision === "login") {
           // A retained shell may already be visible while restoration runs.
           // Cover it before an authoritative revocation redirects the page.
@@ -136,6 +192,16 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         running = false;
       }
     };
+    // A previous boot already proved this browser cannot renew. Route on that
+    // record alone — no paint, no probe, no refresh round trip — so the one
+    // case that genuinely needs the landing page reaches it immediately instead
+    // of re-deriving the same answer over the network on every load.
+    if (renewableSessionExpired()) {
+      router.replace("/");
+      return () => {
+        alive = false;
+      };
+    }
     // The restricted persisted identity and owner-namespaced chat caches are
     // deliberately the app's offline-capable state. Paint that shell now for a
     // returning browser instead of holding it behind refresh + /me round trips;
@@ -177,14 +243,18 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 /** Hide login/register UI until the HttpOnly browser session is resolved. */
 export function AuthRouteGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const [anonymous, setAnonymous] = React.useState(() => authStore.wasExplicitlyLoggedOut());
+  // A session already proven expired needs no round trip to hide the form: the
+  // answer is on disk, and asking again would only delay the one page that can
+  // fix it behind a boot screen.
+  const [anonymous, setAnonymous] = React.useState(
+    () => authStore.wasExplicitlyLoggedOut() || renewableSessionExpired(),
+  );
 
   React.useEffect(() => {
     let alive = true;
     let retryTimer: number | null = null;
     let running = false;
-    let anonymousConfirmations = 0;
-    if (authStore.wasExplicitlyLoggedOut()) {
+    if (authStore.wasExplicitlyLoggedOut() || renewableSessionExpired()) {
       return () => { alive = false; };
     }
     const schedule = (delay: number) => {
@@ -198,16 +268,27 @@ export function AuthRouteGuard({ children }: { children: React.ReactNode }) {
       try {
         const state = await restoreBrowserAuthority();
         if (!alive) return;
-        anonymousConfirmations = state === "anonymous" ? anonymousConfirmations + 1 : 0;
+        const confirmations = countAnonymous(state);
         const hasRetainedOwner = state === "anonymous"
           ? authStore.hasPersistedOwner()
           : Boolean(authStore.getCarbon());
+        const glassReachable = state === "anonymous" && hasRetainedOwner
+          ? (await probeApiConnectivity()) === "reachable"
+          : false;
+        if (!alive) return;
         const decision = sessionBootDecision(
           state,
           hasRetainedOwner,
-          anonymousConfirmations,
+          confirmations,
+          glassReachable,
         );
-        if (decision === "enter" || decision === "enter-and-retry") {
+        if (decision === "enter-and-signin-required") {
+          // A retained owner whose credential is provably gone must be able to
+          // reach this form. Bouncing them to /chat would strand them behind a
+          // banner whose only action returns here.
+          noteSessionExpired();
+          setAnonymous(true);
+        } else if (decision === "enter" || decision === "enter-and-retry") {
           router.replace("/chat");
         } else if (decision === "login") {
           if (state === "revoked") authStore.clear("revoked");

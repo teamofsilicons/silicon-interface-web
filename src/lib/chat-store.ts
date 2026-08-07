@@ -110,6 +110,12 @@ export interface ChatCacheRebuildResult {
   deletedEvents: number;
 }
 
+export interface ChatCachePurgeResult {
+  /** Owners that were actually in scope for this purge. */
+  owners: string[];
+  deletedEvents: number;
+}
+
 interface StoredEvent {
   key: string;
   ownerId: string;
@@ -1254,6 +1260,130 @@ export async function rebuildReachableChatCache(
 }
 
 /**
+ * Every store whose primary key is the owner id itself. The two event stores
+ * are keyed `${ownerId}:${eventId}` and are handled by range instead.
+ */
+const OWNER_KEYED_STORES = [
+  SYNC_CHECKPOINTS,
+  SYNC_RECOVERY,
+  PENDING_ACCOUNT_REPLAY,
+  ACCOUNT_PROJECTIONS,
+  INITIAL_SYNC_BUNDLES,
+] as const;
+
+/**
+ * Owners holding durable Glass projections in this browser profile.
+ *
+ * Every owner that has completed a sync has a checkpoint or bundle row, so the
+ * owner-keyed stores are an exact and cheap census — no event scan required.
+ */
+export async function listCachedChatOwners(): Promise<string[]> {
+  if (typeof window === "undefined" || typeof window.indexedDB === "undefined") return [];
+  const db = await openDb();
+  const transaction = db.transaction([...OWNER_KEYED_STORES], "readonly");
+  const owners = new Set<string>();
+  await Promise.all(OWNER_KEYED_STORES.map((storeName) =>
+    new Promise<void>((resolve, reject) => {
+      const request = transaction.objectStore(storeName).getAllKeys();
+      request.onsuccess = () => {
+        for (const key of request.result) {
+          if (typeof key === "string" && key) owners.add(key);
+        }
+        resolve();
+      };
+      request.onerror = () => reject(request.error);
+    })
+  ));
+  return [...owners];
+}
+
+/**
+ * Delete every replaceable Glass projection belonging to the named owners.
+ *
+ * Unlike the pressure pruner this needs no reachability proof: it only ever
+ * runs for an owner whose session has ended, and everything it removes is
+ * re-downloadable on the next sign-in. Drafts, queued sends, attachment blobs,
+ * and voice drafts live in separate databases and are never in scope — losing
+ * those would lose work that has never reached Glass.
+ */
+export async function purgeChatCacheOwners(
+  ownerIds: Iterable<string>,
+): Promise<ChatCachePurgeResult> {
+  const owners = [...new Set([...ownerIds].filter((id) => typeof id === "string" && id))];
+  if (owners.length === 0 || typeof window === "undefined" ||
+    typeof window.indexedDB === "undefined") {
+    return { owners: [], deletedEvents: 0 };
+  }
+  const db = await openDb();
+  const transaction = db.transaction(
+    [...OWNER_KEYED_STORES, EVENTS, DELIVERY_ACKS],
+    "readwrite",
+    { durability: "strict" },
+  );
+  const events = transaction.objectStore(EVENTS);
+  const acknowledgements = transaction.objectStore(DELIVERY_ACKS);
+  let deletedEvents = 0;
+  for (const ownerId of owners) {
+    for (const storeName of OWNER_KEYED_STORES) {
+      transaction.objectStore(storeName).delete(ownerId);
+    }
+  }
+  // Every request is opened before the first await so the transaction cannot
+  // reach an idle turn and auto-commit while owners are still being walked.
+  await Promise.all(owners.flatMap((ownerId) => [
+    // The composite key sorts this owner's rows into a contiguous range; the
+    // stored ownerId is still checked so a colon inside an owner or event id
+    // can never widen the deletion to a neighbouring owner.
+    new Promise<void>((resolve, reject) => {
+      const request = events.openCursor(
+        IDBKeyRange.bound(`${ownerId}:`, `${ownerId}:\uffff`),
+      );
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return resolve();
+        if ((cursor.value as Partial<StoredEvent>).ownerId === ownerId) {
+          cursor.delete();
+          deletedEvents += 1;
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+    }),
+    new Promise<void>((resolve, reject) => {
+      const request = acknowledgements
+        .index(DELIVERY_ACK_OWNER)
+        .openCursor(IDBKeyRange.only(ownerId));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return resolve();
+        cursor.delete();
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+    }),
+  ]));
+  await transactionDone(transaction);
+  return { owners, deletedEvents };
+}
+
+/**
+ * Retire every owner except the one signing in.
+ *
+ * Both cleanup paths that existed before this were single-owner and could only
+ * ever reach the *signed-in* owner, so a signed-out owner's history stayed on
+ * disk permanently: unreadable through the app thanks to owner namespacing, but
+ * still consuming the shared storage quota that the active owner is pruned
+ * against, and still readable outside the app on a shared device.
+ */
+export async function purgeForeignChatCaches(
+  currentOwnerId: string,
+): Promise<ChatCachePurgeResult> {
+  if (!currentOwnerId) return { owners: [], deletedEvents: 0 };
+  const owners = await listCachedChatOwners();
+  return purgeChatCacheOwners(owners.filter((ownerId) => ownerId !== currentOwnerId));
+}
+
+/**
  * Bound authoritative history only when exact API reachability has already been
  * proved and browser storage is under pressure. The latest rows in every room
  * and explicit viewport/anchor identities are never candidates. Unresolved
@@ -1427,4 +1557,26 @@ export async function resolveSyncRecovery(
   store.put(recovered);
   await transactionDone(transaction);
   return recovered;
+}
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  // Cached timelines, checkpoints, and bundles are replaceable Glass
+  // projections, so an authoritative end of session must not leave them
+  // readable on a shared device. This runs for a user-initiated logout and for
+  // a backend revocation alike — both are authoritative, and a stolen device
+  // whose session was revoked remotely is exactly when the history should go.
+  //
+  // Deliberately not in scope: the outbox, drafts, media uploads, and voice
+  // drafts. Those live in separate databases and may still hold work that has
+  // never reached Glass, which no logout may silently destroy.
+  window.addEventListener("silicon-interface:auth-clear", (event) => {
+    const ownerKey = (event as CustomEvent<{ ownerKey?: string | null }>).detail?.ownerKey;
+    if (!ownerKey?.startsWith("carbon:")) return;
+    const ownerId = ownerKey.slice("carbon:".length);
+    if (!ownerId) return;
+    void purgeChatCacheOwners([ownerId]).catch(() => {
+      // Best-effort: a browser that cannot open its cache during logout still
+      // completes the logout. The next sign-in sweeps whatever remains.
+    });
+  });
 }

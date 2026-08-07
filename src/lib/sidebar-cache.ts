@@ -5,8 +5,40 @@ import { normalizeRooms } from "./room-shape";
 import { normalizeTeams } from "./team-shape";
 
 // v3: membership map is keyed by carbon_id/silicon_id (was name/handle in v≤2).
+//
+// Per-slice write times were added inside v3 rather than as a v4. They are
+// purely additive: a payload written before them simply has no recorded write
+// time, which `sliceIsFresh` already treats as expired. Bumping the version
+// would instead have discarded every existing cache outright, costing every
+// current owner the instant room-list paint this cache exists to provide — to
+// re-fetch rosters that the missing timestamp already forces them to re-fetch.
 const VERSION = 3;
 const PREFIX = "silicon-interface:sidebar-cache";
+
+/**
+ * Slices covered by the durable account-sync stream (`room.upsert`,
+ * `room.remove`, `room.notifications`, `room.list_preferences`) are corrected by
+ * cursor, not by age: a room the server never changed is not stale at any age,
+ * and expiring it would only trade a correct instant paint for a spinner.
+ *
+ * Contacts, teams, and team rosters have no delta path in the sync stream at
+ * all — their only correction is a full refetch that has to succeed. Left
+ * untimed they could render a months-old roster after any run of failed
+ * refreshes, styling mentions for people who have since left. Bound them so a
+ * cache that old reports "no data" and the UI waits for the authoritative list
+ * instead of asserting a wrong one.
+ */
+export const ROSTER_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+
+type TimedSlice = "contacts" | "teams" | "teamRosters" | "memberships";
+const TIMED_SLICES: readonly TimedSlice[] = [
+  "contacts",
+  "teams",
+  "teamRosters",
+  // Derived from the same rosters, and just as wrong when they age out: a
+  // direct chat keeps landing in a team the member has already left.
+  "memberships",
+];
 
 interface SidebarCache {
   version: typeof VERSION;
@@ -20,6 +52,8 @@ interface SidebarCache {
   memberships: Record<string, string[]>;
   /** Full team rosters keyed by slug, used to style mentions on first paint. */
   teamRosters: Record<string, TeamMembership[]>;
+  /** Write time per age-bounded slice. Only the written slices advance. */
+  sliceSavedAt: Partial<Record<TimedSlice, number>>;
   savedAt: number;
 }
 
@@ -36,8 +70,21 @@ function empty(ownerId: string): SidebarCache {
     teams: [],
     memberships: {},
     teamRosters: {},
+    sliceSavedAt: {},
     savedAt: Date.now(),
   };
+}
+
+/** A slice with no recorded write time is treated as expired, never as fresh. */
+function sliceIsFresh(
+  cached: SidebarCache,
+  slice: TimedSlice,
+  now = Date.now(),
+): boolean {
+  const savedAt = cached.sliceSavedAt[slice];
+  return typeof savedAt === "number" &&
+    Number.isFinite(savedAt) &&
+    now - savedAt < ROSTER_CACHE_MAX_AGE_MS;
 }
 
 function read(ownerId: string): SidebarCache | null {
@@ -59,6 +106,15 @@ function read(ownerId: string): SidebarCache | null {
     ) {
       return null;
     }
+    const sliceSavedAt: Partial<Record<TimedSlice, number>> = {};
+    const rawSliceSavedAt =
+      parsed.sliceSavedAt && typeof parsed.sliceSavedAt === "object"
+        ? (parsed.sliceSavedAt as Record<string, unknown>)
+        : {};
+    for (const slice of TIMED_SLICES) {
+      const value = rawSliceSavedAt[slice];
+      if (typeof value === "number" && Number.isFinite(value)) sliceSavedAt[slice] = value;
+    }
     return {
       version: VERSION,
       ownerId,
@@ -73,6 +129,7 @@ function read(ownerId: string): SidebarCache | null {
         parsed.teamRosters && typeof parsed.teamRosters === "object"
           ? (parsed.teamRosters as Record<string, TeamMembership[]>)
           : {},
+      sliceSavedAt,
       savedAt: typeof parsed.savedAt === "number" ? parsed.savedAt : Date.now(),
     };
   } catch {
@@ -87,10 +144,20 @@ function write(
   >,
 ) {
   if (typeof window === "undefined" || !ownerId) return;
+  const current = read(ownerId) ?? empty(ownerId);
+  const now = Date.now();
+  // Only slices present in this patch advance. A room-list write must never
+  // renew the roster clock — that is exactly how an untimed cache appears
+  // perpetually fresh while going perpetually stale.
+  const sliceSavedAt = { ...current.sliceSavedAt };
+  for (const slice of TIMED_SLICES) {
+    if (slice in patch) sliceSavedAt[slice] = now;
+  }
   const next: SidebarCache = {
-    ...(read(ownerId) ?? empty(ownerId)),
+    ...current,
     ...patch,
-    savedAt: Date.now(),
+    sliceSavedAt,
+    savedAt: now,
   };
   try {
     window.localStorage.setItem(key(ownerId), JSON.stringify(next));
@@ -121,7 +188,7 @@ export function saveCachedRooms(ownerId: string, rooms: Room[]) {
 
 export function loadCachedContacts(ownerId: string): Contact[] | null {
   const cached = read(ownerId);
-  return cached ? cached.contacts : null;
+  return cached && sliceIsFresh(cached, "contacts") ? cached.contacts : null;
 }
 
 export function saveCachedContacts(ownerId: string, contacts: Contact[]) {
@@ -130,7 +197,7 @@ export function saveCachedContacts(ownerId: string, contacts: Contact[]) {
 
 export function loadCachedTeams(ownerId: string): Team[] | null {
   const cached = read(ownerId);
-  return cached ? cached.teams : null;
+  return cached && sliceIsFresh(cached, "teams") ? cached.teams : null;
 }
 
 export function saveCachedTeams(ownerId: string, teams: Team[]) {
@@ -142,7 +209,7 @@ export function saveCachedTeams(ownerId: string, teams: Team[]) {
 export function loadCachedMemberships(ownerId: string | null): Map<string, Set<string>> | null {
   if (!ownerId) return null;
   const cached = read(ownerId);
-  if (!cached) return null;
+  if (!cached || !sliceIsFresh(cached, "memberships")) return null;
   const entries = Object.entries(cached.memberships);
   if (entries.length === 0) return null;
   const map = new Map<string, Set<string>>();
@@ -168,7 +235,11 @@ export function loadCachedTeamRoster(
 ): TeamMembership[] | null {
   if (!ownerId || !teamSlug) return null;
   const cached = read(ownerId);
-  if (!cached || !Object.prototype.hasOwnProperty.call(cached.teamRosters, teamSlug)) {
+  if (
+    !cached ||
+    !sliceIsFresh(cached, "teamRosters") ||
+    !Object.prototype.hasOwnProperty.call(cached.teamRosters, teamSlug)
+  ) {
     return null;
   }
   const rows = cached.teamRosters[teamSlug];
@@ -183,4 +254,51 @@ export function saveCachedTeamRoster(
   if (!ownerId || !teamSlug) return;
   const current = read(ownerId)?.teamRosters ?? {};
   write(ownerId, { teamRosters: { ...current, [teamSlug]: rows } });
+}
+
+/** Owners holding a sidebar cache in this browser profile. */
+export function listCachedSidebarOwners(): string[] {
+  if (typeof window === "undefined") return [];
+  const owners: string[] = [];
+  try {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const storageKey = window.localStorage.key(index);
+      if (!storageKey?.startsWith(`${PREFIX}:`)) continue;
+      try {
+        owners.push(decodeURIComponent(storageKey.slice(PREFIX.length + 1)));
+      } catch {
+        // A key we cannot decode is not one we wrote; leave it untouched.
+      }
+    }
+  } catch {
+    return [];
+  }
+  return owners;
+}
+
+export function clearCachedSidebar(ownerId: string | null | undefined): void {
+  if (typeof window === "undefined" || !ownerId) return;
+  try {
+    window.localStorage.removeItem(key(ownerId));
+  } catch {
+    /* storage unavailable — nothing retained to clear */
+  }
+}
+
+/** Retire every sidebar cache except the owner signing in. */
+export function purgeForeignSidebarCaches(currentOwnerId: string): string[] {
+  if (!currentOwnerId) return [];
+  const foreign = listCachedSidebarOwners().filter((ownerId) => ownerId !== currentOwnerId);
+  for (const ownerId of foreign) clearCachedSidebar(ownerId);
+  return foreign;
+}
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  // The room list, contacts, and rosters are replaceable Glass projections. An
+  // authoritative end of session must not leave them readable on a shared
+  // device; everything here is re-downloaded on the next sign-in.
+  window.addEventListener("silicon-interface:auth-clear", (event) => {
+    const ownerKey = (event as CustomEvent<{ ownerKey?: string | null }>).detail?.ownerKey;
+    if (ownerKey?.startsWith("carbon:")) clearCachedSidebar(ownerKey.slice("carbon:".length));
+  });
 }

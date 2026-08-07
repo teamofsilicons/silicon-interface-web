@@ -4,6 +4,12 @@ import * as React from "react";
 
 import { identifyCarbon, resetAnalytics } from "./analytics";
 import { env } from "./env";
+import {
+  forgetSessionExpiry,
+  noteSessionExpired,
+  noteSessionRenewed,
+} from "./session-expiry";
+import { clearSessionIssue } from "./session-health";
 import type { AuthSession, Carbon } from "./types";
 import { withWebSessionAuthority } from "./web-session-authority";
 
@@ -189,6 +195,10 @@ export const authStore = {
   setSession(session: AuthSession) {
     explicitlyLoggedOut = false;
     safeSet(EXPLICIT_LOGOUT_KEY, null);
+    clearSessionIssue();
+    // Glass just issued this session, so the next cold boot may route straight
+    // into the app without waiting to ask whether it still can.
+    noteSessionRenewed(session.refresh);
     accessToken = session.access;
     refreshToken = session.refresh ?? null;
     currentCarbon = session.carbon;
@@ -207,6 +217,10 @@ export const authStore = {
     if (source === "automatic" && authStore.wasExplicitlyLoggedOut()) return;
     explicitlyLoggedOut = false;
     if (source === "interactive") safeSet(EXPLICIT_LOGOUT_KEY, null);
+    // Renewed request authority retires any "sign in to sync" prompt, and is
+    // the proof the next boot reads to route itself without a round trip.
+    clearSessionIssue();
+    noteSessionRenewed(refresh);
     accessToken = access;
     refreshToken = refresh ?? null;
     if (carbon) {
@@ -244,8 +258,20 @@ export const authStore = {
   clear(reason: "user" | "revoked" | "expired" = "user") {
     explicitlyLoggedOut = reason === "user";
     if (reason === "user") safeSet(EXPLICIT_LOGOUT_KEY, "1");
+    clearSessionIssue();
+    // An explicit logout already has its own marker and must not also leave an
+    // "expired" record behind to contradict the next sign-in. A revocation is
+    // exactly the positive evidence the boot path routes on.
+    if (reason === "user") forgetSessionExpiry();
+    else noteSessionExpired();
+    // getCarbon() falls back to the persisted identity, so an expired session
+    // whose in-memory profile is gone still resolves the owner to clear.
     const current = authStore.getCarbon();
     if (typeof window !== "undefined") {
+      // Listeners clear this owner's replaceable local state. Both reasons are
+      // authoritative ends of session, so neither may leave Glass projections
+      // readable on a shared device; listeners holding work that has never
+      // reached Glass (outbox, drafts) deliberately keep it either way.
       window.dispatchEvent(
         new CustomEvent("silicon-interface:auth-clear", {
           detail: { ownerKey: current?.carbon_id ? `carbon:${current.carbon_id}` : null },

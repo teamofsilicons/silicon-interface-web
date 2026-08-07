@@ -107,7 +107,20 @@ test("web credentials stay memory-only and legacy browser copies are purged", ()
   assert.equal(authStore.getAccess(), "memory-access");
   assert.equal(authStore.getRefresh(), "memory-refresh");
   assert.equal(authStore.getSiliconKey(), "memory-silicon-key");
-  assert.deepEqual([...localStorage.values.keys()], []);
+  // The only thing a session may leave on disk is the record of *when* it can
+  // no longer be renewed. It is timestamps and nothing else — a record that
+  // carried the token whose lifetime it describes would reintroduce precisely
+  // the persisted credential purgeStoredCredentials() exists to remove.
+  assert.deepEqual([...localStorage.values.keys()], ["silicon-interface:session-expiry"]);
+  const rawExpiry = localStorage.getItem("silicon-interface:session-expiry");
+  for (const secret of ["memory-access", "memory-refresh", "memory-silicon-key"]) {
+    assert.doesNotMatch(rawExpiry, new RegExp(secret));
+  }
+  const expiry = JSON.parse(rawExpiry);
+  assert.deepEqual(Object.keys(expiry).sort(), ["expiredAt", "expiresAt", "renewedAt"]);
+  for (const value of Object.values(expiry)) {
+    assert.ok(value === null || typeof value === "number");
+  }
   resetAuthMemory();
   if (previousWindow === undefined) delete globalThis.window;
   else globalThis.window = previousWindow;

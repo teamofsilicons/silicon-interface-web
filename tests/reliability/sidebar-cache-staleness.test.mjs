@@ -68,12 +68,15 @@ test("memberships age out with the rosters they are derived from", () => {
 
 test("a cache written before per-slice times is treated as expired, not fresh", () => {
   reset();
-  // A v4 payload with no sliceSavedAt at all must never read as fresh; an
-  // unknown write time is exactly the case that needs re-fetching.
+  // Exactly what every existing browser holds today: a v3 payload with no
+  // sliceSavedAt at all. It must never read as fresh — an unknown write time is
+  // the case that most needs re-fetching — but the room list it already holds
+  // must survive, which is the whole reason this landed inside v3 instead of
+  // bumping the version and discarding every cache in the wild.
   storage.setItem(
     `silicon-interface:sidebar-cache:${encodeURIComponent("owner")}`,
     JSON.stringify({
-      version: 4,
+      version: 3,
       ownerId: "owner",
       rooms: [ROOM],
       contacts: [{ handle: "a" }],

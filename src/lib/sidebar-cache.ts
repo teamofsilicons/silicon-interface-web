@@ -5,9 +5,14 @@ import { normalizeRooms } from "./room-shape";
 import { normalizeTeams } from "./team-shape";
 
 // v3: membership map is keyed by carbon_id/silicon_id (was name/handle in v≤2).
-// v4: per-slice write times, so an unbounded-staleness slice can expire without
-//     a room-list write pretending the roster was just refreshed.
-const VERSION = 4;
+//
+// Per-slice write times were added inside v3 rather than as a v4. They are
+// purely additive: a payload written before them simply has no recorded write
+// time, which `sliceIsFresh` already treats as expired. Bumping the version
+// would instead have discarded every existing cache outright, costing every
+// current owner the instant room-list paint this cache exists to provide — to
+// re-fetch rosters that the missing timestamp already forces them to re-fetch.
+const VERSION = 3;
 const PREFIX = "silicon-interface:sidebar-cache";
 
 /**
